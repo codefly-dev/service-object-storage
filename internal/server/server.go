@@ -1,0 +1,231 @@
+// Package server implements the ObjectStorage gRPC service over a
+// backend.Backend (typically a cache-decorated one). It maps the proto surface
+// to the backend contract, streams Get/Put, and normalizes errors to gRPC codes.
+package server
+
+import (
+	"context"
+	"errors"
+	"io"
+	"time"
+
+	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/serr"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// chunkSize bounds each streamed data frame on Get.
+const chunkSize = 256 * 1024
+
+// Server is the ObjectStorage service implementation.
+type Server struct {
+	storagev0.UnimplementedObjectStorageServer
+	be backend.Backend
+}
+
+// New builds a Server over be.
+func New(be backend.Backend) *Server { return &Server{be: be} }
+
+// Stat returns object metadata, honoring conditional headers by comparing the
+// fetched ETag (NotModified is carried in the header, not as an error).
+func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storagev0.GetHeader, error) {
+	info, err := s.be.Stat(ctx, req.GetKey(), req.GetVersionId())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	if inm := req.GetIfNoneMatch(); inm != "" && inm == info.ETag {
+		return &storagev0.GetHeader{Info: toProtoInfo(info), NotModified: true}, nil
+	}
+	if im := req.GetIfMatch(); im != "" && im != info.ETag {
+		return nil, status.Error(codes.FailedPrecondition, "if-match: etag mismatch")
+	}
+	return &storagev0.GetHeader{Info: toProtoInfo(info)}, nil
+}
+
+// Get streams an object: a header frame (info / not_modified) followed by data
+// frames. This is the proxy byte path; large objects that should skip the proxy
+// use the Presign RPC instead.
+func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_GetServer) error {
+	res, err := s.be.Get(stream.Context(), req.GetKey(), toBackendGetOptions(req))
+	if err != nil {
+		return toStatus(err)
+	}
+	if res.NotModified {
+		return stream.Send(&storagev0.GetResponse{
+			Kind: &storagev0.GetResponse_Header{Header: &storagev0.GetHeader{
+				Info: toProtoInfo(&res.Info), NotModified: true,
+			}},
+		})
+	}
+	defer res.Body.Close()
+
+	if err := stream.Send(&storagev0.GetResponse{
+		Kind: &storagev0.GetResponse_Header{Header: &storagev0.GetHeader{Info: toProtoInfo(&res.Info)}},
+	}); err != nil {
+		return err
+	}
+
+	buf := make([]byte, chunkSize)
+	for {
+		n, rerr := res.Body.Read(buf)
+		if n > 0 {
+			if sendErr := stream.Send(&storagev0.GetResponse{
+				Kind: &storagev0.GetResponse_Data{Data: buf[:n]},
+			}); sendErr != nil {
+				return sendErr
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return toStatus(serrWrapInternal(rerr))
+		}
+	}
+}
+
+// Put assembles a streamed upload and writes it, hiding multipart in the backend.
+func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return toStatus(serrInvalid("put: empty stream"))
+	}
+	header := first.GetHeader()
+	if header == nil {
+		return toStatus(serrInvalid("put: first message must be the header"))
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		var werr error
+		for {
+			msg, rerr := stream.Recv()
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				werr = rerr
+				break
+			}
+			if d := msg.GetData(); len(d) > 0 {
+				if _, e := pw.Write(d); e != nil {
+					werr = e
+					break
+				}
+			}
+		}
+		pw.CloseWithError(werr)
+	}()
+
+	opts := backend.PutOptions{
+		ContentType:     header.GetContentType(),
+		ContentEncoding: header.GetContentEncoding(),
+		CacheControl:    header.GetCacheControl(),
+		UserMetadata:    header.GetUserMetadata(),
+		IfNoneMatch:     header.GetIfNoneMatch(),
+		IfMatch:         header.GetIfMatch(),
+		Size:            header.GetTotalSize(),
+	}
+	res, err := s.be.Put(stream.Context(), header.GetKey(), pr, opts)
+	if err != nil {
+		pr.CloseWithError(err)
+		return toStatus(err)
+	}
+	return stream.SendAndClose(&storagev0.PutResult{
+		Etag:       res.ETag,
+		VersionId:  res.VersionID,
+		Generation: res.Generation,
+	})
+}
+
+func (s *Server) Delete(ctx context.Context, req *storagev0.DeleteRequest) (*storagev0.DeleteResult, error) {
+	err := s.be.Delete(ctx, req.GetKey(), backend.DeleteOptions{
+		VersionID: req.GetVersionId(),
+		IfMatch:   req.GetIfMatch(),
+	})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &storagev0.DeleteResult{}, nil
+}
+
+func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyRequest) (*storagev0.DeleteManyResult, error) {
+	entries, err := s.be.DeleteMany(ctx, req.GetKeys())
+	if err != nil && len(entries) == 0 {
+		return nil, toStatus(err)
+	}
+	out := &storagev0.DeleteManyResult{Entries: make([]*storagev0.DeleteEntry, 0, len(entries))}
+	for _, e := range entries {
+		out.Entries = append(out.Entries, &storagev0.DeleteEntry{Key: e.Key, Error: e.Error})
+	}
+	return out, nil
+}
+
+func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storagev0.ListResult, error) {
+	res, err := s.be.List(ctx, backend.ListOptions{
+		Prefix:    req.GetPrefix(),
+		Delimiter: req.GetDelimiter(),
+		PageToken: req.GetPageToken(),
+		Limit:     req.GetLimit(),
+	})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	out := &storagev0.ListResult{
+		CommonPrefixes: res.CommonPrefixes,
+		NextPageToken:  res.NextPageToken,
+		Objects:        make([]*storagev0.ObjectInfo, 0, len(res.Objects)),
+	}
+	for i := range res.Objects {
+		out.Objects = append(out.Objects, toProtoInfo(&res.Objects[i]))
+	}
+	return out, nil
+}
+
+func (s *Server) Copy(ctx context.Context, req *storagev0.CopyRequest) (*storagev0.CopyResult, error) {
+	res, err := s.be.Copy(ctx, req.GetSourceKey(), req.GetDestKey(), backend.CopyOptions{
+		IfNoneMatch: req.GetIfNoneMatch(),
+	})
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &storagev0.CopyResult{Etag: res.ETag, VersionId: res.VersionID}, nil
+}
+
+func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*storagev0.PresignResult, error) {
+	exp := time.Duration(req.GetExpirySeconds()) * time.Second
+	res, err := s.be.Presign(ctx, req.GetKey(), presignMethodFromProto(req.GetMethod()), exp)
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &storagev0.PresignResult{
+		Method:          presignMethodToProto(res.Method),
+		Url:             res.URL,
+		Headers:         res.Headers,
+		ExpiresAtUnixMs: unixMS(res.ExpiresAt),
+	}, nil
+}
+
+func (s *Server) Capabilities(ctx context.Context, _ *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
+	return toProtoCapabilities(s.be.Capabilities()), nil
+}
+
+func (s *Server) Native(ctx context.Context, req *storagev0.NativeRequest) (*storagev0.NativeResult, error) {
+	values, err := s.be.Native(ctx, req.GetVerb(), req.GetParams())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &storagev0.NativeResult{Values: values}, nil
+}
+
+func serrWrapInternal(err error) error {
+	var e *serr.Error
+	if errors.As(err, &e) {
+		return err
+	}
+	return serr.Wrap(serr.Internal, "stream", err)
+}
+
+func serrInvalid(msg string) error { return serr.New(serr.InvalidArgument, "request", msg) }

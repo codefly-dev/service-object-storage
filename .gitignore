@@ -1,0 +1,13 @@
+# Binaries
+/bin/
+/dist/
+service-object-storage
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# Local env
+.env
+*.local

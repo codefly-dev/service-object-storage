@@ -1,0 +1,232 @@
+syntax = "proto3";
+
+// Package codefly.storage.v0 is the generic object-storage data plane: one
+// uniform API a client speaks, that a single server translates to S3, GCS,
+// Azure Blob, or MinIO behind it. No provider is ever named in this API — the
+// client never links a cloud SDK. The surface is the honest intersection the
+// industry converged on (OpenDAL / gocloud.dev/blob / object_store); anything
+// backend-specific lives behind Native().
+package codefly.storage.v0;
+
+option go_package = "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0;storagev0";
+
+// ObjectInfo is the object's metadata — and every field a caching layer needs.
+// ETag is an OPAQUE strong validator, never a content hash (multipart/SSE ETags
+// are not MD5). weak_etag marks a validator the cache must not use to stitch
+// ranges. version_id (S3/Azure) and generation (GCS) make version-pinned reads
+// immutable and cacheable forever.
+message ObjectInfo {
+  string key = 1;
+  string etag = 2;
+  bool weak_etag = 3;
+  int64 size = 4;
+  // last_modified as Unix milliseconds (0 = unknown).
+  int64 last_modified_unix_ms = 5;
+  string version_id = 6;
+  int64 generation = 7;
+  int64 metageneration = 8;
+  string content_type = 9;
+  string content_encoding = 10;
+  string cache_control = 11;
+  map<string, string> user_metadata = 12;
+}
+
+// ByteRange is a half-open [offset, offset+length) window; length <= 0 means
+// "to end of object".
+message ByteRange {
+  int64 offset = 1;
+  int64 length = 2;
+}
+
+// CacheStatus reports how the gateway served a read, for observability. A
+// presigned large-object read never reaches the cache (BYPASS_PRESIGN).
+enum CacheStatus {
+  CACHE_STATUS_UNSPECIFIED = 0;
+  CACHE_STATUS_MISS = 1;
+  CACHE_STATUS_HIT_L1 = 2;
+  CACHE_STATUS_HIT_L2 = 3;
+  CACHE_STATUS_REVALIDATED = 4;
+  CACHE_STATUS_NEGATIVE = 5;
+  CACHE_STATUS_NO_STORE = 6;
+}
+
+message StatRequest {
+  string key = 1;
+  string version_id = 2;
+  // Conditional stat: empty means unconditional.
+  string if_none_match = 3;
+  string if_match = 4;
+}
+
+message GetRequest {
+  string key = 1;
+  string version_id = 2;
+  ByteRange range = 3;
+  string if_none_match = 4;
+  string if_match = 5;
+  int64 if_modified_since_unix_ms = 6;
+}
+
+// GetResponse streams: the first message carries the header (info + not_modified
+// + cache_status), every following message carries a data chunk.
+message GetResponse {
+  oneof kind {
+    GetHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message GetHeader {
+  ObjectInfo info = 1;
+  // not_modified is true when a conditional read matched — no data follows.
+  bool not_modified = 2;
+  CacheStatus cache_status = 3;
+}
+
+// PutRequest streams: the first message MUST be the header, every following
+// message a data chunk. The server transparently uses multipart when needed;
+// the client never sees parts.
+message PutRequest {
+  oneof kind {
+    PutHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message PutHeader {
+  string key = 1;
+  string content_type = 2;
+  string content_encoding = 3;
+  string cache_control = 4;
+  map<string, string> user_metadata = 5;
+  // if_none_match = "*" means create-if-absent (fails if the object exists).
+  string if_none_match = 6;
+  // if_match = <etag> means overwrite-if-unchanged (compare-and-swap).
+  string if_match = 7;
+  // total_size is a hint (-1 = unknown / streaming).
+  int64 total_size = 8;
+}
+
+message PutResult {
+  string etag = 1;
+  string version_id = 2;
+  int64 generation = 3;
+}
+
+message DeleteRequest {
+  string key = 1;
+  string version_id = 2;
+  string if_match = 3;
+}
+
+message DeleteResult {}
+
+message DeleteManyRequest {
+  repeated string keys = 1;
+}
+
+// DeleteManyResult reports per-key outcomes — batch delete is not atomic on any
+// backend, so partial failure is normal and surfaced per key.
+message DeleteManyResult {
+  repeated DeleteEntry entries = 1;
+}
+
+message DeleteEntry {
+  string key = 1;
+  // error is empty on success.
+  string error = 2;
+}
+
+message ListRequest {
+  string prefix = 1;
+  string delimiter = 2;
+  string page_token = 3;
+  int32 limit = 4;
+}
+
+// ListResult — objects plus synthetic common_prefixes ("directories"). Ordering
+// is NOT guaranteed. page_token is opaque; empty next_page_token ends iteration.
+message ListResult {
+  repeated ObjectInfo objects = 1;
+  repeated string common_prefixes = 2;
+  string next_page_token = 3;
+}
+
+message CopyRequest {
+  string source_key = 1;
+  string dest_key = 2;
+  // if_none_match = "*" means copy-only-if-dest-absent.
+  string if_none_match = 3;
+}
+
+message CopyResult {
+  string etag = 1;
+  string version_id = 2;
+}
+
+enum PresignMethod {
+  PRESIGN_METHOD_UNSPECIFIED = 0;
+  PRESIGN_METHOD_GET = 1;
+  PRESIGN_METHOD_PUT = 2;
+}
+
+message PresignRequest {
+  string key = 1;
+  PresignMethod method = 2;
+  int64 expiry_seconds = 3;
+}
+
+// PresignResult is a time-limited URL the client fetches directly over plain
+// HTTP — no cloud SDK. The gateway clamps expiry to the backend maximum.
+message PresignResult {
+  PresignMethod method = 1;
+  string url = 2;
+  map<string, string> headers = 3;
+  int64 expires_at_unix_ms = 4;
+}
+
+message CapabilitiesRequest {}
+
+// Capabilities is the OpenDAL-style introspection surface: a client asks what
+// this backend honors before it calls, instead of discovering by failure.
+message BackendCapabilities {
+  string backend = 1;
+  bool conditional_put = 2;
+  bool conditional_copy = 3;
+  bool atomic_rename = 4;
+  bool versions = 5;
+  bool tags = 6;
+  bool presign = 7;
+  int64 presign_max_expiry_seconds = 8;
+  bool presign_ambient_creds = 9;
+  int32 batch_delete_max = 10;
+  repeated string native_verbs = 11;
+}
+
+message NativeRequest {
+  string verb = 1;
+  map<string, string> params = 2;
+}
+
+// NativeResult is the escape hatch for backend-specific operations (ACLs, tiers,
+// object-lock, leases, …) that the portable surface deliberately excludes.
+message NativeResult {
+  map<string, string> values = 1;
+}
+
+// ObjectStorage is the generic data plane. Errors are returned as gRPC status
+// codes normalized across backends: NOT_FOUND, ALREADY_EXISTS,
+// FAILED_PRECONDITION (conditional/CAS), UNIMPLEMENTED (unsupported),
+// PERMISSION_DENIED, RESOURCE_EXHAUSTED (throttled), INTERNAL.
+service ObjectStorage {
+  rpc Stat(StatRequest) returns (GetHeader);
+  rpc Get(GetRequest) returns (stream GetResponse);
+  rpc Put(stream PutRequest) returns (PutResult);
+  rpc Delete(DeleteRequest) returns (DeleteResult);
+  rpc DeleteMany(DeleteManyRequest) returns (DeleteManyResult);
+  rpc List(ListRequest) returns (ListResult);
+  rpc Copy(CopyRequest) returns (CopyResult);
+  rpc Presign(PresignRequest) returns (PresignResult);
+  rpc Capabilities(CapabilitiesRequest) returns (BackendCapabilities);
+  rpc Native(NativeRequest) returns (NativeResult);
+}
