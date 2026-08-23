@@ -7,15 +7,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
@@ -32,6 +33,14 @@ import (
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/s3"
 )
 
+// shutdownGrace bounds how long a graceful stop waits for in-flight RPCs before
+// the server is forced down. Object streams (Get/Put) can otherwise keep
+// GracefulStop blocked indefinitely, leaving the process un-interruptible.
+const shutdownGrace = 15 * time.Second
+
+// redisPingTimeout bounds the startup connectivity check for the shared cache.
+const redisPingTimeout = 5 * time.Second
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("service-object-storage: %v", err)
@@ -45,50 +54,83 @@ func run() error {
 	}
 
 	ctx := context.Background()
-	be, err := backend.Open(ctx, cfg.Backend)
+	store, rdb, err := openStore(ctx, cfg)
 	if err != nil {
 		return err
 	}
-
-	store := be
-	var rdb redis.UniversalClient
-	if cfg.Cache.Enabled {
-		if cfg.Cache.RedisAddr != "" {
-			rdb = redis.NewClient(&redis.Options{
-				Addr:     cfg.Cache.RedisAddr,
-				Password: cfg.Cache.RedisPassword,
-				DB:       cfg.Cache.RedisDB,
-			})
+	defer func() {
+		_ = store.Close()
+		if rdb != nil {
+			_ = rdb.Close()
 		}
-		store = cache.New(be, rdb, cfg.Cache.Options)
-	}
+	}()
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		store.Close()
 		return err
 	}
 
 	grpcServer := grpc.NewServer()
 	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store))
-	reflection.Register(grpcServer)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sig
 		log.Println("shutting down")
-		grpcServer.GracefulStop()
+		gracefulStop(grpcServer, shutdownGrace)
 	}()
 
 	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s)",
 		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket)
-	serveErr := grpcServer.Serve(lis)
+	return grpcServer.Serve(lis)
+}
 
-	// store.Close closes the cache and, through it, the backend; rdb is owned here.
-	store.Close()
-	if rdb != nil {
-		rdb.Close()
+// openStore opens the configured backend and, when caching is enabled, wraps it
+// in the cache. A configured shared-cache (Redis) tier is verified at startup:
+// a misconfigured address must fail loudly here, because the cache silently
+// swallows Redis errors at request time — an unreachable tier would otherwise
+// degrade to L1-only with no signal, silently dropping cross-replica
+// invalidation. The returned redis client (if any) is owned by the caller.
+func openStore(ctx context.Context, cfg config.Config) (backend.Backend, redis.UniversalClient, error) {
+	be, err := backend.Open(ctx, cfg.Backend)
+	if err != nil {
+		return nil, nil, err
 	}
-	return serveErr
+	if !cfg.Cache.Enabled {
+		return be, nil, nil
+	}
+
+	var rdb redis.UniversalClient
+	if cfg.Cache.RedisAddr != "" {
+		rdb = redis.NewClient(&redis.Options{
+			Addr:     cfg.Cache.RedisAddr,
+			Password: cfg.Cache.RedisPassword,
+			DB:       cfg.Cache.RedisDB,
+		})
+		pctx, cancel := context.WithTimeout(ctx, redisPingTimeout)
+		defer cancel()
+		if err := rdb.Ping(pctx).Err(); err != nil {
+			_ = rdb.Close()
+			_ = be.Close()
+			return nil, nil, fmt.Errorf("shared cache unreachable at %s: %w", cfg.Cache.RedisAddr, err)
+		}
+	}
+	return cache.New(be, rdb, cfg.Cache.Options), rdb, nil
+}
+
+// gracefulStop drains in-flight RPCs, but escalates to a hard Stop if they do
+// not finish within grace, so a stuck stream can never make shutdown hang.
+func gracefulStop(server *grpc.Server, grace time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(grace):
+		server.Stop()
+		<-done
+	}
 }
