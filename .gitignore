@@ -1,7 +1,7 @@
 # Binaries
 /bin/
 /dist/
-service-object-storage
+/service-object-storage
 
 # Go
 *.test
