@@ -30,17 +30,20 @@ type object struct {
 
 // Backend is an in-memory object store.
 type Backend struct {
-	mu   sync.RWMutex
-	objs map[string]object
-	now  func() time.Time
+	mu     sync.RWMutex
+	objs   map[string]object
+	bucket string
+	now    func() time.Time
 }
 
 // New constructs an empty in-memory backend.
-func New(_ context.Context, _ backend.Config) (backend.Backend, error) {
-	return &Backend{objs: map[string]object{}, now: time.Now}, nil
+func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
+	return &Backend{objs: map[string]object{}, bucket: cfg.Bucket, now: time.Now}, nil
 }
 
 func (b *Backend) Name() string { return "mem" }
+
+func (b *Backend) Bucket() string { return b.bucket }
 
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{

@@ -88,6 +88,9 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "azure" }
 
+// Bucket reports the container this backend is bound to.
+func (b *Backend) Bucket() string { return b.container }
+
 // Capabilities reports the feature set this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{
@@ -96,7 +99,7 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		ConditionalCopy:     true,
 		AtomicRename:        false,
 		Versions:            true,
-		Tags:                true,
+		Tags:                false,
 		Presign:             b.sharedKey != nil,
 		PresignMaxExpiry:    maxPresignExpiry,
 		PresignAmbientCreds: false,

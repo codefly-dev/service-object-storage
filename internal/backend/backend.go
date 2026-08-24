@@ -163,6 +163,10 @@ type Capabilities struct {
 type Backend interface {
 	// Name is the backend kind ("s3", "gcs", "azure", "minio").
 	Name() string
+	// Bucket is the backend bucket/container this instance is bound to. The
+	// cache folds it into every cache key so replicas fronting different
+	// buckets that share one Redis tier never collide.
+	Bucket() string
 	// Capabilities reports what this backend honors.
 	Capabilities() Capabilities
 

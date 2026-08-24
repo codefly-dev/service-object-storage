@@ -71,6 +71,9 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "gcs" }
 
+// Bucket reports the bucket this backend is bound to.
+func (b *Backend) Bucket() string { return b.cfg.Bucket }
+
 // Capabilities reports the GCS feature set.
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{

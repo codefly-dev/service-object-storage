@@ -139,6 +139,35 @@ func TestL1OnlyNoRedis(t *testing.T) {
 	require.Equal(t, int64(1), cnt.statCalls.Load())
 }
 
+func TestBucketScopedKeys(t *testing.T) {
+	rdb := newRedis(t) // one shared Redis tier for two different-bucket gateways
+
+	beA, err := mem.New(context.Background(), backend.Config{Bucket: "bucket-a"})
+	require.NoError(t, err)
+	beB, err := mem.New(context.Background(), backend.Config{Bucket: "bucket-b"})
+	require.NoError(t, err)
+
+	ca := cache.New(beA, rdb, cache.Options{})
+	cb := cache.New(beB, rdb, cache.Options{})
+
+	// Same key and same backend name ("mem"), different buckets and content.
+	putRaw(t, beA, "k", []byte("aaaa"))      // size 4
+	putRaw(t, beB, "k", []byte("bbbbbbbbb")) // size 9
+
+	ia, err := ca.Stat(context.Background(), "k", "")
+	require.NoError(t, err)
+	require.Equal(t, int64(4), ia.Size)
+
+	ib, err := cb.Stat(context.Background(), "k", "")
+	require.NoError(t, err)
+	require.Equal(t, int64(9), ib.Size, "a different-bucket gateway must not read the other bucket's cached metadata")
+
+	// Re-reading bucket-a after bucket-b populated the shared tier still yields A.
+	ia2, err := ca.Stat(context.Background(), "k", "")
+	require.NoError(t, err)
+	require.Equal(t, int64(4), ia2.Size)
+}
+
 func TestLargeObjectNotByteCached(t *testing.T) {
 	cnt := newCounting(t)
 	c := cache.New(cnt, nil, cache.Options{MaxCachedObjectBytes: 4})

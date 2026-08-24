@@ -86,9 +86,10 @@ type metaEntry struct {
 // Caching decorates a backend.Backend with the two-tier cache. It implements
 // backend.Backend, so it is a drop-in for the server.
 type Caching struct {
-	be   backend.Backend
-	rdb  redis.UniversalClient // may be nil (L1-only)
-	name string
+	be     backend.Backend
+	rdb    redis.UniversalClient // may be nil (L1-only)
+	name   string
+	bucket string
 
 	metaL1  *lru.LRU[string, metaEntry]
 	bytesL1 *lru.LRU[string, []byte]
@@ -106,6 +107,7 @@ func New(be backend.Backend, rdb redis.UniversalClient, opts Options) *Caching {
 		be:      be,
 		rdb:     rdb,
 		name:    be.Name(),
+		bucket:  be.Bucket(),
 		metaL1:  lru.NewLRU[string, metaEntry](opts.L1MetaEntries, nil, opts.MetaTTL),
 		bytesL1: lru.NewLRU[string, []byte](opts.L1BytesEntries, nil, opts.BytesTTL),
 		opts:    opts,
@@ -123,6 +125,7 @@ func (c *Caching) now() time.Time { return c.nowFn() }
 // --- pass-through metadata ---
 
 func (c *Caching) Name() string                       { return c.be.Name() }
+func (c *Caching) Bucket() string                     { return c.be.Bucket() }
 func (c *Caching) Capabilities() backend.Capabilities { return c.be.Capabilities() }
 
 func (c *Caching) List(ctx context.Context, opts backend.ListOptions) (*backend.ListResult, error) {
@@ -157,7 +160,7 @@ func (c *Caching) Stat(ctx context.Context, key, versionID string) (*backend.Obj
 }
 
 func (c *Caching) statCached(ctx context.Context, key, versionID string) (*backend.ObjectInfo, error) {
-	mk := metaKey(c.opts.Namespace, c.name, key, versionID)
+	mk := metaKey(c.opts.Namespace, c.name, c.bucket, key, versionID)
 
 	if e, ok := c.metaL1.Get(mk); ok && c.now().Before(e.Exp) {
 		return infoOrNotFound(e)
@@ -236,7 +239,7 @@ func (c *Caching) Get(ctx context.Context, key string, opts backend.GetOptions) 
 }
 
 func (c *Caching) bytesCached(ctx context.Context, key, versionID, etag string) ([]byte, error) {
-	bk := bytesKey(c.opts.Namespace, c.name, etag)
+	bk := bytesKey(c.opts.Namespace, c.name, c.bucket, etag)
 
 	if b, ok := c.bytesL1.Get(bk); ok {
 		return b, nil
@@ -314,14 +317,14 @@ func (c *Caching) Copy(ctx context.Context, srcKey, dstKey string, opts backend.
 func (c *Caching) invalidate(ctx context.Context, key string) {
 	c.evictLocal(key)
 	if c.rdb != nil {
-		mk := metaKey(c.opts.Namespace, c.name, key, "")
+		mk := metaKey(c.opts.Namespace, c.name, c.bucket, key, "")
 		_ = c.rdb.Del(ctx, mk).Err()
 		_ = c.rdb.Publish(ctx, invalidationChannel, c.name+"\x00"+key).Err()
 	}
 }
 
 func (c *Caching) evictLocal(key string) {
-	c.metaL1.Remove(metaKey(c.opts.Namespace, c.name, key, ""))
+	c.metaL1.Remove(metaKey(c.opts.Namespace, c.name, c.bucket, key, ""))
 }
 
 func (c *Caching) subscribeInvalidations() {
