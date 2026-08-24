@@ -19,7 +19,7 @@ func TestHandleInvalidationBucketScoped(t *testing.T) {
 	require.NoError(t, err)
 	c := New(be, nil, Options{}) // L1-only; we drive handleInvalidation directly
 
-	mk := metaKey(c.opts.Namespace, c.name, c.bucket, "k", "")
+	mk := metaKey(c.opts.Namespace, c.name, c.identity, "k", "")
 	c.metaL1.Add(mk, metaEntry{Info: &backend.ObjectInfo{Key: "k"}, Exp: c.now().Add(time.Hour)})
 
 	// A same backend name but different bucket must be ignored.

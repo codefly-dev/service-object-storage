@@ -93,10 +93,10 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "s3" }
 
-// Bucket reports a globally unique identity for this bucket. Real S3 bucket
+// Identity reports a globally unique identifier for this bucket. Real S3 bucket
 // names are globally unique, but an S3-compatible service reached via a custom
 // endpoint is not, so the endpoint disambiguates when set.
-func (b *Backend) Bucket() string {
+func (b *Backend) Identity() string {
 	if b.endpoint != "" {
 		return b.endpoint + "/" + b.bucket
 	}

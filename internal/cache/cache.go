@@ -86,10 +86,10 @@ type metaEntry struct {
 // Caching decorates a backend.Backend with the two-tier cache. It implements
 // backend.Backend, so it is a drop-in for the server.
 type Caching struct {
-	be     backend.Backend
-	rdb    redis.UniversalClient // may be nil (L1-only)
-	name   string
-	bucket string
+	be       backend.Backend
+	rdb      redis.UniversalClient // may be nil (L1-only)
+	name     string
+	identity string
 
 	metaL1  *lru.LRU[string, metaEntry]
 	bytesL1 *lru.LRU[string, []byte]
@@ -104,15 +104,15 @@ type Caching struct {
 func New(be backend.Backend, rdb redis.UniversalClient, opts Options) *Caching {
 	opts.withDefaults()
 	c := &Caching{
-		be:      be,
-		rdb:     rdb,
-		name:    be.Name(),
-		bucket:  be.Bucket(),
-		metaL1:  lru.NewLRU[string, metaEntry](opts.L1MetaEntries, nil, opts.MetaTTL),
-		bytesL1: lru.NewLRU[string, []byte](opts.L1BytesEntries, nil, opts.BytesTTL),
-		opts:    opts,
-		stop:    make(chan struct{}),
-		nowFn:   time.Now,
+		be:       be,
+		rdb:      rdb,
+		name:     be.Name(),
+		identity: be.Identity(),
+		metaL1:   lru.NewLRU[string, metaEntry](opts.L1MetaEntries, nil, opts.MetaTTL),
+		bytesL1:  lru.NewLRU[string, []byte](opts.L1BytesEntries, nil, opts.BytesTTL),
+		opts:     opts,
+		stop:     make(chan struct{}),
+		nowFn:    time.Now,
 	}
 	if rdb != nil {
 		go c.subscribeInvalidations()
@@ -125,7 +125,7 @@ func (c *Caching) now() time.Time { return c.nowFn() }
 // --- pass-through metadata ---
 
 func (c *Caching) Name() string                       { return c.be.Name() }
-func (c *Caching) Bucket() string                     { return c.be.Bucket() }
+func (c *Caching) Identity() string                   { return c.be.Identity() }
 func (c *Caching) Capabilities() backend.Capabilities { return c.be.Capabilities() }
 
 func (c *Caching) List(ctx context.Context, opts backend.ListOptions) (*backend.ListResult, error) {
@@ -160,7 +160,7 @@ func (c *Caching) Stat(ctx context.Context, key, versionID string) (*backend.Obj
 }
 
 func (c *Caching) statCached(ctx context.Context, key, versionID string) (*backend.ObjectInfo, error) {
-	mk := metaKey(c.opts.Namespace, c.name, c.bucket, key, versionID)
+	mk := metaKey(c.opts.Namespace, c.name, c.identity, key, versionID)
 
 	if e, ok := c.metaL1.Get(mk); ok && c.now().Before(e.Exp) {
 		return infoOrNotFound(e)
@@ -239,7 +239,7 @@ func (c *Caching) Get(ctx context.Context, key string, opts backend.GetOptions) 
 }
 
 func (c *Caching) bytesCached(ctx context.Context, key, versionID, etag string) ([]byte, error) {
-	bk := bytesKey(c.opts.Namespace, c.name, c.bucket, etag)
+	bk := bytesKey(c.opts.Namespace, c.name, c.identity, etag)
 
 	if b, ok := c.bytesL1.Get(bk); ok {
 		return b, nil
@@ -317,14 +317,14 @@ func (c *Caching) Copy(ctx context.Context, srcKey, dstKey string, opts backend.
 func (c *Caching) invalidate(ctx context.Context, key string) {
 	c.evictLocal(key)
 	if c.rdb != nil {
-		mk := metaKey(c.opts.Namespace, c.name, c.bucket, key, "")
+		mk := metaKey(c.opts.Namespace, c.name, c.identity, key, "")
 		_ = c.rdb.Del(ctx, mk).Err()
-		_ = c.rdb.Publish(ctx, invalidationChannel, c.name+"\x00"+c.bucket+"\x00"+key).Err()
+		_ = c.rdb.Publish(ctx, invalidationChannel, c.name+"\x00"+c.identity+"\x00"+key).Err()
 	}
 }
 
 func (c *Caching) evictLocal(key string) {
-	c.metaL1.Remove(metaKey(c.opts.Namespace, c.name, c.bucket, key, ""))
+	c.metaL1.Remove(metaKey(c.opts.Namespace, c.name, c.identity, key, ""))
 }
 
 func (c *Caching) subscribeInvalidations() {
@@ -346,15 +346,15 @@ func (c *Caching) subscribeInvalidations() {
 }
 
 // handleInvalidation evicts the local entry named by a cross-replica message,
-// but only when both the backend and the bucket match: a write in another
-// bucket that happens to share this key name must not evict our entry.
+// but only when both the backend and the identity match: a write to a different
+// location that happens to share this key name must not evict our entry.
 func (c *Caching) handleInvalidation(payload string) {
 	name, rest, found := splitNull(payload)
 	if !found || name != c.name {
 		return
 	}
-	bucket, key, found := splitNull(rest)
-	if found && bucket == c.bucket {
+	identity, key, found := splitNull(rest)
+	if found && identity == c.identity {
 		c.evictLocal(key)
 	}
 }

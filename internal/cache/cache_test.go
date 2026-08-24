@@ -173,12 +173,12 @@ func TestBucketScopedKeys(t *testing.T) {
 // never reproduce (mem derives distinct ETags from distinct content).
 type fixedETag struct {
 	backend.Backend
-	bucket string
-	data   []byte
+	identity string
+	data     []byte
 }
 
-func (f *fixedETag) Name() string   { return "fixed" }
-func (f *fixedETag) Bucket() string { return f.bucket }
+func (f *fixedETag) Name() string     { return "fixed" }
+func (f *fixedETag) Identity() string { return f.identity }
 
 func (f *fixedETag) Stat(_ context.Context, key, _ string) (*backend.ObjectInfo, error) {
 	return &backend.ObjectInfo{Key: key, ETag: `"opaque"`, Size: int64(len(f.data))}, nil
@@ -193,8 +193,8 @@ func (f *fixedETag) Get(_ context.Context, key string, _ backend.GetOptions) (*b
 
 func TestBucketScopedByteKeys(t *testing.T) {
 	rdb := newRedis(t) // one shared Redis tier
-	ca := cache.New(&fixedETag{bucket: "bucket-a", data: []byte("AAAA")}, rdb, cache.Options{})
-	cb := cache.New(&fixedETag{bucket: "bucket-b", data: []byte("BBBB")}, rdb, cache.Options{})
+	ca := cache.New(&fixedETag{identity: "bucket-a", data: []byte("AAAA")}, rdb, cache.Options{})
+	cb := cache.New(&fixedETag{identity: "bucket-b", data: []byte("BBBB")}, rdb, cache.Options{})
 
 	// Populate bucket-a's byte cache under the shared, opaque ETag.
 	res, err := ca.Get(context.Background(), "k", backend.GetOptions{})

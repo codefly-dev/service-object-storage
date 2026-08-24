@@ -43,7 +43,7 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 
 func (b *Backend) Name() string { return "mem" }
 
-func (b *Backend) Bucket() string { return b.bucket }
+func (b *Backend) Identity() string { return b.bucket }
 
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{

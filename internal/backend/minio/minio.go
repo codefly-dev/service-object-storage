@@ -85,9 +85,9 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "minio" }
 
-// Bucket reports a globally unique identity for this bucket. MinIO bucket names
-// are unique only within a cluster, so the endpoint is included.
-func (b *Backend) Bucket() string { return b.endpoint + "/" + b.bucket }
+// Identity reports a globally unique identifier for this bucket. MinIO bucket
+// names are unique only within a cluster, so the endpoint is included.
+func (b *Backend) Identity() string { return b.endpoint + "/" + b.bucket }
 
 // Capabilities reports what this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
