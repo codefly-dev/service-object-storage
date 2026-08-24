@@ -40,6 +40,7 @@ func init() { backend.Register("minio", New) }
 type Backend struct {
 	client     *minio.Client
 	bucket     string
+	endpoint   string
 	presignMax time.Duration
 }
 
@@ -76,12 +77,17 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 	return &Backend{
 		client:     client,
 		bucket:     cfg.Bucket,
+		endpoint:   endpoint,
 		presignMax: cfg.PresignMaxExpiry,
 	}, nil
 }
 
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "minio" }
+
+// Identity reports a globally unique identifier for this bucket. MinIO bucket
+// names are unique only within a cluster, so the endpoint is included.
+func (b *Backend) Identity() string { return b.endpoint + "/" + b.bucket }
 
 // Capabilities reports what this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
@@ -91,7 +97,7 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		ConditionalCopy:     false, // only best-effort emulated (non-atomic)
 		AtomicRename:        false,
 		Versions:            true,
-		Tags:                true,
+		Tags:                false,
 		Presign:             true,
 		PresignMaxExpiry:    presignHardMax,
 		PresignAmbientCreds: true,
@@ -277,9 +283,34 @@ func (b *Backend) Put(ctx context.Context, key string, r io.Reader, opts backend
 	return &backend.PutResult{ETag: info.ETag, VersionID: info.VersionID}, nil
 }
 
-// Delete removes an object (or a specific version); idempotent.
+// Delete removes an object (or a specific version); idempotent when
+// unconditional.
+//
+// Conditional delete (IfMatch, compare-and-delete) has no atomic primitive in
+// minio-go: RemoveObjectOptions carries no ETag precondition. We emulate it with
+// a best-effort, NON-ATOMIC pre-Stat of the target — matching the conditional-
+// copy emulation above — so the precondition is honored in the common case
+// rather than silently dropped. A concurrent overwrite between the Stat and the
+// remove is a TOCTOU window this cannot close.
 func (b *Backend) Delete(ctx context.Context, key string, opts backend.DeleteOptions) error {
 	const op = "minio.Delete"
+
+	if opts.IfMatch != "" {
+		mi, err := b.client.StatObject(ctx, b.bucket, key, minio.StatObjectOptions{VersionID: opts.VersionID})
+		if err != nil {
+			// A compare-and-delete can't match a missing object; fail the
+			// precondition rather than surface it as a plain NotFound, so the
+			// outcome matches the other backends' conditional-delete semantics.
+			if serr.Is(mapErr(op, err), serr.NotFound) {
+				return serr.New(serr.PreconditionFailed, op, "if-match on missing object")
+			}
+			return mapErr(op, err)
+		}
+		if mi.ETag != opts.IfMatch {
+			return serr.New(serr.PreconditionFailed, op, "if-match mismatch")
+		}
+	}
+
 	err := b.client.RemoveObject(ctx, b.bucket, key, minio.RemoveObjectOptions{VersionID: opts.VersionID})
 	if err != nil {
 		return mapErr(op, err)

@@ -24,7 +24,9 @@ import (
 	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
@@ -160,4 +162,37 @@ func TestMinIOFullStack(t *testing.T) {
 		Keys: []string{key, "integration/copy.txt"},
 	})
 	require.NoError(t, err)
+}
+
+// TestMinIOConditionalDelete asserts the compare-and-delete precondition is
+// honored against MinIO — a wrong If-Match must refuse and preserve the object,
+// not silently delete it unconditionally.
+func TestMinIOConditionalDelete(t *testing.T) {
+	c := newStack(t)
+	key := "integration/conditional-delete.txt"
+
+	pr, err := put(t, c, key, []byte("v1"), nil)
+	require.NoError(t, err)
+	etag := pr.GetEtag()
+	require.NotEmpty(t, etag)
+
+	// A compare-and-delete against a missing object fails its precondition.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "integration/never-existed", IfMatch: etag})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+
+	// A stale precondition must fail and leave the object intact.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key, IfMatch: `"00000000000000000000000000000000"`})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+
+	_, hdr := get(t, c, key)
+	require.Equal(t, etag, hdr.GetInfo().GetEtag(), "object must survive a failed conditional delete")
+
+	// The matching precondition deletes.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key, IfMatch: etag})
+	require.NoError(t, err)
+
+	st, err := c.Get(context.Background(), &storagev0.GetRequest{Key: key})
+	require.NoError(t, err)
+	_, rerr := st.Recv()
+	require.Equal(t, codes.NotFound, status.Code(rerr), "object must be gone after a matching conditional delete")
 }

@@ -163,6 +163,14 @@ type Capabilities struct {
 type Backend interface {
 	// Name is the backend kind ("s3", "gcs", "azure", "minio").
 	Name() string
+	// Identity is a GLOBALLY UNIQUE identifier for the physical location this
+	// instance is bound to — the bucket/container plus whatever disambiguates
+	// it across deployments (the account for Azure, the endpoint for MinIO and
+	// S3-compatible services). The cache folds it into every key, so a bare
+	// bucket name is not enough: two containers named "data" in different Azure
+	// accounts, or two MinIO clusters with a bucket named "data", must not
+	// collide on a shared Redis tier.
+	Identity() string
 	// Capabilities reports what this backend honors.
 	Capabilities() Capabilities
 

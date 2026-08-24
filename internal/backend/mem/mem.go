@@ -30,17 +30,20 @@ type object struct {
 
 // Backend is an in-memory object store.
 type Backend struct {
-	mu   sync.RWMutex
-	objs map[string]object
-	now  func() time.Time
+	mu     sync.RWMutex
+	objs   map[string]object
+	bucket string
+	now    func() time.Time
 }
 
 // New constructs an empty in-memory backend.
-func New(_ context.Context, _ backend.Config) (backend.Backend, error) {
-	return &Backend{objs: map[string]object{}, now: time.Now}, nil
+func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
+	return &Backend{objs: map[string]object{}, bucket: cfg.Bucket, now: time.Now}, nil
 }
 
 func (b *Backend) Name() string { return "mem" }
+
+func (b *Backend) Identity() string { return b.bucket }
 
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{
@@ -141,7 +144,12 @@ func (b *Backend) Delete(_ context.Context, key string, opts backend.DeleteOptio
 	defer b.mu.Unlock()
 	o, ok := b.objs[key]
 	if !ok {
-		return nil // idempotent
+		if opts.IfMatch != "" {
+			// A compare-and-delete can't match a missing object; fail the
+			// precondition rather than report a delete that never happened.
+			return serr.New(serr.PreconditionFailed, "delete", "if-match on missing object")
+		}
+		return nil // unconditional delete is idempotent
 	}
 	if opts.IfMatch != "" && o.info.ETag != opts.IfMatch {
 		return serr.New(serr.PreconditionFailed, "delete", "if-match mismatch")

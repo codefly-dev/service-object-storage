@@ -88,6 +88,10 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "azure" }
 
+// Identity reports a globally unique identifier for this container. Container
+// names are unique only within a storage account, so the account is included.
+func (b *Backend) Identity() string { return b.account + "/" + b.container }
+
 // Capabilities reports the feature set this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{
@@ -96,7 +100,7 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		ConditionalCopy:     true,
 		AtomicRename:        false,
 		Versions:            true,
-		Tags:                true,
+		Tags:                false,
 		Presign:             b.sharedKey != nil,
 		PresignMaxExpiry:    maxPresignExpiry,
 		PresignAmbientCreds: false,

@@ -160,6 +160,33 @@ func TestCopyAndDelete(t *testing.T) {
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
+func TestConditionalDelete(t *testing.T) {
+	c := newTestClient(t)
+	pr, err := putObject(t, c, "cad", []byte("v1"), nil)
+	require.NoError(t, err)
+	etag := pr.GetEtag()
+
+	// Compare-and-delete against a missing object cannot match its precondition.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "ghost", IfMatch: etag})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+
+	// A stale ETag refuses and preserves the object.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "cad", IfMatch: `"stale"`})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	_, err = c.Stat(context.Background(), &storagev0.StatRequest{Key: "cad"})
+	require.NoError(t, err)
+
+	// An unconditional delete of a missing object stays idempotent.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "ghost"})
+	require.NoError(t, err)
+
+	// The matching ETag deletes.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "cad", IfMatch: etag})
+	require.NoError(t, err)
+	_, err = c.Stat(context.Background(), &storagev0.StatRequest{Key: "cad"})
+	require.Equal(t, codes.NotFound, status.Code(err))
+}
+
 func TestPresignAndCapabilities(t *testing.T) {
 	c := newTestClient(t)
 	caps, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{})

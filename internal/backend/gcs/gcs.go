@@ -71,6 +71,10 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "gcs" }
 
+// Identity reports a globally unique identifier for this bucket. GCS bucket
+// names are globally unique, so the bucket alone suffices.
+func (b *Backend) Identity() string { return b.cfg.Bucket }
+
 // Capabilities reports the GCS feature set.
 func (b *Backend) Capabilities() backend.Capabilities {
 	return backend.Capabilities{

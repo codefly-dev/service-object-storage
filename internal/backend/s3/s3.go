@@ -47,7 +47,9 @@ type Backend struct {
 	client     *s3.Client
 	uploader   *manager.Uploader
 	presign    *s3.PresignClient
+	creds      aws.CredentialsProvider
 	bucket     string
+	endpoint   string
 	presignMax time.Duration
 }
 
@@ -81,13 +83,25 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		client:     client,
 		uploader:   manager.NewUploader(client),
 		presign:    s3.NewPresignClient(client),
+		creds:      awscfg.Credentials,
 		bucket:     cfg.Bucket,
+		endpoint:   cfg.Endpoint,
 		presignMax: cfg.PresignMaxExpiry,
 	}, nil
 }
 
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "s3" }
+
+// Identity reports a globally unique identifier for this bucket. Real S3 bucket
+// names are globally unique, but an S3-compatible service reached via a custom
+// endpoint is not, so the endpoint disambiguates when set.
+func (b *Backend) Identity() string {
+	if b.endpoint != "" {
+		return b.endpoint + "/" + b.bucket
+	}
+	return b.bucket
+}
 
 // Capabilities reports what this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
@@ -97,7 +111,7 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		ConditionalCopy:     false, // no atomic destination precondition on CopyObject
 		AtomicRename:        false,
 		Versions:            true,
-		Tags:                true,
+		Tags:                false,
 		Presign:             true,
 		PresignMaxExpiry:    presignHardMax,
 		PresignAmbientCreds: true, // SigV4 presign uses the loaded creds; STS creds cap effective lifetime
@@ -248,6 +262,10 @@ func (b *Backend) Put(ctx context.Context, key string, r io.Reader, opts backend
 	if len(opts.UserMetadata) > 0 {
 		in.Metadata = opts.UserMetadata
 	}
+	// The managed uploader copies IfNoneMatch/IfMatch onto CompleteMultipartUpload
+	// when it switches to multipart, so the precondition is enforced atomically at
+	// the commit point even above the multipart threshold — ConditionalPut holds
+	// for large objects too.
 	if opts.IfNoneMatch != "" {
 		in.IfNoneMatch = &opts.IfNoneMatch // "*" => create-if-absent
 	}
@@ -433,6 +451,17 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 	if b.presignMax > 0 && expiry > b.presignMax {
 		expiry = b.presignMax
 	}
+	// A URL signed with temporary (STS/session) credentials stops working the
+	// moment those credentials expire, regardless of the protocol maximum, so
+	// clamp the lifetime — and thus the reported expires_at — to the credential
+	// expiration to avoid overstating validity.
+	if creds, cerr := b.creds.Retrieve(ctx); cerr == nil {
+		clamped, cerr := clampToCreds(time.Now(), expiry, creds)
+		if cerr != nil {
+			return nil, serr.Wrap(serr.PreconditionFailed, op, cerr)
+		}
+		expiry = clamped
+	}
 	withExpiry := s3.WithPresignExpires(expiry)
 
 	var req *v4.PresignedHTTPRequest
@@ -460,6 +489,27 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 		Headers:   headers,
 		ExpiresAt: time.Now().Add(expiry),
 	}, nil
+}
+
+// clampToCreds shortens a presign lifetime so it never outlives the signing
+// credentials. Static credentials never expire (CanExpire == false) and pass
+// through unchanged; temporary credentials cap the lifetime at their remaining
+// validity. If that remaining validity is under a second — SigV4 renders
+// X-Amz-Expires as whole seconds, so a sub-second lifetime becomes 0 (or
+// negative on clock skew), which S3 rejects — it returns an error rather than
+// hand back an already-dead URL.
+func clampToCreds(now time.Time, expiry time.Duration, creds aws.Credentials) (time.Duration, error) {
+	if !creds.CanExpire {
+		return expiry, nil
+	}
+	remaining := creds.Expires.Sub(now)
+	if remaining >= expiry {
+		return expiry, nil
+	}
+	if remaining < time.Second {
+		return 0, fmt.Errorf("signing credentials expire in %s, too soon to presign a usable URL", remaining)
+	}
+	return remaining, nil
 }
 
 // Native is the escape hatch for backend-specific verbs; none are offered.
