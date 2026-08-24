@@ -49,6 +49,7 @@ type Backend struct {
 	presign    *s3.PresignClient
 	creds      aws.CredentialsProvider
 	bucket     string
+	endpoint   string
 	presignMax time.Duration
 }
 
@@ -84,6 +85,7 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		presign:    s3.NewPresignClient(client),
 		creds:      awscfg.Credentials,
 		bucket:     cfg.Bucket,
+		endpoint:   cfg.Endpoint,
 		presignMax: cfg.PresignMaxExpiry,
 	}, nil
 }
@@ -91,8 +93,15 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "s3" }
 
-// Bucket reports the bucket this backend is bound to.
-func (b *Backend) Bucket() string { return b.bucket }
+// Bucket reports a globally unique identity for this bucket. Real S3 bucket
+// names are globally unique, but an S3-compatible service reached via a custom
+// endpoint is not, so the endpoint disambiguates when set.
+func (b *Backend) Bucket() string {
+	if b.endpoint != "" {
+		return b.endpoint + "/" + b.bucket
+	}
+	return b.bucket
+}
 
 // Capabilities reports what this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
@@ -446,8 +455,12 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 	// moment those credentials expire, regardless of the protocol maximum, so
 	// clamp the lifetime — and thus the reported expires_at — to the credential
 	// expiration to avoid overstating validity.
-	if creds, err := b.creds.Retrieve(ctx); err == nil {
-		expiry = clampToCreds(time.Now(), expiry, creds)
+	if creds, cerr := b.creds.Retrieve(ctx); cerr == nil {
+		clamped, cerr := clampToCreds(time.Now(), expiry, creds)
+		if cerr != nil {
+			return nil, serr.Wrap(serr.PreconditionFailed, op, cerr)
+		}
+		expiry = clamped
 	}
 	withExpiry := s3.WithPresignExpires(expiry)
 
@@ -481,15 +494,22 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 // clampToCreds shortens a presign lifetime so it never outlives the signing
 // credentials. Static credentials never expire (CanExpire == false) and pass
 // through unchanged; temporary credentials cap the lifetime at their remaining
-// validity.
-func clampToCreds(now time.Time, expiry time.Duration, creds aws.Credentials) time.Duration {
+// validity. If that remaining validity is under a second — SigV4 renders
+// X-Amz-Expires as whole seconds, so a sub-second lifetime becomes 0 (or
+// negative on clock skew), which S3 rejects — it returns an error rather than
+// hand back an already-dead URL.
+func clampToCreds(now time.Time, expiry time.Duration, creds aws.Credentials) (time.Duration, error) {
 	if !creds.CanExpire {
-		return expiry
+		return expiry, nil
 	}
-	if remaining := creds.Expires.Sub(now); remaining < expiry {
-		return remaining
+	remaining := creds.Expires.Sub(now)
+	if remaining >= expiry {
+		return expiry, nil
 	}
-	return expiry
+	if remaining < time.Second {
+		return 0, fmt.Errorf("signing credentials expire in %s, too soon to presign a usable URL", remaining)
+	}
+	return remaining, nil
 }
 
 // Native is the escape hatch for backend-specific verbs; none are offered.

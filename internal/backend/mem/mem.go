@@ -144,7 +144,12 @@ func (b *Backend) Delete(_ context.Context, key string, opts backend.DeleteOptio
 	defer b.mu.Unlock()
 	o, ok := b.objs[key]
 	if !ok {
-		return nil // idempotent
+		if opts.IfMatch != "" {
+			// A compare-and-delete can't match a missing object; fail the
+			// precondition rather than report a delete that never happened.
+			return serr.New(serr.PreconditionFailed, "delete", "if-match on missing object")
+		}
+		return nil // unconditional delete is idempotent
 	}
 	if opts.IfMatch != "" && o.info.ETag != opts.IfMatch {
 		return serr.New(serr.PreconditionFailed, "delete", "if-match mismatch")

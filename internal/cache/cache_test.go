@@ -168,6 +168,45 @@ func TestBucketScopedKeys(t *testing.T) {
 	require.Equal(t, int64(4), ia2.Size)
 }
 
+// fixedETag serves bytes under a caller-supplied opaque ETag that is identical
+// across instances — the cross-serve case a content-hash backend like mem can
+// never reproduce (mem derives distinct ETags from distinct content).
+type fixedETag struct {
+	backend.Backend
+	bucket string
+	data   []byte
+}
+
+func (f *fixedETag) Name() string   { return "fixed" }
+func (f *fixedETag) Bucket() string { return f.bucket }
+
+func (f *fixedETag) Stat(_ context.Context, key, _ string) (*backend.ObjectInfo, error) {
+	return &backend.ObjectInfo{Key: key, ETag: `"opaque"`, Size: int64(len(f.data))}, nil
+}
+
+func (f *fixedETag) Get(_ context.Context, key string, _ backend.GetOptions) (*backend.GetResult, error) {
+	return &backend.GetResult{
+		Info: backend.ObjectInfo{Key: key, ETag: `"opaque"`, Size: int64(len(f.data))},
+		Body: io.NopCloser(bytes.NewReader(f.data)),
+	}, nil
+}
+
+func TestBucketScopedByteKeys(t *testing.T) {
+	rdb := newRedis(t) // one shared Redis tier
+	ca := cache.New(&fixedETag{bucket: "bucket-a", data: []byte("AAAA")}, rdb, cache.Options{})
+	cb := cache.New(&fixedETag{bucket: "bucket-b", data: []byte("BBBB")}, rdb, cache.Options{})
+
+	// Populate bucket-a's byte cache under the shared, opaque ETag.
+	res, err := ca.Get(context.Background(), "k", backend.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, []byte("AAAA"), readAll(t, res))
+
+	// bucket-b shares the ETag but must serve its own bytes, not bucket-a's.
+	res, err = cb.Get(context.Background(), "k", backend.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, []byte("BBBB"), readAll(t, res), "identical opaque ETags in different buckets must not cross-serve bytes")
+}
+
 func TestLargeObjectNotByteCached(t *testing.T) {
 	cnt := newCounting(t)
 	c := cache.New(cnt, nil, cache.Options{MaxCachedObjectBytes: 4})

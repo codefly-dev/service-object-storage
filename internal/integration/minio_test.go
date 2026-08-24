@@ -176,6 +176,10 @@ func TestMinIOConditionalDelete(t *testing.T) {
 	etag := pr.GetEtag()
 	require.NotEmpty(t, etag)
 
+	// A compare-and-delete against a missing object fails its precondition.
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "integration/never-existed", IfMatch: etag})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+
 	// A stale precondition must fail and leave the object intact.
 	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key, IfMatch: `"00000000000000000000000000000000"`})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))

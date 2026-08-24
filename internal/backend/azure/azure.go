@@ -88,8 +88,9 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "azure" }
 
-// Bucket reports the container this backend is bound to.
-func (b *Backend) Bucket() string { return b.container }
+// Bucket reports a globally unique identity for this container. Container names
+// are unique only within a storage account, so the account is included.
+func (b *Backend) Bucket() string { return b.account + "/" + b.container }
 
 // Capabilities reports the feature set this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {

@@ -40,6 +40,7 @@ func init() { backend.Register("minio", New) }
 type Backend struct {
 	client     *minio.Client
 	bucket     string
+	endpoint   string
 	presignMax time.Duration
 }
 
@@ -76,6 +77,7 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 	return &Backend{
 		client:     client,
 		bucket:     cfg.Bucket,
+		endpoint:   endpoint,
 		presignMax: cfg.PresignMaxExpiry,
 	}, nil
 }
@@ -83,8 +85,9 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "minio" }
 
-// Bucket reports the bucket this backend is bound to.
-func (b *Backend) Bucket() string { return b.bucket }
+// Bucket reports a globally unique identity for this bucket. MinIO bucket names
+// are unique only within a cluster, so the endpoint is included.
+func (b *Backend) Bucket() string { return b.endpoint + "/" + b.bucket }
 
 // Capabilities reports what this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
@@ -295,6 +298,12 @@ func (b *Backend) Delete(ctx context.Context, key string, opts backend.DeleteOpt
 	if opts.IfMatch != "" {
 		mi, err := b.client.StatObject(ctx, b.bucket, key, minio.StatObjectOptions{VersionID: opts.VersionID})
 		if err != nil {
+			// A compare-and-delete can't match a missing object; fail the
+			// precondition rather than surface it as a plain NotFound, so the
+			// outcome matches the other backends' conditional-delete semantics.
+			if serr.Is(mapErr(op, err), serr.NotFound) {
+				return serr.New(serr.PreconditionFailed, op, "if-match on missing object")
+			}
 			return mapErr(op, err)
 		}
 		if mi.ETag != opts.IfMatch {

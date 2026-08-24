@@ -319,7 +319,7 @@ func (c *Caching) invalidate(ctx context.Context, key string) {
 	if c.rdb != nil {
 		mk := metaKey(c.opts.Namespace, c.name, c.bucket, key, "")
 		_ = c.rdb.Del(ctx, mk).Err()
-		_ = c.rdb.Publish(ctx, invalidationChannel, c.name+"\x00"+key).Err()
+		_ = c.rdb.Publish(ctx, invalidationChannel, c.name+"\x00"+c.bucket+"\x00"+key).Err()
 	}
 }
 
@@ -340,11 +340,22 @@ func (c *Caching) subscribeInvalidations() {
 			if !ok {
 				return
 			}
-			name, key, found := splitNull(msg.Payload)
-			if found && name == c.name {
-				c.evictLocal(key)
-			}
+			c.handleInvalidation(msg.Payload)
 		}
+	}
+}
+
+// handleInvalidation evicts the local entry named by a cross-replica message,
+// but only when both the backend and the bucket match: a write in another
+// bucket that happens to share this key name must not evict our entry.
+func (c *Caching) handleInvalidation(payload string) {
+	name, rest, found := splitNull(payload)
+	if !found || name != c.name {
+		return
+	}
+	bucket, key, found := splitNull(rest)
+	if found && bucket == c.bucket {
+		c.evictLocal(key)
 	}
 }
 
