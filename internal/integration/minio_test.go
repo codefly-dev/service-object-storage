@@ -32,6 +32,7 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/cache"
+	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/minio"
@@ -78,10 +79,11 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 	})
 	require.NoError(t, err)
 	cached := cache.New(be, nil, cache.Options{})
+	hub := events.NewHub(cached.Name(), cached.Identity(), nil)
 
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(cached))
+	storagev0.RegisterObjectStorageServer(s, server.New(cached, hub))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
@@ -89,7 +91,7 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close(); s.Stop(); _ = cached.Close() })
+	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close(); _ = cached.Close() })
 	return storagev0.NewObjectStorageClient(conn)
 }
 

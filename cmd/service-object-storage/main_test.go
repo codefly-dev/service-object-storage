@@ -16,6 +16,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/config"
+	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
@@ -73,7 +74,8 @@ func TestOpenStore_CacheDisabled(t *testing.T) {
 func TestGracefulStop_EscalatesOnStuckRPC(t *testing.T) {
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(openMem(t)))
+	be := openMem(t)
+	storagev0.RegisterObjectStorageServer(s, server.New(be, events.NewHub(be.Name(), be.Identity(), nil)))
 	go func() { _ = s.Serve(lis) }()
 
 	conn, err := grpc.NewClient(
