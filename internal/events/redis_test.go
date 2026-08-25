@@ -1,6 +1,7 @@
 package events_test
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -10,6 +11,46 @@ import (
 
 	"github.com/codefly-dev/service-object-storage/internal/events"
 )
+
+// TestPublishDoesNotBlockOnRedis proves the cross-replica hop is off the write
+// path: with a Redis that accepts connections but never answers, Publish must
+// still return immediately and deliver locally. The pre-async code blocked here
+// for the go-redis read timeout (seconds) on every write.
+func TestPublishDoesNotBlockOnRedis(t *testing.T) {
+	// A listening socket that is never Accept()ed: the kernel completes the TCP
+	// handshake, so go-redis connects, but every reply read hangs.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	rdb := redis.NewClient(&redis.Options{Addr: ln.Addr().String()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	h := events.NewHub("mem", "mem://local", rdb)
+	t.Cleanup(h.Close)
+
+	sub := h.Subscribe("")
+	defer sub.Close()
+
+	done := make(chan struct{})
+	go func() {
+		h.Publish(events.Event{Key: "k", Op: events.OpPut})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Publish blocked on an unresponsive Redis")
+	}
+
+	// Local delivery is synchronous and unaffected by the stalled remote path.
+	select {
+	case ev := <-sub.Events():
+		require.Equal(t, "k", ev.Key)
+	case <-time.After(time.Second):
+		t.Fatal("local subscriber did not receive the event")
+	}
+}
 
 // TestCrossReplicaDelivery proves the Redis bridge: an event published on one
 // replica reaches a Watch subscriber connected to another replica bound to the

@@ -219,12 +219,14 @@ func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*s
 // Watch streams write events to the client until it disconnects. A subscriber
 // that falls behind is dropped by the hub (its channel closes), which surfaces
 // here as RESOURCE_EXHAUSTED so the client reconciles before re-watching.
+// Delivery is best-effort — see the WriteEvent proto contract.
 func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStorage_WatchServer) error {
 	sub := s.hub.Subscribe(req.GetPrefix())
 	defer sub.Close()
-	// Header marks the subscription as live: writes that complete after the
-	// client observes it are guaranteed to be delivered. A client reconciles
-	// anything before this point out of band.
+	// The header marks the subscription as live. Writes served by this replica
+	// after the client observes it are delivered in order (or a slow client is
+	// dropped); writes served by other replicas arrive best-effort over the
+	// shared tier. A client reconciles anything before this point out of band.
 	if err := stream.SendHeader(nil); err != nil {
 		return err
 	}

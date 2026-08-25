@@ -5,11 +5,15 @@
 //
 // The Hub mirrors the cache's cross-replica design: with a shared Redis tier it
 // republishes each event on a pub/sub channel and re-dispatches events from
-// other replicas, so a Watch client connected to one replica observes writes
-// served by any replica bound to the same backend location. Events are scoped
-// by backend name+identity (a replica bound elsewhere sharing the Redis
-// keyspace must not leak its writes here) and tagged with a per-process origin
-// so a replica never re-dispatches its own echo.
+// other replicas, so a Watch client connected to one replica also sees writes
+// served by peers bound to the same backend location. That hop is best-effort —
+// Redis pub/sub is fire-and-forget, so an outage or reconnect drops the events
+// in flight; delivery is a change hint, not a log, and consumers reconcile
+// out of band (see the WriteEvent proto contract). Events are scoped by backend
+// name+identity (a replica bound elsewhere sharing the Redis keyspace must not
+// leak its writes here) and tagged with a per-process origin so a replica never
+// re-dispatches its own echo. The Redis publish runs on a background worker, so
+// a slow or unreachable tier never blocks the write that produced the event.
 //
 // A slow Watch subscriber is dropped rather than allowed to stall the fan-out:
 // its channel is closed once its buffer overflows, ending the RPC with a lag
@@ -56,6 +60,12 @@ const eventChannel = "sos:events"
 // is dropped as too slow.
 const subBuffer = 256
 
+// outBuffer bounds the backlog of events awaiting cross-replica publish. It
+// absorbs write bursts (e.g. a large DeleteMany) so the request path never
+// blocks on Redis; a backlog past this drops the oldest-unpublished events,
+// consistent with the best-effort cross-replica contract.
+const outBuffer = 1024
+
 // Hub fans write events out to local Watch subscribers and, when a shared tier
 // is configured, across replicas.
 type Hub struct {
@@ -64,6 +74,10 @@ type Hub struct {
 	origin   string
 	rdb      redis.UniversalClient // nil = single-replica, in-process only
 	nowFn    func() time.Time
+
+	// out carries events to the background publisher; nil when rdb is nil. It is
+	// never closed, so Publish can enqueue concurrently with Close without racing.
+	out chan Event
 
 	mu     sync.Mutex
 	subs   map[uint64]*Subscription
@@ -86,7 +100,9 @@ func NewHub(name, identity string, rdb redis.UniversalClient) *Hub {
 		stop:     make(chan struct{}),
 	}
 	if rdb != nil {
+		h.out = make(chan Event, outBuffer)
 		go h.subscribeRemote()
+		go h.publishRemote()
 	}
 	return h
 }
@@ -127,27 +143,47 @@ func (h *Hub) Subscribe(prefix string) *Subscription {
 }
 
 // Publish delivers e to matching local subscribers and, when a shared tier is
-// configured, mirrors it to other replicas. Time is stamped here if unset.
+// configured, hands it to the background publisher for cross-replica mirroring.
+// It never blocks on Redis: local delivery is synchronous and ordered, while the
+// cross-replica hop is enqueued non-blocking (dropped if the backlog is full).
+// Time is stamped here if unset, so the local and mirrored copies agree.
 func (h *Hub) Publish(e Event) {
 	if e.Time.IsZero() {
 		e.Time = h.nowFn()
 	}
 	h.dispatch(e)
-	if h.rdb == nil {
+	if h.out == nil {
 		return
 	}
-	w := wireEvent{
-		Origin:    h.origin,
-		Name:      h.name,
-		Identity:  h.identity,
-		Key:       e.Key,
-		Op:        e.Op,
-		ETag:      e.ETag,
-		VersionID: e.VersionID,
-		TimeMS:    e.Time.UnixMilli(),
+	select {
+	case h.out <- e:
+	default: // backlog full: drop, per the best-effort cross-replica contract
 	}
-	if raw, err := json.Marshal(w); err == nil {
-		_ = h.rdb.Publish(context.Background(), eventChannel, raw).Err()
+}
+
+// publishRemote drains the outbound backlog and mirrors each event to peers over
+// Redis pub/sub. A single worker preserves publish order; Redis latency here is
+// off the request path, so a slow or unresponsive tier never stalls a write.
+func (h *Hub) publishRemote() {
+	for {
+		select {
+		case <-h.stop:
+			return
+		case e := <-h.out:
+			w := wireEvent{
+				Origin:    h.origin,
+				Name:      h.name,
+				Identity:  h.identity,
+				Key:       e.Key,
+				Op:        e.Op,
+				ETag:      e.ETag,
+				VersionID: e.VersionID,
+				TimeMS:    e.Time.UnixMilli(),
+			}
+			if raw, err := json.Marshal(w); err == nil {
+				_ = h.rdb.Publish(context.Background(), eventChannel, raw).Err()
+			}
+		}
 	}
 }
 

@@ -57,11 +57,12 @@ type ObjectStorageClient interface {
 	Copy(ctx context.Context, in *CopyRequest, opts ...grpc.CallOption) (*CopyResult, error)
 	Presign(ctx context.Context, in *PresignRequest, opts ...grpc.CallOption) (*PresignResult, error)
 	// Watch streams write events (Put/Delete) as they complete through the
-	// gateway. Events for writes served by any replica bound to the same backend
-	// location are delivered when a shared cache tier is configured. The stream's
-	// initial gRPC header marks the subscription as live: writes that complete
-	// after the client observes it are delivered; a client reconciles anything
-	// before that point out of band (events are live, not replayed).
+	// gateway. With a shared cache tier configured, events from other replicas
+	// bound to the same backend location are mirrored in best-effort (see
+	// WriteEvent for the delivery contract — it is a hint stream, not a log). The
+	// stream's initial gRPC header marks the subscription as live: events are live
+	// and never replayed, so a client reconciles state from before the header out
+	// of band, and periodically thereafter to recover any dropped events.
 	Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WriteEvent], error)
 	Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*BackendCapabilities, error)
 	Native(ctx context.Context, in *NativeRequest, opts ...grpc.CallOption) (*NativeResult, error)
@@ -224,11 +225,12 @@ type ObjectStorageServer interface {
 	Copy(context.Context, *CopyRequest) (*CopyResult, error)
 	Presign(context.Context, *PresignRequest) (*PresignResult, error)
 	// Watch streams write events (Put/Delete) as they complete through the
-	// gateway. Events for writes served by any replica bound to the same backend
-	// location are delivered when a shared cache tier is configured. The stream's
-	// initial gRPC header marks the subscription as live: writes that complete
-	// after the client observes it are delivered; a client reconciles anything
-	// before that point out of band (events are live, not replayed).
+	// gateway. With a shared cache tier configured, events from other replicas
+	// bound to the same backend location are mirrored in best-effort (see
+	// WriteEvent for the delivery contract — it is a hint stream, not a log). The
+	// stream's initial gRPC header marks the subscription as live: events are live
+	// and never replayed, so a client reconciles state from before the header out
+	// of band, and periodically thereafter to recover any dropped events.
 	Watch(*WatchRequest, grpc.ServerStreamingServer[WriteEvent]) error
 	Capabilities(context.Context, *CapabilitiesRequest) (*BackendCapabilities, error)
 	Native(context.Context, *NativeRequest) (*NativeResult, error)

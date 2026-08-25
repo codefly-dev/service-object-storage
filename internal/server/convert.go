@@ -82,10 +82,14 @@ func toProtoEvent(e events.Event) *storagev0.WriteEvent {
 }
 
 func writeOpToProto(op events.Op) storagev0.WriteOp {
-	if op == events.OpDelete {
+	switch op {
+	case events.OpPut:
+		return storagev0.WriteOp_WRITE_OP_PUT
+	case events.OpDelete:
 		return storagev0.WriteOp_WRITE_OP_DELETE
+	default:
+		return storagev0.WriteOp_WRITE_OP_UNSPECIFIED
 	}
-	return storagev0.WriteOp_WRITE_OP_PUT
 }
 
 func presignMethodFromProto(m storagev0.PresignMethod) backend.PresignMethod {

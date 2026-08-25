@@ -1585,12 +1585,27 @@ func (x *WatchRequest) GetPrefix() string {
 	return ""
 }
 
-// WriteEvent is a single mutation observed at the gateway write choke point: the
-// journal seed a consumer keeping an index (cache, metadata DB) reconciles
-// against. etag/version_id are set on PUT when the backend returns them; a
+// WriteEvent is a single mutation observed at the gateway write choke point: a
+// change HINT a consumer keeping an index (cache, metadata DB) reacts to, not a
+// lossless log. etag/version_id are set on PUT when the backend returns them; a
 // DELETE carries only the key (and version_id when a specific version was
-// removed). A consumer that receives RESOURCE_EXHAUSTED on the stream has fallen
-// behind and must reconcile out of band before re-watching.
+// removed).
+//
+// Delivery is best-effort and at-least-once, so a consumer MUST periodically
+// reconcile against authoritative state (List / version enumeration) and never
+// treat the absence of an event as proof no write happened:
+//   - Events for writes served by OTHER replicas travel over the shared cache
+//     tier's pub/sub, which is fire-and-forget: a Redis outage or a subscriber
+//     reconnect drops those events with no per-event signal.
+//   - A DELETE is emitted even when the key was already absent — backends do not
+//     report whether a delete removed anything — so deletes are not one-to-one
+//     with real state changes.
+//   - A consumer that receives RESOURCE_EXHAUSTED has fallen too far behind and
+//     was dropped; it must reconcile before re-watching.
+//
+// Writes served by the SAME replica the client is watching are delivered
+// in-order (or the slow client is dropped), so a single-replica gateway loses
+// events only via RESOURCE_EXHAUSTED.
 type WriteEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
