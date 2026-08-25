@@ -16,6 +16,7 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
+	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
@@ -25,8 +26,9 @@ func newTestClient(t *testing.T) storagev0.ObjectStorageClient {
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
 
+	hub := events.NewHub(be.Name(), be.Identity(), nil)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(be))
+	storagev0.RegisterObjectStorageServer(s, server.New(be, hub))
 	go func() { _ = s.Serve(lis) }()
 
 	conn, err := grpc.NewClient(
@@ -35,7 +37,7 @@ func newTestClient(t *testing.T) storagev0.ObjectStorageClient {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close(); s.Stop() })
+	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close() })
 	return storagev0.NewObjectStorageClient(conn)
 }
 
@@ -205,4 +207,86 @@ func TestNativeUnsupported(t *testing.T) {
 	c := newTestClient(t)
 	_, err := c.Native(context.Background(), &storagev0.NativeRequest{Verb: "set-acl"})
 	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
+// startWatch opens a Watch stream and blocks until the subscription is live (the
+// server sends its header after subscribing), so writes issued afterward are
+// guaranteed to be observed.
+func startWatch(t *testing.T, c storagev0.ObjectStorageClient, prefix string) (storagev0.ObjectStorage_WatchClient, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := c.Watch(ctx, &storagev0.WatchRequest{Prefix: prefix})
+	require.NoError(t, err)
+	_, err = stream.Header()
+	require.NoError(t, err)
+	t.Cleanup(cancel)
+	return stream, cancel
+}
+
+func TestWatchPutDeleteCopy(t *testing.T) {
+	c := newTestClient(t)
+	stream, _ := startWatch(t, c, "")
+
+	pr, err := putObject(t, c, "docs/a.txt", []byte("hi"), nil)
+	require.NoError(t, err)
+
+	ev, err := stream.Recv()
+	require.NoError(t, err)
+	require.Equal(t, "docs/a.txt", ev.GetKey())
+	require.Equal(t, storagev0.WriteOp_WRITE_OP_PUT, ev.GetOp())
+	require.Equal(t, pr.GetEtag(), ev.GetEtag())
+	require.NotZero(t, ev.GetTimeUnixMs())
+
+	_, err = c.Copy(context.Background(), &storagev0.CopyRequest{SourceKey: "docs/a.txt", DestKey: "docs/b.txt"})
+	require.NoError(t, err)
+	ev, err = stream.Recv()
+	require.NoError(t, err)
+	require.Equal(t, "docs/b.txt", ev.GetKey())
+	require.Equal(t, storagev0.WriteOp_WRITE_OP_PUT, ev.GetOp())
+
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "docs/a.txt"})
+	require.NoError(t, err)
+	ev, err = stream.Recv()
+	require.NoError(t, err)
+	require.Equal(t, "docs/a.txt", ev.GetKey())
+	require.Equal(t, storagev0.WriteOp_WRITE_OP_DELETE, ev.GetOp())
+}
+
+func TestWatchPrefixScoped(t *testing.T) {
+	c := newTestClient(t)
+	stream, _ := startWatch(t, c, "tenant=a/")
+
+	// A write outside the prefix must not be delivered; the in-prefix write that
+	// follows is the first event the scoped watcher sees.
+	_, err := putObject(t, c, "tenant=b/x", []byte("x"), nil)
+	require.NoError(t, err)
+	_, err = putObject(t, c, "tenant=a/y", []byte("y"), nil)
+	require.NoError(t, err)
+
+	ev, err := stream.Recv()
+	require.NoError(t, err)
+	require.Equal(t, "tenant=a/y", ev.GetKey())
+}
+
+func TestWatchDeleteMany(t *testing.T) {
+	c := newTestClient(t)
+	for _, k := range []string{"m/1", "m/2"} {
+		_, err := putObject(t, c, k, []byte("x"), nil)
+		require.NoError(t, err)
+	}
+	stream, _ := startWatch(t, c, "m/")
+
+	_, err := c.DeleteMany(context.Background(), &storagev0.DeleteManyRequest{Keys: []string{"m/1", "m/2"}})
+	require.NoError(t, err)
+
+	got := map[string]storagev0.WriteOp{}
+	for range 2 {
+		ev, err := stream.Recv()
+		require.NoError(t, err)
+		got[ev.GetKey()] = ev.GetOp()
+	}
+	require.Equal(t, map[string]storagev0.WriteOp{
+		"m/1": storagev0.WriteOp_WRITE_OP_DELETE,
+		"m/2": storagev0.WriteOp_WRITE_OP_DELETE,
+	}, got)
 }

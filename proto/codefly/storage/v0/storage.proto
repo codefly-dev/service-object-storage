@@ -185,6 +185,32 @@ message PresignResult {
   int64 expires_at_unix_ms = 4;
 }
 
+// WriteOp is the mutating operation a WriteEvent reports.
+enum WriteOp {
+  WRITE_OP_UNSPECIFIED = 0;
+  WRITE_OP_PUT = 1;
+  WRITE_OP_DELETE = 2;
+}
+
+message WatchRequest {
+  // prefix scopes the stream to keys under it; empty means every key.
+  string prefix = 1;
+}
+
+// WriteEvent is a single mutation observed at the gateway write choke point: the
+// journal seed a consumer keeping an index (cache, metadata DB) reconciles
+// against. etag/version_id are set on PUT when the backend returns them; a
+// DELETE carries only the key (and version_id when a specific version was
+// removed). A consumer that receives RESOURCE_EXHAUSTED on the stream has fallen
+// behind and must reconcile out of band before re-watching.
+message WriteEvent {
+  string key = 1;
+  WriteOp op = 2;
+  string etag = 3;
+  string version_id = 4;
+  int64 time_unix_ms = 5;
+}
+
 message CapabilitiesRequest {}
 
 // Capabilities is the OpenDAL-style introspection surface: a client asks what
@@ -227,6 +253,13 @@ service ObjectStorage {
   rpc List(ListRequest) returns (ListResult);
   rpc Copy(CopyRequest) returns (CopyResult);
   rpc Presign(PresignRequest) returns (PresignResult);
+  // Watch streams write events (Put/Delete) as they complete through the
+  // gateway. Events for writes served by any replica bound to the same backend
+  // location are delivered when a shared cache tier is configured. The stream's
+  // initial gRPC header marks the subscription as live: writes that complete
+  // after the client observes it are delivered; a client reconciles anything
+  // before that point out of band (events are live, not replayed).
+  rpc Watch(WatchRequest) returns (stream WriteEvent);
   rpc Capabilities(CapabilitiesRequest) returns (BackendCapabilities);
   rpc Native(NativeRequest) returns (NativeResult);
 }

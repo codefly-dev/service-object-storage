@@ -22,6 +22,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/config"
+	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 
 	// Backends register themselves via init(); importing them compiles each into
@@ -70,8 +71,11 @@ func run() error {
 		return err
 	}
 
+	hub := events.NewHub(store.Name(), store.Identity(), rdb)
+	defer hub.Close()
+
 	grpcServer := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store))
+	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

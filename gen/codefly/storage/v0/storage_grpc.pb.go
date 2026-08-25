@@ -34,6 +34,7 @@ const (
 	ObjectStorage_List_FullMethodName         = "/codefly.storage.v0.ObjectStorage/List"
 	ObjectStorage_Copy_FullMethodName         = "/codefly.storage.v0.ObjectStorage/Copy"
 	ObjectStorage_Presign_FullMethodName      = "/codefly.storage.v0.ObjectStorage/Presign"
+	ObjectStorage_Watch_FullMethodName        = "/codefly.storage.v0.ObjectStorage/Watch"
 	ObjectStorage_Capabilities_FullMethodName = "/codefly.storage.v0.ObjectStorage/Capabilities"
 	ObjectStorage_Native_FullMethodName       = "/codefly.storage.v0.ObjectStorage/Native"
 )
@@ -55,6 +56,13 @@ type ObjectStorageClient interface {
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResult, error)
 	Copy(ctx context.Context, in *CopyRequest, opts ...grpc.CallOption) (*CopyResult, error)
 	Presign(ctx context.Context, in *PresignRequest, opts ...grpc.CallOption) (*PresignResult, error)
+	// Watch streams write events (Put/Delete) as they complete through the
+	// gateway. Events for writes served by any replica bound to the same backend
+	// location are delivered when a shared cache tier is configured. The stream's
+	// initial gRPC header marks the subscription as live: writes that complete
+	// after the client observes it are delivered; a client reconciles anything
+	// before that point out of band (events are live, not replayed).
+	Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WriteEvent], error)
 	Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*BackendCapabilities, error)
 	Native(ctx context.Context, in *NativeRequest, opts ...grpc.CallOption) (*NativeResult, error)
 }
@@ -159,6 +167,25 @@ func (c *objectStorageClient) Presign(ctx context.Context, in *PresignRequest, o
 	return out, nil
 }
 
+func (c *objectStorageClient) Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WriteEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ObjectStorage_ServiceDesc.Streams[2], ObjectStorage_Watch_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchRequest, WriteEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ObjectStorage_WatchClient = grpc.ServerStreamingClient[WriteEvent]
+
 func (c *objectStorageClient) Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*BackendCapabilities, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BackendCapabilities)
@@ -196,6 +223,13 @@ type ObjectStorageServer interface {
 	List(context.Context, *ListRequest) (*ListResult, error)
 	Copy(context.Context, *CopyRequest) (*CopyResult, error)
 	Presign(context.Context, *PresignRequest) (*PresignResult, error)
+	// Watch streams write events (Put/Delete) as they complete through the
+	// gateway. Events for writes served by any replica bound to the same backend
+	// location are delivered when a shared cache tier is configured. The stream's
+	// initial gRPC header marks the subscription as live: writes that complete
+	// after the client observes it are delivered; a client reconciles anything
+	// before that point out of band (events are live, not replayed).
+	Watch(*WatchRequest, grpc.ServerStreamingServer[WriteEvent]) error
 	Capabilities(context.Context, *CapabilitiesRequest) (*BackendCapabilities, error)
 	Native(context.Context, *NativeRequest) (*NativeResult, error)
 	mustEmbedUnimplementedObjectStorageServer()
@@ -231,6 +265,9 @@ func (UnimplementedObjectStorageServer) Copy(context.Context, *CopyRequest) (*Co
 }
 func (UnimplementedObjectStorageServer) Presign(context.Context, *PresignRequest) (*PresignResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method Presign not implemented")
+}
+func (UnimplementedObjectStorageServer) Watch(*WatchRequest, grpc.ServerStreamingServer[WriteEvent]) error {
+	return status.Error(codes.Unimplemented, "method Watch not implemented")
 }
 func (UnimplementedObjectStorageServer) Capabilities(context.Context, *CapabilitiesRequest) (*BackendCapabilities, error) {
 	return nil, status.Error(codes.Unimplemented, "method Capabilities not implemented")
@@ -385,6 +422,17 @@ func _ObjectStorage_Presign_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ObjectStorage_Watch_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ObjectStorageServer).Watch(m, &grpc.GenericServerStream[WatchRequest, WriteEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ObjectStorage_WatchServer = grpc.ServerStreamingServer[WriteEvent]
+
 func _ObjectStorage_Capabilities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CapabilitiesRequest)
 	if err := dec(in); err != nil {
@@ -471,6 +519,11 @@ var ObjectStorage_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "Put",
 			Handler:       _ObjectStorage_Put_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "Watch",
+			Handler:       _ObjectStorage_Watch_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "codefly/storage/v0/storage.proto",

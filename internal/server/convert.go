@@ -5,6 +5,7 @@ import (
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/events"
 )
 
 func unixMS(t time.Time) int64 {
@@ -68,6 +69,23 @@ func toBackendGetOptions(req *storagev0.GetRequest) backend.GetOptions {
 		opts.Range = &backend.ByteRange{Offset: r.GetOffset(), Length: r.GetLength()}
 	}
 	return opts
+}
+
+func toProtoEvent(e events.Event) *storagev0.WriteEvent {
+	return &storagev0.WriteEvent{
+		Key:        e.Key,
+		Op:         writeOpToProto(e.Op),
+		Etag:       e.ETag,
+		VersionId:  e.VersionID,
+		TimeUnixMs: unixMS(e.Time),
+	}
+}
+
+func writeOpToProto(op events.Op) storagev0.WriteOp {
+	if op == events.OpDelete {
+		return storagev0.WriteOp_WRITE_OP_DELETE
+	}
+	return storagev0.WriteOp_WRITE_OP_PUT
 }
 
 func presignMethodFromProto(m storagev0.PresignMethod) backend.PresignMethod {

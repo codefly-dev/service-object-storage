@@ -11,6 +11,7 @@ import (
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,11 +23,12 @@ const chunkSize = 256 * 1024
 // Server is the ObjectStorage service implementation.
 type Server struct {
 	storagev0.UnimplementedObjectStorageServer
-	be backend.Backend
+	be  backend.Backend
+	hub *events.Hub
 }
 
-// New builds a Server over be.
-func New(be backend.Backend) *Server { return &Server{be: be} }
+// New builds a Server over be, publishing write events to hub.
+func New(be backend.Backend, hub *events.Hub) *Server { return &Server{be: be, hub: hub} }
 
 // Stat returns object metadata, honoring conditional headers by comparing the
 // fetched ETag (NotModified is carried in the header, not as an error).
@@ -133,6 +135,7 @@ func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
 		pr.CloseWithError(err)
 		return toStatus(err)
 	}
+	s.hub.Publish(events.Event{Key: header.GetKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
 	return stream.SendAndClose(&storagev0.PutResult{
 		Etag:       res.ETag,
 		VersionId:  res.VersionID,
@@ -148,6 +151,7 @@ func (s *Server) Delete(ctx context.Context, req *storagev0.DeleteRequest) (*sto
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.hub.Publish(events.Event{Key: req.GetKey(), Op: events.OpDelete, VersionID: req.GetVersionId()})
 	return &storagev0.DeleteResult{}, nil
 }
 
@@ -158,6 +162,9 @@ func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyReques
 	}
 	out := &storagev0.DeleteManyResult{Entries: make([]*storagev0.DeleteEntry, 0, len(entries))}
 	for _, e := range entries {
+		if e.Error == "" {
+			s.hub.Publish(events.Event{Key: e.Key, Op: events.OpDelete})
+		}
 		out.Entries = append(out.Entries, &storagev0.DeleteEntry{Key: e.Key, Error: e.Error})
 	}
 	return out, nil
@@ -191,6 +198,7 @@ func (s *Server) Copy(ctx context.Context, req *storagev0.CopyRequest) (*storage
 	if err != nil {
 		return nil, toStatus(err)
 	}
+	s.hub.Publish(events.Event{Key: req.GetDestKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
 	return &storagev0.CopyResult{Etag: res.ETag, VersionId: res.VersionID}, nil
 }
 
@@ -206,6 +214,33 @@ func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*s
 		Headers:         res.Headers,
 		ExpiresAtUnixMs: unixMS(res.ExpiresAt),
 	}, nil
+}
+
+// Watch streams write events to the client until it disconnects. A subscriber
+// that falls behind is dropped by the hub (its channel closes), which surfaces
+// here as RESOURCE_EXHAUSTED so the client reconciles before re-watching.
+func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStorage_WatchServer) error {
+	sub := s.hub.Subscribe(req.GetPrefix())
+	defer sub.Close()
+	// Header marks the subscription as live: writes that complete after the
+	// client observes it are guaranteed to be delivered. A client reconciles
+	// anything before this point out of band.
+	if err := stream.SendHeader(nil); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case ev, ok := <-sub.Events():
+			if !ok {
+				return status.Error(codes.ResourceExhausted, "watch: consumer fell behind")
+			}
+			if err := stream.Send(toProtoEvent(ev)); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (s *Server) Capabilities(ctx context.Context, _ *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
