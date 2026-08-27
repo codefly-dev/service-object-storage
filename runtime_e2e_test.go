@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +106,17 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	_, err = rt.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
 
+	// A consumer running in its own container reaches these through
+	// host.docker.internal, which resolves to the bridge gateway on Linux — a
+	// 127.0.0.1-bound port is unreachable there. Both must publish on all
+	// interfaces or the container topology this agent advertises is broken.
+	gatewayID, err := rt.gatewayEnv.ContainerID()
+	require.NoError(t, err)
+	requirePublishedOnAllInterfaces(t, gatewayID, gatewayContainerPort)
+	minioID, err := rt.minioEnv.ContainerID()
+	require.NoError(t, err)
+	requirePublishedOnAllInterfaces(t, minioID, minioContainerPort)
+
 	conf, err := resources.ExtractConfiguration(init.RuntimeConfigurations, resources.NewRuntimeContextNative())
 	require.NoError(t, err)
 	endpoint, err := resources.GetConfigurationValue(ctx, conf, "object-storage", "endpoint")
@@ -148,4 +161,17 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	require.Equal(t, payload, body)
 	require.Equal(t, "text/plain", hdr.GetInfo().GetContentType())
 	require.Equal(t, int64(len(payload)), hdr.GetInfo().GetSize())
+}
+
+// requirePublishedOnAllInterfaces asserts the container's port is published on
+// 0.0.0.0, not 127.0.0.1 — the difference between reachable and refused from a
+// consumer container on a Linux bridge network.
+func requirePublishedOnAllInterfaces(t *testing.T, containerID string, containerPort int) {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "-f",
+		fmt.Sprintf(`{{(index (index .NetworkSettings.Ports "%d/tcp") 0).HostIp}}`, containerPort),
+		containerID).Output()
+	require.NoError(t, err)
+	require.Equal(t, "0.0.0.0", strings.TrimSpace(string(out)),
+		"container port %d must publish on all interfaces", containerPort)
 }
