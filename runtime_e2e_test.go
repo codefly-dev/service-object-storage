@@ -95,13 +95,18 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, rt.Identity, rt.Endpoints, runtimeContext)
 	require.NoError(t, err)
 
+	// Register teardown before Init: Init starts the MinIO and gateway containers
+	// one after the other, so a failure between them (MinIO up, gateway not) must
+	// still clean up what did start. Destroy nil-checks each environment, so it is
+	// safe even if Init failed before starting anything.
+	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
+
 	init, err := rt.Init(ctx, &runtimev0.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, init)
-	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
 
 	_, err = rt.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
@@ -166,12 +171,21 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 // requirePublishedOnAllInterfaces asserts the container's port is published on
 // 0.0.0.0, not 127.0.0.1 — the difference between reachable and refused from a
 // consumer container on a Linux bridge network.
+//
+// Docker can publish a single port under more than one host binding (e.g. an
+// IPv6 "::" entry beside the IPv4 "0.0.0.0" one), and their order is not
+// guaranteed, so it ranges over every binding rather than trusting index 0: the
+// IPv4 wildcard must be present and no binding may be loopback-only.
 func requirePublishedOnAllInterfaces(t *testing.T, containerID string, containerPort int) {
 	t.Helper()
 	out, err := exec.Command("docker", "inspect", "-f",
-		fmt.Sprintf(`{{(index (index .NetworkSettings.Ports "%d/tcp") 0).HostIp}}`, containerPort),
+		fmt.Sprintf(`{{range (index .NetworkSettings.Ports "%d/tcp")}}{{.HostIp}} {{end}}`, containerPort),
 		containerID).Output()
 	require.NoError(t, err)
-	require.Equal(t, "0.0.0.0", strings.TrimSpace(string(out)),
+	hostIPs := strings.Fields(string(out))
+	require.NotEmpty(t, hostIPs, "container port %d has no published host binding", containerPort)
+	require.NotContains(t, hostIPs, "127.0.0.1",
+		"container port %d must not be published loopback-only", containerPort)
+	require.Contains(t, hostIPs, "0.0.0.0",
 		"container port %d must publish on all interfaces", containerPort)
 }

@@ -2,9 +2,8 @@ name: ci
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,7 +11,10 @@ concurrency:
 
 jobs:
   ci:
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
+    # Pinned to an immutable core commit SHA, not @main: a mutable ref lets an
+    # upstream change alter this repo's gate — which runs with this repo's token
+    # — with no commit here. Bump deliberately alongside the go.mod core version.
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@50cfbcfbec296afcb8110c64b9e0878d0ba302b7
 
   # The shared go-service-ci runs `go test` without the race detector; this
   # repo's cache, events hub, and Watch streams are concurrent, so keep race
