@@ -24,6 +24,9 @@ type deploymentTemplateParameters struct {
 	Backend string
 	Bucket  string
 	Region  string
+	// GCSCredentialsFile is the path to a GCS service-account key file. Empty
+	// means Application Default Credentials / Workload Identity.
+	GCSCredentialsFile string
 }
 
 func NewBuilder() *Builder {
@@ -65,12 +68,25 @@ func (s *Builder) SBOM(ctx context.Context, _ *builderv0.SBOMRequest) (*builderv
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
 	s.Base.SetDockerImage(gatewayImage)
 
-	parameters := &deploymentTemplateParameters{Backend: s.conf.backend, Bucket: s.conf.bucket, Region: s.conf.region}
-	// Local runs default to MinIO; a deployment always names a cloud backend, so
-	// an unset backend deploys against S3.
-	if parameters.Backend == "" || parameters.Backend == "minio" {
+	// Resolve the effective backend and credentials from the deployment
+	// configuration; without this the template only ever sees the zero-value
+	// config and can never name gcs/azure.
+	if err := s.LoadConfiguration(ctx, req.GetConfiguration()); err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	parameters := &deploymentTemplateParameters{
+		Backend:            s.conf.backend,
+		Bucket:             s.conf.bucket,
+		Region:             s.conf.region,
+		GCSCredentialsFile: s.conf.gcsCredentialsFile,
+	}
+	// Local runs default to MinIO; a deployment that names no backend targets
+	// S3. An explicit backend (including minio-against-an-endpoint) is honored.
+	if parameters.Backend == "" {
 		parameters.Backend = "s3"
 	}
 	if parameters.Bucket == "" {
