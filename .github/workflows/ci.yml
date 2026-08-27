@@ -2,21 +2,17 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.0"
-          cache: true
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test -race ./...
+  ci:
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
 
   integration-minio:
     runs-on: ubuntu-latest
@@ -24,8 +20,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.27.0"
-          cache: true
+          go-version-file: go.mod
+          cache: false
       - name: start minio
         run: |
           docker run -d --name minio -p 9000:9000 \
@@ -42,3 +38,18 @@ jobs:
           MINIO_SECRET_KEY: minioadmin
           MINIO_BUCKET: sos-test
         run: go test -tags integration ./internal/integration/...
+
+  agent-runtime-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: build gateway image
+        run: docker build -t service-object-storage:e2e .
+      - name: end-to-end put/get through the agent runtime
+        env:
+          SOS_GATEWAY_IMAGE: service-object-storage:e2e
+        run: go test -tags e2e -run TestRuntimeEndToEndPutGet -count=1 -timeout 300s .

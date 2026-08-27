@@ -1,0 +1,19 @@
+# Full-lifecycle agent validation: `codefly agent ci` runs the source, release,
+# and generated-service conformance gates against this agent, through the shared
+# reusable workflow every codefly service agent uses.
+#
+# Manual (workflow_dispatch) for now: the CLI's pinned go source-packager
+# (<=0.0.37, Go <=1.26.6) predates this repo's Go 1.27.0 toolchain, so the
+# release/build gate fails with `go.mod requires go >= 1.27.0 (GOTOOLCHAIN=local)`.
+# Once the CLI promotes its pin to codefly.dev/go >= 0.0.42 (codefly-dev/cli#499),
+# switch this to `on: pull_request` to make it a gate.
+name: agent-ci
+
+on:
+  workflow_dispatch:
+
+jobs:
+  agent-ci:
+    uses: codefly-dev/core/.github/workflows/agent-ci.yml@main
+    with:
+      codefly-cli-version: "0.1.139"

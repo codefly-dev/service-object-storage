@@ -141,6 +141,10 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 	}
 	runner.WithOutput(os.Stdout)
 	runner.WithPortMapping(ctx, s.minioHostPort, minioContainerPort)
+	// The gateway container reaches MinIO through host.docker.internal, which on
+	// Linux is the bridge gateway (172.17.0.1). A port bound only to 127.0.0.1 is
+	// unreachable there, so publish on all interfaces.
+	runner.WithPublicPorts()
 	runner.WithEnvironmentVariables(ctx,
 		resources.Env("MINIO_ROOT_USER", localMinioUser),
 		resources.Env("MINIO_ROOT_PASSWORD", localMinioPassword),
