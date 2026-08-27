@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -107,10 +109,29 @@ func TestSettings_YAMLRoundTrip(t *testing.T) {
 }
 
 func TestDeploymentTemplates(t *testing.T) {
-	agenttesting.AssertKustomizeTemplates(t, deploymentFS, &deploymentTemplateParameters{
-		Bucket: "documents",
-		Region: "us-east-1",
-	})
+	for _, backend := range []string{"s3", "gcs", "azure"} {
+		t.Run(backend, func(t *testing.T) {
+			dir := agenttesting.AssertKustomizeTemplates(t, deploymentFS, &deploymentTemplateParameters{
+				Backend: backend,
+				Bucket:  "documents",
+				Region:  "us-east-1",
+			})
+			manifest, err := os.ReadFile(filepath.Join(dir, "base", "deployment.yaml"))
+			if err != nil {
+				t.Fatalf("read base deployment: %v", err)
+			}
+			body := string(manifest)
+			if !strings.Contains(body, `name: SOS_BACKEND`) || !strings.Contains(body, `value: "`+backend+`"`) {
+				t.Errorf("SOS_BACKEND not set to %q:\n%s", backend, body)
+			}
+			// GCS authenticates from a credentials file, so only that backend
+			// mounts the secret as a file and wires SOS_GCS_CREDENTIALS_FILE.
+			gcsWired := strings.Contains(body, "SOS_GCS_CREDENTIALS_FILE")
+			if want := backend == "gcs"; gcsWired != want {
+				t.Errorf("gcs credentials-file wiring present=%v, want %v for backend %q:\n%s", gcsWired, want, backend, body)
+			}
+		})
+	}
 }
 
 func TestGatewayImageTracksAgentVersion(t *testing.T) {

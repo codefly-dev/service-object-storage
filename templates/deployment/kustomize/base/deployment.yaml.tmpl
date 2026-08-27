@@ -41,15 +41,29 @@ spec:
             - name: SOS_LISTEN
               value: ":9464"
             - name: SOS_BACKEND
-              value: "s3"
+              value: "{{ .Deployment.Parameters.Backend }}"
             - name: SOS_BUCKET
               value: "{{ .Deployment.Parameters.Bucket }}"
             - name: SOS_REGION
               value: "{{ .Deployment.Parameters.Region }}"
+{{- if and (eq .Deployment.Parameters.Backend "gcs") (not .Restricted) }}
+            # GCS authenticates from a service-account JSON file on disk, so the
+            # secret's SOS_GCS_CREDENTIALS_JSON key is mounted as a file below and
+            # this points the gateway at it. S3/Azure take credential values via
+            # envFrom instead.
+            - name: SOS_GCS_CREDENTIALS_FILE
+              value: "/var/secrets/gcs/credentials.json"
+{{- end }}
 {{- if not .Restricted }}
           envFrom:
             - secretRef:
                 name: {{.Name}}-secret
+{{- end }}
+{{- if and (eq .Deployment.Parameters.Backend "gcs") (not .Restricted) }}
+          volumeMounts:
+            - name: gcs-credentials
+              mountPath: /var/secrets/gcs
+              readOnly: true
 {{- end }}
           resources:
             requests:
@@ -74,3 +88,12 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
+{{- if and (eq .Deployment.Parameters.Backend "gcs") (not .Restricted) }}
+      volumes:
+        - name: gcs-credentials
+          secret:
+            secretName: {{.Name}}-secret
+            items:
+              - key: SOS_GCS_CREDENTIALS_JSON
+                path: credentials.json
+{{- end }}

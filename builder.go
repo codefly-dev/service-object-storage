@@ -21,8 +21,9 @@ type Builder struct {
 // deploymentTemplateParameters carries the values the Kubernetes templates need
 // beyond the resolved configuration.
 type deploymentTemplateParameters struct {
-	Bucket string
-	Region string
+	Backend string
+	Bucket  string
+	Region  string
 }
 
 func NewBuilder() *Builder {
@@ -66,7 +67,12 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	defer s.Wool.Catch()
 	s.Base.SetDockerImage(gatewayImage)
 
-	parameters := &deploymentTemplateParameters{Bucket: s.conf.bucket, Region: s.conf.region}
+	parameters := &deploymentTemplateParameters{Backend: s.conf.backend, Bucket: s.conf.bucket, Region: s.conf.region}
+	// Local runs default to MinIO; a deployment always names a cloud backend, so
+	// an unset backend deploys against S3.
+	if parameters.Backend == "" || parameters.Backend == "minio" {
+		parameters.Backend = "s3"
+	}
 	if parameters.Bucket == "" {
 		parameters.Bucket = "documents"
 	}

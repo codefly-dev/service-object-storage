@@ -82,7 +82,12 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
   bucket, and runs the gateway container (`SOS_BACKEND=minio`) pointed at it —
   "test on MinIO, ship on S3", decided by config.
 - **Deployed**: the Builder emits a Kubernetes Deployment running the gateway
-  image with `SOS_BACKEND=s3` and credentials from a Secret.
+  image against the configured cloud backend (`SOS_BACKEND` = `s3` | `gcs` |
+  `azure`, defaulting to `s3`) with credentials from a Secret. S3 and Azure read
+  their credential values from the Secret via `envFrom` (`SOS_ACCESS_KEY` /
+  `SOS_SECRET_KEY`, `SOS_AZURE_ACCOUNT` / `SOS_AZURE_KEY`); GCS mounts the
+  Secret's `SOS_GCS_CREDENTIALS_JSON` key as a file and points
+  `SOS_GCS_CREDENTIALS_FILE` at it.
 
 The agent files live at the repo root (`agent.codefly.yaml`, `main.go`,
 `runtime.go`, `builder.go`, `templates/`); the gateway itself is unchanged and
