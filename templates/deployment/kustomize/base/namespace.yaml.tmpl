@@ -1,0 +1,8 @@
+{{- if not .Restricted }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{.Namespace}}
+  labels:
+    app.kubernetes.io/managed-by: codefly
+{{- end }}

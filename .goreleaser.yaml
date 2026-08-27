@@ -1,0 +1,25 @@
+version: 2
+
+project_name: service-object-storage
+
+# The release asset is the codefly agent binary (repo root main), which makes
+# codefly.dev/object-storage resolvable. The gateway itself ships as a container
+# image, published separately by the release-image workflow.
+builds:
+  - id: darwin
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+  - id: linux
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
