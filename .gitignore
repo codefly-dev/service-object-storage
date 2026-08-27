@@ -11,3 +11,6 @@ coverage.txt
 # Local env
 .env
 *.local
+
+# Codefly agent-ci reports/artifacts
+/.codefly/
