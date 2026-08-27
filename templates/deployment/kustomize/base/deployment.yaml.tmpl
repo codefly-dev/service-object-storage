@@ -41,11 +41,20 @@ spec:
             - name: SOS_LISTEN
               value: ":9464"
             - name: SOS_BACKEND
-              value: "s3"
+              value: "{{ .Deployment.Parameters.Backend }}"
             - name: SOS_BUCKET
               value: "{{ .Deployment.Parameters.Bucket }}"
             - name: SOS_REGION
               value: "{{ .Deployment.Parameters.Region }}"
+{{- if and (eq .Deployment.Parameters.Backend "gcs") .Deployment.Parameters.GCSCredentialsFile (not .Restricted) }}
+            # Optional static service-account key file. Unset, GCS authenticates
+            # via Application Default Credentials / Workload Identity (the
+            # keyless default the backend supports). The key name is
+            # credential-like, so a literal value is only emitted for
+            # unrestricted output; restricted deployments use Workload Identity.
+            - name: SOS_GCS_CREDENTIALS_FILE
+              value: "{{ .Deployment.Parameters.GCSCredentialsFile }}"
+{{- end }}
 {{- if not .Restricted }}
           envFrom:
             - secretRef:
