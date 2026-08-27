@@ -71,6 +71,25 @@ without it the cache is L1-only.
 | `SOS_REDIS_ADDR` | — | shared cache tier (empty = L1-only) |
 | `SOS_CACHE_MAX_OBJECT_BYTES` | `1048576` | max byte-cached object size |
 
+## Running as a codefly service
+
+This repo ships a **codefly service agent** (`codefly.dev/object-storage`) so the
+gateway runs as a first-class codefly service — the way `codefly.dev/postgres` or
+`codefly.dev/redis` do. A consumer declares it as a `service-dependency` and dials
+the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
+
+- **Local / test**: the agent's Runtime starts a **MinIO** container, creates the
+  bucket, and runs the gateway container (`SOS_BACKEND=minio`) pointed at it —
+  "test on MinIO, ship on S3", decided by config.
+- **Deployed**: the Builder emits a Kubernetes Deployment running the gateway
+  image with `SOS_BACKEND=s3` and credentials from a Secret.
+
+The agent files live at the repo root (`agent.codefly.yaml`, `main.go`,
+`runtime.go`, `builder.go`, `templates/`); the gateway itself is unchanged and
+still builds from `cmd/service-object-storage` (see `Dockerfile`). The agent
+binary is the release asset that makes `codefly.dev/object-storage` resolvable;
+the gateway ships as the `ghcr.io/codefly-dev/service-object-storage` image.
+
 ## Develop
 
 ```bash
