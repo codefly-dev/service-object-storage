@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -30,12 +32,11 @@ const gatewayContainerPort = 9464
 // minioContainerPort is MinIO's S3 API port inside its container.
 const minioContainerPort = 9000
 
-// localMinioUser / localMinioPassword are the fixed credentials for the
-// agent-managed local MinIO. They never leave the developer's machine.
-const (
-	localMinioUser     = "minioadmin"
-	localMinioPassword = "minioadmin"
-)
+// localMinioUser is the root user for the agent-managed local MinIO. The
+// password is generated per run (see startLocalMinIO): the container publishes
+// on all interfaces so the gateway can reach it on Linux, so a fixed password
+// would be a known credential on the host's network.
+const localMinioUser = "minioadmin"
 
 type Runtime struct {
 	*services.DefaultRuntime
@@ -47,6 +48,9 @@ type Runtime struct {
 	// minioHostPort is the host port MinIO is mapped to; the agent reaches it at
 	// localhost and the gateway container at host.docker.internal.
 	minioHostPort uint16
+
+	// minioPassword is the MinIO root password generated for this run.
+	minioPassword string
 }
 
 func NewRuntime() *Runtime {
@@ -135,15 +139,25 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 	}
 	s.minioHostPort = port
 
+	password, err := randomSecret()
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot generate minio credentials")
+	}
+	s.minioPassword = password
+
 	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, minioImage, s.UniqueWithWorkspace()+"-minio")
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create minio environment")
 	}
 	runner.WithOutput(os.Stdout)
 	runner.WithPortMapping(ctx, s.minioHostPort, minioContainerPort)
+	// The gateway container reaches MinIO through host.docker.internal, which on
+	// Linux is the bridge gateway (172.17.0.1). A port bound only to 127.0.0.1 is
+	// unreachable there, so publish on all interfaces.
+	runner.WithPublicPorts()
 	runner.WithEnvironmentVariables(ctx,
 		resources.Env("MINIO_ROOT_USER", localMinioUser),
-		resources.Env("MINIO_ROOT_PASSWORD", localMinioPassword),
+		resources.Env("MINIO_ROOT_PASSWORD", s.minioPassword),
 	)
 	runner.WithCommand("server", "/data")
 	if err = runner.Init(ctx); err != nil {
@@ -156,7 +170,7 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 	s.conf.endpoint = fmt.Sprintf("http://host.docker.internal:%d", s.minioHostPort)
 	s.conf.backend = "minio"
 	s.conf.accessKey = localMinioUser
-	s.conf.secretKey = localMinioPassword
+	s.conf.secretKey = s.minioPassword
 
 	return s.ensureBucket(ctx)
 }
@@ -168,7 +182,7 @@ func (s *Runtime) ensureBucket(ctx context.Context) error {
 	var lastErr error
 	for retry := 0; retry < 30; retry++ {
 		cl, err := miniogo.New(endpoint, &miniogo.Options{
-			Creds:  miniocreds.NewStaticV4(localMinioUser, localMinioPassword, ""),
+			Creds:  miniocreds.NewStaticV4(s.conf.accessKey, s.conf.secretKey, ""),
 			Secure: false,
 		})
 		if err == nil {
@@ -207,6 +221,11 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	}
 	runner.WithOutput(os.Stdout)
 	runner.WithPortMapping(ctx, hostPort, gatewayContainerPort)
+	// Consumers running in their own container reach the gateway through
+	// host.docker.internal (the Container network instance the agent advertises),
+	// which resolves to the bridge gateway on Linux — unreachable if the port is
+	// bound only to 127.0.0.1. Publish on all interfaces, as MinIO does.
+	runner.WithPublicPorts()
 	envs := []*resources.EnvironmentVariable{
 		resources.Env("SOS_LISTEN", fmt.Sprintf(":%d", gatewayContainerPort)),
 		resources.Env("SOS_BACKEND", s.conf.backend),
@@ -300,4 +319,15 @@ func freeHostPort() (uint16, error) {
 	}
 	defer l.Close()
 	return uint16(l.Addr().(*net.TCPAddr).Port), nil
+}
+
+// randomSecret returns an unguessable hex secret for the local MinIO root
+// password, so the on-host MinIO published for the gateway is not reachable
+// with a well-known credential.
+func randomSecret() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
