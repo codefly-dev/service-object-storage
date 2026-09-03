@@ -223,6 +223,15 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 			resources.Env("SOS_SECRET_KEY", s.conf.secretKey),
 		)
 	}
+	// Forward the cloud-backend credentials the same way s3's are: LoadConfiguration
+	// resolves them, so a local run against gcs/azure (not the minio fixture) must
+	// carry them through or the gateway starts without the credentials it resolved.
+	if s.conf.gcsCredentialsFile != "" {
+		envs = append(envs, resources.Env("SOS_GCS_CREDENTIALS_FILE", s.conf.gcsCredentialsFile))
+	}
+	if s.conf.azureAccount != "" {
+		envs = append(envs, resources.Env("SOS_AZURE_ACCOUNT", s.conf.azureAccount))
+	}
 	runner.WithEnvironmentVariables(ctx, envs...)
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start gateway")

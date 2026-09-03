@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
@@ -27,6 +28,21 @@ type deploymentTemplateParameters struct {
 	// GCSCredentialsFile is the path to a GCS service-account key file. Empty
 	// means Application Default Credentials / Workload Identity.
 	GCSCredentialsFile string
+	// AzureAccount is the Azure Blob storage account name. It is non-sensitive
+	// (it forms the public blob endpoint host); the shared key that pairs with
+	// it is sensitive and travels via the Secret, not the manifest.
+	AzureAccount string
+}
+
+// supportedDeployBackends is the set of backend kinds Deploy knows how to
+// template. It mirrors the gateway's registered backends (minio is honored for
+// deployments that point it at an external endpoint); an out-of-set value is a
+// misconfiguration the builder rejects rather than passes through.
+var supportedDeployBackends = map[string]bool{
+	"s3":    true,
+	"gcs":   true,
+	"azure": true,
+	"minio": true,
 }
 
 func NewBuilder() *Builder {
@@ -80,20 +96,27 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	parameters := &deploymentTemplateParameters{
 		Backend:            s.conf.backend,
-		Bucket:             s.conf.bucket,
+		Bucket:             s.conf.bucket, // LoadConfiguration already defaults bucket/region.
 		Region:             s.conf.region,
 		GCSCredentialsFile: s.conf.gcsCredentialsFile,
+		AzureAccount:       s.conf.azureAccount,
 	}
 	// Local runs default to MinIO; a deployment that names no backend targets
 	// S3. An explicit backend (including minio-against-an-endpoint) is honored.
 	if parameters.Backend == "" {
 		parameters.Backend = "s3"
 	}
-	if parameters.Bucket == "" {
-		parameters.Bucket = "documents"
+	// Validate the resolved backend before templating. The builder reports the
+	// deploy as a success once the manifest is written, so an unknown backend
+	// kind or an azure deployment missing its (non-secret) account name would
+	// otherwise ship a manifest that passes every probe and then fails on the
+	// gateway's first storage call. Reject it here, at the layer that owns the
+	// manifest, with an actionable error instead of a silently broken deploy.
+	if !supportedDeployBackends[parameters.Backend] {
+		return s.Builder.DeployError(fmt.Errorf("unsupported deploy backend %q (want one of s3, gcs, azure, minio)", parameters.Backend))
 	}
-	if parameters.Region == "" {
-		parameters.Region = "us-east-1"
+	if parameters.Backend == "azure" && parameters.AzureAccount == "" {
+		return s.Builder.DeployError(fmt.Errorf("backend azure requires SOS_AZURE_ACCOUNT (the storage account name)"))
 	}
 	return s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,

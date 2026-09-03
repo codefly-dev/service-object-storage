@@ -87,9 +87,11 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
   `SOS_REGION`, and the backend are read from the deployment configuration. GCS
   defaults to keyless auth (Application Default Credentials / Workload Identity);
   set `SOS_GCS_CREDENTIALS_FILE` in configuration only to point the gateway at a
-  mounted service-account key file. (Note: sensitive credential values —
-  `SOS_SECRET_KEY`, `SOS_AZURE_KEY` — are not yet wired into the emitted Secret;
-  see the credential-delivery follow-up.)
+  mounted service-account key file. Azure reads its (non-sensitive) account name
+  from `SOS_AZURE_ACCOUNT`, emitted into the manifest when the backend is
+  `azure`. (Note: sensitive credential values — `SOS_SECRET_KEY`,
+  `SOS_AZURE_KEY` — are not yet wired into the emitted Secret; see the
+  credential-delivery follow-up.)
 
 The agent files live at the repo root (`agent.codefly.yaml`, `main.go`,
 `runtime.go`, `builder.go`, `templates/`); the gateway itself is unchanged and

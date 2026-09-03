@@ -55,6 +55,14 @@ spec:
             - name: SOS_GCS_CREDENTIALS_FILE
               value: "{{ .Deployment.Parameters.GCSCredentialsFile }}"
 {{- end }}
+{{- if and (eq .Deployment.Parameters.Backend "azure") .Deployment.Parameters.AzureAccount }}
+            # Azure Blob storage account name. Non-sensitive (it is the public
+            # blob endpoint host), so it is emitted for restricted output too;
+            # the paired shared key (SOS_AZURE_KEY) is sensitive and arrives via
+            # the Secret / envFrom path, never as a literal here.
+            - name: SOS_AZURE_ACCOUNT
+              value: "{{ .Deployment.Parameters.AzureAccount }}"
+{{- end }}
 {{- if not .Restricted }}
           envFrom:
             - secretRef:
