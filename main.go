@@ -70,12 +70,14 @@ type Settings struct {
 // resolved holds the effective configuration after defaults and runtime
 // configuration are applied.
 type resolved struct {
-	backend   string
-	bucket    string
-	region    string
-	endpoint  string
-	accessKey string
-	secretKey string
+	backend            string
+	bucket             string
+	region             string
+	endpoint           string
+	accessKey          string
+	secretKey          string
+	gcsCredentialsFile string
+	azureAccount       string
 }
 
 type Service struct {
@@ -141,12 +143,14 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 	}
 	if conf != nil {
 		for key, dst := range map[string]*string{
-			"SOS_BACKEND":    &r.backend,
-			"SOS_BUCKET":     &r.bucket,
-			"SOS_REGION":     &r.region,
-			"SOS_ENDPOINT":   &r.endpoint,
-			"SOS_ACCESS_KEY": &r.accessKey,
-			"SOS_SECRET_KEY": &r.secretKey,
+			"SOS_BACKEND":              &r.backend,
+			"SOS_BUCKET":               &r.bucket,
+			"SOS_REGION":               &r.region,
+			"SOS_ENDPOINT":             &r.endpoint,
+			"SOS_ACCESS_KEY":           &r.accessKey,
+			"SOS_SECRET_KEY":           &r.secretKey,
+			"SOS_GCS_CREDENTIALS_FILE": &r.gcsCredentialsFile,
+			"SOS_AZURE_ACCOUNT":        &r.azureAccount,
 		} {
 			v, err := resources.GetConfigurationValue(ctx, conf, "object-storage", key)
 			if err == nil && v != "" {

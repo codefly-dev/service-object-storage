@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/codefly-dev/core/agents/services"
 	agenttesting "github.com/codefly-dev/core/agents/testing"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	"github.com/codefly-dev/core/resources"
 	"gopkg.in/yaml.v3"
 )
 
@@ -107,10 +112,199 @@ func TestSettings_YAMLRoundTrip(t *testing.T) {
 }
 
 func TestDeploymentTemplates(t *testing.T) {
-	agenttesting.AssertKustomizeTemplates(t, deploymentFS, &deploymentTemplateParameters{
-		Bucket: "documents",
-		Region: "us-east-1",
-	})
+	cases := []struct {
+		name             string
+		params           deploymentTemplateParameters
+		wantGCSFile      bool
+		wantAzureAccount string
+	}{
+		{"s3", deploymentTemplateParameters{Backend: "s3", Bucket: "documents", Region: "us-east-1"}, false, ""},
+		// Azure with no account name emits no SOS_AZURE_ACCOUNT env.
+		{"azure", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1"}, false, ""},
+		// Azure with an account name emits the non-sensitive SOS_AZURE_ACCOUNT.
+		{"azure-account", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1", AzureAccount: "acmestorage"}, false, "acmestorage"},
+		// GCS with no key file authenticates via Workload Identity — no
+		// credentials-file env, and crucially no required secret mount that
+		// would wedge the pod when the operator runs keyless.
+		{"gcs-adc", deploymentTemplateParameters{Backend: "gcs", Bucket: "documents", Region: "us-east-1"}, false, ""},
+		// GCS with an explicit key-file path emits SOS_GCS_CREDENTIALS_FILE.
+		{"gcs-file", deploymentTemplateParameters{Backend: "gcs", Bucket: "documents", Region: "us-east-1", GCSCredentialsFile: "/var/secrets/gcs/key.json"}, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := tc.params
+			dir := agenttesting.AssertKustomizeTemplates(t, deploymentFS, &params)
+			manifest, err := os.ReadFile(filepath.Join(dir, "base", "deployment.yaml"))
+			if err != nil {
+				t.Fatalf("read base deployment: %v", err)
+			}
+			body := string(manifest)
+			if !strings.Contains(body, `name: SOS_BACKEND`) || !strings.Contains(body, `value: "`+tc.params.Backend+`"`) {
+				t.Errorf("SOS_BACKEND not set to %q:\n%s", tc.params.Backend, body)
+			}
+			if gcsWired := strings.Contains(body, "SOS_GCS_CREDENTIALS_FILE"); gcsWired != tc.wantGCSFile {
+				t.Errorf("SOS_GCS_CREDENTIALS_FILE present=%v, want %v:\n%s", gcsWired, tc.wantGCSFile, body)
+			}
+			azureWired := strings.Contains(body, "SOS_AZURE_ACCOUNT")
+			if azureWired != (tc.wantAzureAccount != "") {
+				t.Errorf("SOS_AZURE_ACCOUNT present=%v, want %v:\n%s", azureWired, tc.wantAzureAccount != "", body)
+			}
+			if tc.wantAzureAccount != "" && !strings.Contains(body, `value: "`+tc.wantAzureAccount+`"`) {
+				t.Errorf("SOS_AZURE_ACCOUNT not set to %q:\n%s", tc.wantAzureAccount, body)
+			}
+			// The removed mount must not linger: a required secret key would
+			// block startup when no key is supplied.
+			if strings.Contains(body, "gcs-credentials") {
+				t.Errorf("unexpected gcs-credentials volume wiring:\n%s", body)
+			}
+		})
+	}
+}
+
+// newDeployBuilder returns a Builder wired for a headless Deploy call.
+func newDeployBuilder(t *testing.T, ctx context.Context) *Builder {
+	t.Helper()
+	builder := NewBuilder()
+	identity := &basev0.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
+	if err := builder.Base.HeadlessLoad(ctx, identity); err != nil {
+		t.Fatalf("HeadlessLoad: %v", err)
+	}
+	builder.Base.Information = &services.Information{Service: resources.ToServiceWithCase(resources.ServiceIdentityFromProto(identity))}
+	builder.Base.EnvironmentVariables.SetIdentity(identity)
+	builder.Base.SetDockerImage(resources.NewDockerImage("example/service:1.2.3"))
+	return builder
+}
+
+// deployRequest builds a Kubernetes DeploymentRequest carrying the given
+// object-storage configuration values, rendering into destination.
+func deployRequest(destination string, values map[string]string) *builderv0.DeploymentRequest {
+	var cfgValues []*basev0.ConfigurationValue
+	for k, v := range values {
+		cfgValues = append(cfgValues, &basev0.ConfigurationValue{Key: k, Value: v})
+	}
+	return &builderv0.DeploymentRequest{
+		Environment: &basev0.Environment{Name: "test", Fixture: "dev-admin"},
+		Deployment: &builderv0.Deployment{Kind: &builderv0.Deployment_Kubernetes{
+			Kubernetes: &builderv0.KubernetesDeployment{
+				Namespace:   "codefly",
+				Destination: destination,
+				Profile:     builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1,
+			},
+		}},
+		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+			Name:                "object-storage",
+			ConfigurationValues: cfgValues,
+		}}},
+	}
+}
+
+// TestDeployResolvesBackendFromConfiguration drives the real Builder.Deploy path
+// and asserts the rendered manifest names the configured backend. This is the
+// regression guard for the bug where Deploy never loaded the configuration,
+// leaving SOS_BACKEND pinned to s3 regardless of the environment. Each backend
+// exercises the full config-key -> resolved -> template wiring end to end, so a
+// typo'd map key (e.g. SOS_AZURE_ACCOUNT) fails here rather than shipping green.
+func TestDeployResolvesBackendFromConfiguration(t *testing.T) {
+	cases := []struct {
+		name   string
+		config map[string]string
+		want   []string
+	}{
+		{
+			name: "gcs-with-key-file",
+			config: map[string]string{
+				"SOS_BACKEND":              "gcs",
+				"SOS_BUCKET":               "prod-docs",
+				"SOS_GCS_CREDENTIALS_FILE": "/var/secrets/gcs/key.json",
+			},
+			want: []string{
+				"name: SOS_BACKEND", `value: "gcs"`, `value: "prod-docs"`,
+				"name: SOS_GCS_CREDENTIALS_FILE", `value: "/var/secrets/gcs/key.json"`,
+			},
+		},
+		{
+			name: "azure-with-account",
+			config: map[string]string{
+				"SOS_BACKEND":       "azure",
+				"SOS_BUCKET":        "prod-docs",
+				"SOS_AZURE_ACCOUNT": "acmestorage",
+			},
+			want: []string{
+				"name: SOS_BACKEND", `value: "azure"`, `value: "prod-docs"`,
+				"name: SOS_AZURE_ACCOUNT", `value: "acmestorage"`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			builder := newDeployBuilder(t, ctx)
+			destination := t.TempDir()
+
+			resp, err := builder.Deploy(ctx, deployRequest(destination, tc.config))
+			if err != nil {
+				t.Fatalf("Deploy: %v", err)
+			}
+			if got := resp.GetState().GetState(); got != builderv0.DeploymentStatus_SUCCESS {
+				t.Fatalf("deploy state = %v (%s), want SUCCESS", got, resp.GetState().GetMessage())
+			}
+
+			manifest, err := os.ReadFile(filepath.Join(destination, "base", "deployment.yaml"))
+			if err != nil {
+				t.Fatalf("read base deployment: %v", err)
+			}
+			body := string(manifest)
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Errorf("rendered manifest missing %q:\n%s", want, body)
+				}
+			}
+		})
+	}
+}
+
+// TestDeployRejectsBrokenBackendConfiguration guards the validation that keeps a
+// misconfigured deploy from being reported as a success and then crashing the
+// gateway at runtime: an unknown backend kind, or azure without its account name.
+func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
+	cases := []struct {
+		name    string
+		config  map[string]string
+		wantMsg string
+	}{
+		{
+			name:    "unsupported-backend",
+			config:  map[string]string{"SOS_BACKEND": "gcs2", "SOS_BUCKET": "prod-docs"},
+			wantMsg: "unsupported deploy backend",
+		},
+		{
+			name:    "azure-without-account",
+			config:  map[string]string{"SOS_BACKEND": "azure", "SOS_BUCKET": "prod-docs"},
+			wantMsg: "requires SOS_AZURE_ACCOUNT",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			builder := newDeployBuilder(t, ctx)
+			destination := t.TempDir()
+
+			resp, err := builder.Deploy(ctx, deployRequest(destination, tc.config))
+			if err != nil {
+				t.Fatalf("Deploy returned transport error: %v", err)
+			}
+			if got := resp.GetState().GetState(); got != builderv0.DeploymentStatus_ERROR {
+				t.Fatalf("deploy state = %v, want ERROR", got)
+			}
+			if msg := resp.GetState().GetMessage(); !strings.Contains(msg, tc.wantMsg) {
+				t.Errorf("error message = %q, want it to contain %q", msg, tc.wantMsg)
+			}
+			// A rejected deploy must not leave a half-written manifest behind.
+			if _, err := os.Stat(filepath.Join(destination, "base", "deployment.yaml")); err == nil {
+				t.Errorf("rejected deploy still wrote a manifest at %s", destination)
+			}
+		})
+	}
 }
 
 func TestGatewayImageTracksAgentVersion(t *testing.T) {
