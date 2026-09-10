@@ -42,6 +42,8 @@ type Backend struct {
 	bucket     string
 	endpoint   string
 	presignMax time.Duration
+	probe      backend.ProbeStrategy
+	probeKey   string
 }
 
 // New opens a MinIO backend against cfg.Bucket.
@@ -79,6 +81,8 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 		bucket:     cfg.Bucket,
 		endpoint:   endpoint,
 		presignMax: cfg.PresignMaxExpiry,
+		probe:      cfg.Strategy(),
+		probeKey:   cfg.ProbeKey,
 	}, nil
 }
 
@@ -104,6 +108,46 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		BatchDeleteMax:      1000,
 		NativeVerbs:         nil,
 	}
+}
+
+// Probe verifies access to the bucket without mutating it.
+func (b *Backend) Probe(ctx context.Context) error {
+	const op = "minio.Probe"
+
+	switch b.probe {
+	case backend.ProbeStat:
+		_, err := b.client.StatObject(ctx, b.bucket, b.probeKey, minio.StatObjectOptions{})
+		// A HEAD carries no error body, so a missing object and a missing bucket
+		// are the same bare 404 here — this strategy attests that the endpoint
+		// answered and the credentials were accepted, nothing finer.
+		if err == nil || serr.Is(mapErr(op, err), serr.NotFound) {
+			return nil
+		}
+		return probeErr(op, err)
+
+	default:
+		lctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		for obj := range b.client.ListObjects(lctx, b.bucket, minio.ListObjectsOptions{MaxKeys: 1}) {
+			if obj.Err != nil {
+				return probeErr(op, obj.Err)
+			}
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return serr.Wrap(serr.Unavailable, op, err)
+		}
+		return nil
+	}
+}
+
+// probeErr normalizes a probe failure, separating an endpoint that never
+// answered from a refusal the service actually returned.
+func probeErr(op string, err error) error {
+	if serr.Unreachable(err) {
+		return serr.Wrap(serr.Unavailable, op, err)
+	}
+	return mapErr(op, err)
 }
 
 // mapErr normalizes a minio error into a serr.Error.

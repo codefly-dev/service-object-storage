@@ -3,11 +3,24 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/config"
 )
+
+// probeEnv sets what every FromEnv call needs before a probe setting is even
+// reachable: a bucket, and an auth posture. Resolution refuses an
+// unauthenticated listener, and that check runs before the probe checks, so
+// without a token these tests would assert against the auth error instead of
+// the probe one they are about.
+func probeEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_AUTH_TOKEN", "a-per-run-secret")
+}
 
 // TestFromEnv_RefusesUnauthenticatedListener is the startup guard: the gateway
 // must not come up serving bucket-wide read/write/delete to whoever can reach
@@ -89,4 +102,49 @@ func TestFromEnv_BucketCheckStillRuns(t *testing.T) {
 	_, err := config.FromEnv()
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "SOS_BUCKET"), "got %v", err)
+}
+
+func TestFromEnvProbeDefaults(t *testing.T) {
+	probeEnv(t)
+
+	cfg, err := config.FromEnv()
+	require.NoError(t, err)
+	require.Equal(t, backend.ProbeList, cfg.Backend.ProbeStrategy)
+	require.Equal(t, 10*time.Second, cfg.Health.Interval)
+	require.Equal(t, 5*time.Second, cfg.Health.Timeout)
+}
+
+func TestFromEnvProbeOverrides(t *testing.T) {
+	probeEnv(t)
+	t.Setenv("SOS_PROBE_STRATEGY", "stat")
+	t.Setenv("SOS_PROBE_KEY", ".codefly-readiness")
+	t.Setenv("SOS_PROBE_INTERVAL", "45s")
+	t.Setenv("SOS_PROBE_TIMEOUT", "2s")
+
+	cfg, err := config.FromEnv()
+	require.NoError(t, err)
+	require.Equal(t, backend.ProbeStat, cfg.Backend.ProbeStrategy)
+	require.Equal(t, ".codefly-readiness", cfg.Backend.ProbeKey)
+	require.Equal(t, 45*time.Second, cfg.Health.Interval)
+	require.Equal(t, 2*time.Second, cfg.Health.Timeout)
+}
+
+// TestFromEnvRejectsUnusableProbe keeps a misconfigured probe from turning into
+// a permanently unready gateway that nobody can diagnose.
+func TestFromEnvRejectsUnusableProbe(t *testing.T) {
+	t.Run("unknown strategy", func(t *testing.T) {
+		probeEnv(t)
+		t.Setenv("SOS_PROBE_STRATEGY", "ping")
+
+		_, err := config.FromEnv()
+		require.ErrorContains(t, err, "SOS_PROBE_STRATEGY")
+	})
+
+	t.Run("stat without key", func(t *testing.T) {
+		probeEnv(t)
+		t.Setenv("SOS_PROBE_STRATEGY", "stat")
+
+		_, err := config.FromEnv()
+		require.ErrorContains(t, err, "SOS_PROBE_KEY")
+	})
 }

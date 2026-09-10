@@ -43,6 +43,8 @@ type Backend struct {
 	// server-side copy sources.
 	sharedKey *azblob.SharedKeyCredential
 	maxExpiry time.Duration
+	probe     backend.ProbeStrategy
+	probeKey  string
 }
 
 // New opens an Azure Blob backend bound to cfg.Bucket (the container).
@@ -57,6 +59,8 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		container: cfg.Bucket,
 		account:   cfg.AzureAccount,
 		maxExpiry: cfg.PresignMaxExpiry,
+		probe:     cfg.Strategy(),
+		probeKey:  cfg.ProbeKey,
 	}
 
 	if cfg.AzureKey != "" {
@@ -483,6 +487,39 @@ func accessConditions(ifNoneMatch, ifMatch string, ifModifiedSince time.Time, cr
 		return nil
 	}
 	return &blob.AccessConditions{ModifiedAccessConditions: mac}
+}
+
+// Probe verifies access to the container without mutating it.
+func (b *Backend) Probe(ctx context.Context) error {
+	const op = "azure.Probe"
+
+	switch b.probe {
+	case backend.ProbeStat:
+		_, err := b.containerClient().NewBlobClient(b.probeKey).GetProperties(ctx, nil)
+		if err == nil || bloberror.HasCode(err, bloberror.BlobNotFound) {
+			return nil
+		}
+		return probeErr(op, err)
+
+	default:
+		pager := b.containerClient().NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+			MaxResults: to.Ptr(int32(1)),
+		})
+		_, err := pager.NextPage(ctx)
+		return probeErr(op, err)
+	}
+}
+
+// probeErr normalizes a probe failure, separating an endpoint that never
+// answered from a refusal the service actually returned.
+func probeErr(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if serr.Unreachable(err) {
+		return serr.Wrap(serr.Unavailable, op, err)
+	}
+	return mapErr(op, err)
 }
 
 // mapErr normalizes an azblob error into a serr code.

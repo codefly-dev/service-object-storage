@@ -36,6 +36,35 @@ type Config struct {
 
 	// PresignMaxExpiry caps presign lifetimes; 0 means the backend default.
 	PresignMaxExpiry time.Duration
+
+	// ProbeStrategy selects how Probe verifies access; empty means ProbeList.
+	ProbeStrategy ProbeStrategy
+	// ProbeKey is the object ProbeStat heads. It need not exist.
+	ProbeKey string
+}
+
+// ProbeStrategy names how a backend verifies access to its bucket/container.
+// Both strategies are non-mutating: a probe must never create or delete an
+// object to prove the store answers.
+type ProbeStrategy string
+
+const (
+	// ProbeList enumerates one key. It is the default, and proves the
+	// bucket/container exists and the credentials may list it.
+	ProbeList ProbeStrategy = "list"
+	// ProbeStat heads Config.ProbeKey. It is for deployments whose credentials
+	// deliberately carry no list permission: the object is not required to
+	// exist, since a NotFound answer already proves the store was reached, the
+	// bucket resolved, and the credentials were accepted.
+	ProbeStat ProbeStrategy = "stat"
+)
+
+// Strategy resolves the configured probe strategy.
+func (c Config) Strategy() ProbeStrategy {
+	if c.ProbeStrategy == "" {
+		return ProbeList
+	}
+	return c.ProbeStrategy
 }
 
 // ObjectInfo is object metadata — and every field the cache needs. ETag is an
@@ -171,8 +200,17 @@ type Backend interface {
 	// accounts, or two MinIO clusters with a bucket named "data", must not
 	// collide on a shared Redis tier.
 	Identity() string
-	// Capabilities reports what this backend honors.
+	// Capabilities reports what this backend honors. It is static feature
+	// introspection computed from the backend kind and its configuration: it
+	// reaches no network and proves nothing about access — see Probe.
 	Capabilities() Capabilities
+	// Probe verifies that the configured bucket/container is reachable and that
+	// the credentials are accepted, using the configured ProbeStrategy. It is
+	// non-mutating and bounded by ctx. Failures are normalized: Unavailable
+	// (endpoint unreachable), NotFound (missing bucket/container),
+	// PermissionDenied (credentials refused), Unsupported (the backend cannot
+	// honor the configured strategy).
+	Probe(ctx context.Context) error
 
 	// Stat returns object metadata (HEAD). versionID may be empty.
 	Stat(ctx context.Context, key, versionID string) (*ObjectInfo, error)

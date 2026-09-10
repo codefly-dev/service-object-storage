@@ -20,6 +20,7 @@ import (
 	"github.com/codefly-dev/core/shared"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+
 	"gopkg.in/yaml.v3"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
@@ -360,7 +361,61 @@ func TestDeploymentTemplates(t *testing.T) {
 			if strings.Contains(body, "name: SOS_AUTH_TOKEN") {
 				t.Errorf("manifest must not carry the gateway credential:\n%s", body)
 			}
+			requireProbeSemantics(t, body)
 		})
+	}
+}
+
+// requireProbeSemantics pins what the rendered probes attest. A TCP probe
+// passes as soon as the gRPC port is bound, which says nothing about the store
+// behind it: readiness must name the ObjectStorage service, whose serving
+// status follows the backend probe, while liveness stays on the overall
+// service so a backend outage drains the replica instead of restarting it.
+func requireProbeSemantics(t *testing.T, body string) {
+	t.Helper()
+	if strings.Contains(body, "tcpSocket") {
+		t.Errorf("probes must not settle for a bound socket:\n%s", body)
+	}
+
+	var deployment struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						StartupProbe   map[string]any `yaml:"startupProbe"`
+						ReadinessProbe map[string]any `yaml:"readinessProbe"`
+						LivenessProbe  map[string]any `yaml:"livenessProbe"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal([]byte(body), &deployment); err != nil {
+		t.Fatalf("parse deployment: %v", err)
+	}
+	containers := deployment.Spec.Template.Spec.Containers
+	if len(containers) != 1 {
+		t.Fatalf("want one container, got %d", len(containers))
+	}
+	c := containers[0]
+
+	for name, probe := range map[string]map[string]any{"startupProbe": c.StartupProbe, "readinessProbe": c.ReadinessProbe} {
+		grpc, ok := probe["grpc"].(map[string]any)
+		if !ok {
+			t.Errorf("%s is not a grpc probe: %v", name, probe)
+			continue
+		}
+		if grpc["service"] != storagev0.ObjectStorage_ServiceDesc.ServiceName {
+			t.Errorf("%s must check %q, got %v", name, storagev0.ObjectStorage_ServiceDesc.ServiceName, grpc["service"])
+		}
+	}
+
+	liveness, ok := c.LivenessProbe["grpc"].(map[string]any)
+	if !ok {
+		t.Fatalf("livenessProbe is not a grpc probe: %v", c.LivenessProbe)
+	}
+	if _, named := liveness["service"]; named {
+		t.Errorf("livenessProbe must check the overall service, got %v", liveness["service"])
 	}
 }
 

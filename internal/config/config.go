@@ -28,6 +28,15 @@ type Config struct {
 	AuthToken string
 	Backend   backend.Config
 	Cache     CacheConfig
+	Health    HealthConfig
+}
+
+// HealthConfig paces the background probe that drives the gRPC health service.
+// Interval bounds how stale a reported access check can be — a probe that
+// succeeded once is never replayed beyond it.
+type HealthConfig struct {
+	Interval time.Duration
+	Timeout  time.Duration
 }
 
 // CacheConfig controls the caching layer. When RedisAddr is empty the cache is
@@ -58,6 +67,8 @@ func FromEnv() (Config, error) {
 			AzureAccount:       os.Getenv("SOS_AZURE_ACCOUNT"),
 			AzureKey:           os.Getenv("SOS_AZURE_KEY"),
 			PresignMaxExpiry:   envDuration("SOS_PRESIGN_MAX_EXPIRY", 0),
+			ProbeStrategy:      backend.ProbeStrategy(env("SOS_PROBE_STRATEGY", string(backend.ProbeList))),
+			ProbeKey:           os.Getenv("SOS_PROBE_KEY"),
 		},
 		Cache: CacheConfig{
 			Enabled:       envBool("SOS_CACHE", true),
@@ -71,12 +82,26 @@ func FromEnv() (Config, error) {
 				NegativeTTL:          envDuration("SOS_CACHE_NEGATIVE_TTL", 0),
 			},
 		},
+		Health: HealthConfig{
+			Interval: envDuration("SOS_PROBE_INTERVAL", 10*time.Second),
+			Timeout:  envDuration("SOS_PROBE_TIMEOUT", 5*time.Second),
+		},
 	}
 	if cfg.Backend.Bucket == "" {
 		return Config{}, fmt.Errorf("SOS_BUCKET is required")
 	}
 	if err := checkListenerIsAuthenticated(cfg.AuthToken); err != nil {
 		return Config{}, err
+	}
+	switch cfg.Backend.ProbeStrategy {
+	case backend.ProbeList:
+	case backend.ProbeStat:
+		if cfg.Backend.ProbeKey == "" {
+			return Config{}, fmt.Errorf("SOS_PROBE_KEY is required when SOS_PROBE_STRATEGY=%s", backend.ProbeStat)
+		}
+	default:
+		return Config{}, fmt.Errorf("unknown SOS_PROBE_STRATEGY %q (want %q or %q)",
+			cfg.Backend.ProbeStrategy, backend.ProbeList, backend.ProbeStat)
 	}
 	// MinIO addresses buckets path-style by default.
 	if cfg.Backend.Kind == "minio" && os.Getenv("SOS_USE_PATH_STYLE") == "" {

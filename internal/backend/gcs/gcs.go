@@ -369,6 +369,36 @@ func (b *Backend) Close() error {
 	return b.client.Close()
 }
 
+// Probe verifies access to the bucket without mutating it.
+func (b *Backend) Probe(ctx context.Context) error {
+	const op = "probe"
+
+	switch b.cfg.Strategy() {
+	case backend.ProbeStat:
+		_, err := b.bucket.Object(b.cfg.ProbeKey).Attrs(ctx)
+		if err == nil || errors.Is(err, storage.ErrObjectNotExist) {
+			return nil
+		}
+		return probeErr(op, err)
+
+	default:
+		_, err := b.bucket.Objects(ctx, &storage.Query{}).Next()
+		if err == nil || errors.Is(err, iterator.Done) {
+			return nil
+		}
+		return probeErr(op, err)
+	}
+}
+
+// probeErr normalizes a probe failure, separating an endpoint that never
+// answered from a refusal the service actually returned.
+func probeErr(op string, err error) error {
+	if serr.Unreachable(err) {
+		return serr.Wrap(serr.Unavailable, op, err)
+	}
+	return mapErr(op, err)
+}
+
 // mapErr normalizes GCS/googleapi errors into serr codes.
 func mapErr(op string, err error) error {
 	if err == nil {

@@ -60,6 +60,10 @@ func (b *Backend) Capabilities() backend.Capabilities {
 	}
 }
 
+// Probe always succeeds: the store lives in this process, so it is reachable
+// exactly as long as the caller holding it is.
+func (b *Backend) Probe(_ context.Context) error { return nil }
+
 func etagOf(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "\"" + hex.EncodeToString(sum[:]) + "\""

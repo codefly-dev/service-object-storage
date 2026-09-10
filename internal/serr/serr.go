@@ -7,6 +7,7 @@ package serr
 import (
 	"errors"
 	"fmt"
+	"net"
 )
 
 // Code is the backend-independent error class.
@@ -32,6 +33,10 @@ const (
 	Throttled
 	// InvalidArgument means the request was malformed.
 	InvalidArgument
+	// Unavailable means the backend could not be reached at all — the request
+	// never got an answer from the service (dial refused, DNS failure, TLS
+	// handshake, transport timeout).
+	Unavailable
 )
 
 func (c Code) String() string {
@@ -52,6 +57,8 @@ func (c Code) String() string {
 		return "Throttled"
 	case InvalidArgument:
 		return "InvalidArgument"
+	case Unavailable:
+		return "Unavailable"
 	default:
 		return "Internal"
 	}
@@ -98,4 +105,12 @@ func CodeOf(err error) Code {
 // Is reports whether err carries the given normalized code.
 func Is(err error, code Code) bool {
 	return err != nil && CodeOf(err) == code
+}
+
+// Unreachable reports whether err is a transport-level failure rather than a
+// response the service produced. Backends use it to separate "endpoint is not
+// there" from "the store said no", which readiness must not conflate.
+func Unreachable(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }

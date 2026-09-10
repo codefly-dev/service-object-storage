@@ -17,6 +17,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
+	grpchealth "google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/auth"
@@ -24,6 +26,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/config"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 
 	// Backends register themselves via init(); importing them compiles each into
@@ -90,6 +93,10 @@ func run() error {
 	grpcServer := grpc.NewServer(options...)
 	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub))
 
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	defer stopMonitor()
+	serveHealth(monitorCtx, grpcServer, store, cfg.Health)
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -134,6 +141,23 @@ func openStore(ctx context.Context, cfg config.Config) (backend.Backend, redis.U
 		}
 	}
 	return cache.New(be, rdb, cfg.Cache.Options), rdb, nil
+}
+
+// serveHealth registers the gRPC health service and starts the readiness
+// monitor behind it.
+//
+// The overall ("") service is liveness: it stays SERVING for as long as the
+// process serves, so a backend outage never gets the container restarted. The
+// ObjectStorage service is readiness and follows the backend probe, so access
+// lost after startup drains this replica out of rotation and access regained
+// puts it back.
+func serveHealth(ctx context.Context, srv *grpc.Server, store backend.Backend, cfg config.HealthConfig) {
+	hs := grpchealth.NewServer()
+	healthv1.RegisterHealthServer(srv, hs)
+	hs.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
+
+	go health.New(store, hs, storagev0.ObjectStorage_ServiceDesc.ServiceName,
+		cfg.Interval, cfg.Timeout).Run(ctx)
 }
 
 // gracefulStop drains in-flight RPCs, but escalates to a hard Stop if they do

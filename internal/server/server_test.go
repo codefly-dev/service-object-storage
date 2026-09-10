@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -16,15 +17,21 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
+	miniobe "github.com/codefly-dev/service-object-storage/internal/backend/minio"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
 func newTestClient(t *testing.T) storagev0.ObjectStorageClient {
 	t.Helper()
-	lis := bufconn.Listen(1 << 20)
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
+	return newTestClientFor(t, be)
+}
+
+func newTestClientFor(t *testing.T, be backend.Backend) storagev0.ObjectStorageClient {
+	t.Helper()
+	lis := bufconn.Listen(1 << 20)
 
 	hub := events.NewHub(be.Name(), be.Identity(), nil)
 	s := grpc.NewServer()
@@ -289,4 +296,54 @@ func TestWatchDeleteMany(t *testing.T) {
 		"m/1": storagev0.WriteOp_WRITE_OP_DELETE,
 		"m/2": storagev0.WriteOp_WRITE_OP_DELETE,
 	}, got)
+}
+
+// unreachableMinIO opens the real MinIO client against an endpoint nothing
+// listens on — a port bound and released, so dials are refused.
+func unreachableMinIO(t *testing.T) backend.Backend {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+
+	be, err := miniobe.New(context.Background(), backend.Config{
+		Endpoint:  "http://" + addr,
+		Bucket:    "ready",
+		AccessKey: "ready",
+		SecretKey: "ready-secret",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = be.Close() })
+	return be
+}
+
+func TestReadyOnReachableBackend(t *testing.T) {
+	c := newTestClient(t)
+	res, err := c.Ready(context.Background(), &storagev0.ReadyRequest{})
+	require.NoError(t, err)
+	require.True(t, res.GetReady())
+	require.Equal(t, "mem", res.GetBackend())
+	require.Empty(t, res.GetCode())
+	require.NotZero(t, res.GetCheckedAtUnixMs())
+}
+
+// TestReadySeparatesCapabilitiesFromAccess is the contract this readiness model
+// exists for: static introspection still answers for a backend nobody can
+// reach, and only Ready says so.
+func TestReadySeparatesCapabilitiesFromAccess(t *testing.T) {
+	c := newTestClientFor(t, unreachableMinIO(t))
+
+	caps, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "minio", caps.GetBackend())
+
+	start := time.Now()
+	res, err := c.Ready(context.Background(), &storagev0.ReadyRequest{})
+	require.NoError(t, err)
+	require.False(t, res.GetReady())
+	require.Equal(t, "Unavailable", res.GetCode())
+	require.NotEmpty(t, res.GetDetail())
+	require.NotContains(t, res.GetDetail(), "ready-secret", "a probe failure must not leak credentials")
+	require.Less(t, time.Since(start), 10*time.Second, "Ready must give up on its own ceiling")
 }

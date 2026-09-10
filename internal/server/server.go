@@ -20,6 +20,14 @@ import (
 // chunkSize bounds each streamed data frame on Get.
 const chunkSize = 256 * 1024
 
+// probeTimeout is the ceiling a Ready call puts on the backend probe, so a
+// backend that accepts a connection and then never answers cannot hold the RPC
+// open. Cloud SDKs retry internally, so an unreachable endpoint takes seconds
+// to give up and this bound, not the SDK, is what makes Ready prompt. A caller
+// must allow more than this per call, or it collects its own deadline instead
+// of the diagnosis.
+const probeTimeout = 3 * time.Second
+
 // Server is the ObjectStorage service implementation.
 type Server struct {
 	storagev0.UnimplementedObjectStorageServer
@@ -245,8 +253,30 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 	}
 }
 
+// Capabilities reports the static feature set. It deliberately touches no
+// network: what the backend supports is a property of its kind and
+// configuration, not of whether it is currently reachable — that is Ready.
 func (s *Server) Capabilities(ctx context.Context, _ *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
 	return toProtoCapabilities(s.be.Capabilities()), nil
+}
+
+// Ready probes the backing store on every call, so a probe that succeeded at
+// startup is never replayed as current readiness.
+func (s *Server) Ready(ctx context.Context, _ *storagev0.ReadyRequest) (*storagev0.Readiness, error) {
+	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	err := s.be.Probe(pctx)
+	res := &storagev0.Readiness{
+		Backend:         s.be.Name(),
+		CheckedAtUnixMs: unixMS(time.Now()),
+		Ready:           err == nil,
+	}
+	if err != nil {
+		res.Code = serr.CodeOf(err).String()
+		res.Detail = err.Error()
+	}
+	return res, nil
 }
 
 func (s *Server) Native(ctx context.Context, req *storagev0.NativeRequest) (*storagev0.NativeResult, error) {
