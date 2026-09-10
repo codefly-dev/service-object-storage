@@ -16,6 +16,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"os"
@@ -50,53 +56,7 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	workspace := &resources.Workspace{Name: "test"}
-	tmpDir := t.TempDir()
-	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
-	service := resources.Service{Name: serviceName, Version: "test-me"}
-	require.NoError(t, service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name)))
-
-	identity := &basev0.ServiceIdentity{
-		Name:                service.Name,
-		Module:              "mod",
-		Workspace:           workspace.Name,
-		WorkspacePath:       tmpDir,
-		RelativeToWorkspace: fmt.Sprintf("mod/%s", service.Name),
-	}
-
-	builder := NewBuilder()
-	_, err := builder.Load(ctx, &builderv0.LoadRequest{
-		DisableCatch: true,
-		Identity:     identity,
-		CreationMode: &builderv0.CreationMode{Communicate: false},
-	})
-	require.NoError(t, err)
-	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
-	require.NoError(t, err)
-
-	rt := NewRuntime()
-
-	networkManager, err := network.NewRuntimeManager(ctx, nil)
-	require.NoError(t, err)
-	networkManager.WithTemporaryPorts()
-
-	env := resources.LocalEnvironment()
-
-	_, err = rt.Load(ctx, &runtimev0.LoadRequest{
-		Identity:     identity,
-		Environment:  shared.Must(env.Proto()),
-		DisableCatch: true,
-	})
-	require.NoError(t, err)
-	require.Equal(t, 1, len(rt.Endpoints))
-
-	// Native context: the test process runs on the host, so both the Runtime's
-	// readiness probe and this test reach the gateway at localhost:<hostPort>.
-	// The gateway container still resolves MinIO through the host.docker.internal
-	// bridge address dockerrun injects.
-	runtimeContext := resources.NewRuntimeContextNative()
-	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, rt.Identity, rt.Endpoints, runtimeContext)
-	require.NoError(t, err)
+	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
 
 	// Register teardown before Init: Init starts the MinIO and gateway containers
 	// one after the other, so a failure between them (MinIO up, gateway not) must
@@ -303,6 +263,63 @@ func requireUnauthenticatedPeerIsRefused(t *testing.T, endpoint string) {
 	}
 }
 
+// loadedRuntime scaffolds a service through the Builder and returns a Runtime
+// loaded against it, with the network mappings and runtime context Init needs.
+//
+// The native runtime context puts the test process on the host, so both the
+// Runtime's readiness probe and the test reach the gateway at localhost:<hostPort>;
+// the gateway container still resolves MinIO through the host.docker.internal
+// bridge address dockerrun injects.
+func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.NetworkMapping, *basev0.RuntimeContext) {
+	t.Helper()
+
+	workspace := &resources.Workspace{Name: "test"}
+	tmpDir := t.TempDir()
+	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
+	service := resources.Service{Name: serviceName, Version: "test-me"}
+	require.NoError(t, service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name)))
+
+	identity := &basev0.ServiceIdentity{
+		Name:                service.Name,
+		Module:              "mod",
+		Workspace:           workspace.Name,
+		WorkspacePath:       tmpDir,
+		RelativeToWorkspace: fmt.Sprintf("mod/%s", service.Name),
+	}
+
+	builder := NewBuilder()
+	_, err := builder.Load(ctx, &builderv0.LoadRequest{
+		DisableCatch: true,
+		Identity:     identity,
+		CreationMode: &builderv0.CreationMode{Communicate: false},
+	})
+	require.NoError(t, err)
+	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
+	require.NoError(t, err)
+
+	rt := NewRuntime()
+
+	networkManager, err := network.NewRuntimeManager(ctx, nil)
+	require.NoError(t, err)
+	networkManager.WithTemporaryPorts()
+
+	env := resources.LocalEnvironment()
+
+	_, err = rt.Load(ctx, &runtimev0.LoadRequest{
+		Identity:     identity,
+		Environment:  shared.Must(env.Proto()),
+		DisableCatch: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, len(rt.Endpoints))
+
+	runtimeContext := resources.NewRuntimeContextNative()
+	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, rt.Identity, rt.Endpoints, runtimeContext)
+	require.NoError(t, err)
+
+	return rt, networkMappings, runtimeContext
+}
+
 // requirePublishedOnAllInterfaces asserts the container's port is published on
 // 0.0.0.0, not 127.0.0.1 — the difference between reachable and refused from a
 // consumer container on a Linux bridge network.
@@ -323,4 +340,113 @@ func requirePublishedOnAllInterfaces(t *testing.T, containerID string, container
 		"container port %d must not be published loopback-only", containerPort)
 	require.Contains(t, hostIPs, "0.0.0.0",
 		"container port %d must publish on all interfaces", containerPort)
+}
+
+// probeImage is a shell-carrying image used to read what the gateway container
+// sees; the gateway image itself is distroless and has no shell.
+const probeImage = "busybox:1.36"
+
+// TestGCSCredentialProjection drives Init against the gcs backend with a
+// disposable service-account key on the host and proves the gateway reads that
+// key from the declared container path, read-only, while the host path never
+// reaches the container.
+func TestGCSCredentialProjection(t *testing.T) {
+	if os.Getenv("SOS_GATEWAY_IMAGE") == "" {
+		t.Skip("SOS_GATEWAY_IMAGE not set; skipping gcs credential projection test")
+	}
+	ctx := context.Background()
+
+	hostDir := t.TempDir()
+	keyFile := path.Join(hostDir, "gcs-key.json")
+	key := disposableServiceAccountKey(t)
+	require.NoError(t, os.WriteFile(keyFile, key, 0o600))
+	digest := fmt.Sprintf("%x", sha256.Sum256(key))
+
+	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
+	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
+
+	_, err := rt.Init(ctx, &runtimev0.InitRequest{
+		RuntimeContext:          runtimeContext,
+		ProposedNetworkMappings: networkMappings,
+		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+			Name: "object-storage",
+			ConfigurationValues: []*basev0.ConfigurationValue{
+				{Key: "SOS_BACKEND", Value: "gcs"},
+				{Key: "SOS_GCS_CREDENTIALS_FILE", Value: keyFile},
+			},
+		}}},
+	})
+	require.NoError(t, err)
+	require.Nil(t, rt.minioEnv, "a gcs run must not stand up the local MinIO fixture")
+
+	projected := rt.gcsCredentialsHostFile
+	require.NotEmpty(t, projected)
+
+	gatewayID, err := rt.gatewayEnv.ContainerID()
+	require.NoError(t, err)
+
+	mounts := dockerInspect(t, gatewayID, `{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}`)
+	require.Equal(t, []string{projected + ":" + gcsCredentialsContainerPath}, strings.Fields(mounts),
+		"the gateway must mount the projected key and nothing else")
+	require.NotContains(t, mounts, hostDir, "the operator's key directory must not be mounted")
+
+	env := dockerInspect(t, gatewayID, `{{range .Config.Env}}{{.}}{{"\n"}}{{end}}`)
+	require.Contains(t, strings.Fields(env), "SOS_GCS_CREDENTIALS_FILE="+gcsCredentialsContainerPath)
+	require.NotContains(t, env, keyFile, "the gateway must never be handed the host path")
+
+	// The probe runs as the gateway image's own user, so what it can read and
+	// write is what the gateway can. It reports a digest rather than the key, so
+	// no credential bytes reach the test log.
+	user := strings.TrimSpace(dockerInspect(t, gatewayID, `{{.Config.User}}`))
+	require.NotEmpty(t, user)
+	// The probe image carries no passwd entry for the gateway's uid, so the group
+	// has to be named numerically alongside it.
+	if !strings.Contains(user, ":") {
+		user += ":" + user
+	}
+	out, err := exec.Command("docker", "run", "--rm", "--user", user,
+		"--mount", fmt.Sprintf("type=bind,source=%s,target=%s", projected, gcsCredentialsContainerPath),
+		probeImage, "sh", "-c", fmt.Sprintf(
+			`sha256sum %[1]s | cut -d' ' -f1; if (echo tampered >> %[1]s) 2>/dev/null; then echo WRITABLE; else echo READONLY; fi`,
+			gcsCredentialsContainerPath),
+	).CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.Equal(t, []string{digest, "READONLY"}, strings.Fields(string(out)))
+
+	onHost, err := os.ReadFile(keyFile)
+	require.NoError(t, err)
+	require.Equal(t, key, onHost, "the operator's key must be untouched")
+
+	_, err = rt.Destroy(ctx, &runtimev0.DestroyRequest{})
+	require.NoError(t, err)
+	_, err = os.Stat(projected)
+	require.True(t, os.IsNotExist(err), "Destroy must remove the projected key from the host")
+}
+
+func dockerInspect(t *testing.T, containerID, format string) string {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "-f", format, containerID).Output()
+	require.NoError(t, err)
+	return string(out)
+}
+
+// disposableServiceAccountKey builds a structurally valid GCS service-account
+// key around a freshly generated private key. It authenticates against nothing —
+// it exists so the gateway's GCS client opens and the projection can be observed
+// end to end without a real cloud credential.
+func disposableServiceAccountKey(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	blob, err := json.Marshal(map[string]string{
+		"type":         "service_account",
+		"project_id":   "codefly-projection-test",
+		"private_key":  string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email": "projection-test@codefly-projection-test.iam.gserviceaccount.com",
+		"token_uri":    "https://oauth2.googleapis.com/token",
+	})
+	require.NoError(t, err)
+	return blob
 }

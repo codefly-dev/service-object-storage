@@ -14,6 +14,8 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/shared"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
 
@@ -517,4 +519,117 @@ func TestGatewayImageTracksAgentVersion(t *testing.T) {
 	if !strings.HasSuffix(gatewayImage.FullName(), agent.Version) {
 		t.Fatalf("gateway image %q should be tagged with agent version %q", gatewayImage.FullName(), agent.Version)
 	}
+}
+
+// newProjectionRuntime returns a Runtime configured for a local gcs run whose
+// credential projection lands under a throwaway CODEFLY_HOME.
+func newProjectionRuntime(t *testing.T, serviceDir, credentialsFile string) *Runtime {
+	t.Helper()
+	t.Setenv(resources.CodeflyHomeEnv, t.TempDir())
+	rt := NewRuntime()
+	identity := &basev0.ServiceIdentity{
+		Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3",
+		WorkspacePath: serviceDir, RelativeToWorkspace: ".",
+	}
+	if err := rt.Base.HeadlessLoad(context.Background(), identity); err != nil {
+		t.Fatalf("HeadlessLoad: %v", err)
+	}
+	rt.Base.Environment = shared.Must(resources.LocalEnvironment().Proto())
+	rt.conf.backend = "gcs"
+	rt.conf.gcsCredentialsFile = credentialsFile
+	return rt
+}
+
+func TestProjectGCSCredentials(t *testing.T) {
+	key := []byte(`{"type":"service_account","private_key":"projection-sentinel"}`)
+	serviceDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(serviceDir, "gcs.json"), key, 0o600))
+
+	rt := newProjectionRuntime(t, serviceDir, "gcs.json")
+	require.NoError(t, rt.projectGCSCredentials())
+
+	projected := rt.gcsCredentialsHostFile
+	require.NotEmpty(t, projected)
+	require.NotEqual(t, filepath.Join(serviceDir, "gcs.json"), projected,
+		"the operator's file must not be handed to the container directly")
+
+	got, err := os.ReadFile(projected)
+	require.NoError(t, err)
+	require.Equal(t, key, got)
+
+	info, err := os.Stat(projected)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o444), info.Mode().Perm(),
+		"the projected key must carry no write bit for the container user")
+
+	dir, err := os.Stat(filepath.Dir(projected))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), dir.Mode().Perm(),
+		"the projection directory must not be reachable by other host users")
+
+	rt.discardProjectedCredentials()
+	_, err = os.Stat(projected)
+	require.True(t, os.IsNotExist(err), "Destroy must remove the projected key")
+}
+
+// TestProjectGCSCredentialsRelativeToServiceIgnoresCwd pins the resolution base:
+// the agent process runs from wherever the CLI started it, so a relative
+// configuration value must not follow it.
+func TestProjectGCSCredentialsRelativeToServiceIgnoresCwd(t *testing.T) {
+	serviceDir := t.TempDir()
+	key := []byte(`{"type":"service_account"}`)
+	require.NoError(t, os.WriteFile(filepath.Join(serviceDir, "gcs.json"), key, 0o600))
+
+	// A decoy of the same relative name next to the process working directory.
+	decoy := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(decoy, "gcs.json"), []byte(`{"decoy":true}`), 0o600))
+	t.Chdir(decoy)
+
+	rt := newProjectionRuntime(t, serviceDir, "gcs.json")
+	require.NoError(t, rt.projectGCSCredentials())
+
+	got, err := os.ReadFile(rt.gcsCredentialsHostFile)
+	require.NoError(t, err)
+	require.Equal(t, key, got)
+}
+
+func TestProjectGCSCredentialsRejects(t *testing.T) {
+	serviceDir := t.TempDir()
+
+	unreadable := filepath.Join(serviceDir, "unreadable.json")
+	require.NoError(t, os.WriteFile(unreadable, []byte(`{}`), 0o600))
+	require.NoError(t, os.Chmod(unreadable, 0o000))
+
+	for _, tc := range []struct {
+		name      string
+		file      string
+		wantMsg   string
+		modeGated bool
+	}{
+		{name: "no credentials configured", wantMsg: "Workload Identity are deployment-only"},
+		{name: "missing file", file: filepath.Join(serviceDir, "absent.json"), wantMsg: "absent.json"},
+		{name: "directory", file: serviceDir, wantMsg: "not a regular file"},
+		{name: "unreadable file", file: unreadable, wantMsg: "unreadable.json", modeGated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.modeGated && os.Geteuid() == 0 {
+				t.Skip("root reads any file regardless of mode")
+			}
+			rt := newProjectionRuntime(t, serviceDir, tc.file)
+			err := rt.projectGCSCredentials()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantMsg)
+			require.Empty(t, rt.gcsCredentialsHostFile,
+				"a rejected projection must leave nothing for the gateway to mount")
+		})
+	}
+}
+
+// TestProjectGCSCredentialsSkipsOtherBackends keeps the projection out of the
+// MinIO path, where SOS_GCS_CREDENTIALS_FILE is meaningless.
+func TestProjectGCSCredentialsSkipsOtherBackends(t *testing.T) {
+	rt := newProjectionRuntime(t, t.TempDir(), "")
+	rt.conf.backend = "minio"
+	require.NoError(t, rt.projectGCSCredentials())
+	require.Empty(t, rt.gcsCredentialsHostFile)
 }
