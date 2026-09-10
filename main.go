@@ -71,12 +71,16 @@ type Settings struct {
 // resolved holds the effective configuration after defaults and runtime
 // configuration are applied.
 type resolved struct {
-	backend            string
-	bucket             string
-	region             string
-	endpoint           string
-	accessKey          string
-	secretKey          string
+	backend   string
+	bucket    string
+	region    string
+	endpoint  string
+	accessKey string
+	secretKey string
+	// gcsCredentialsFile names a GCS service-account key. A local run reads it
+	// as a path on the operator's machine and the Runtime projects it into the
+	// gateway container; a deployment reads it as the path the key is already
+	// mounted at inside the pod.
 	gcsCredentialsFile string
 	azureAccount       string
 	authToken          string

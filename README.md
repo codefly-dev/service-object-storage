@@ -67,7 +67,7 @@ without it the cache is L1-only.
 | `SOS_REGION` | `us-east-1` | |
 | `SOS_ENDPOINT` | — | MinIO / S3-compatible / Azurite endpoint |
 | `SOS_ACCESS_KEY` / `SOS_SECRET_KEY` | — | S3 / MinIO credentials |
-| `SOS_GCS_CREDENTIALS_FILE` | — | GCS service-account JSON (else ADC) |
+| `SOS_GCS_CREDENTIALS_FILE` | — | path **inside the container** to a GCS service-account JSON (else ADC) |
 | `SOS_AZURE_ACCOUNT` / `SOS_AZURE_KEY` | — | Azure account + shared key |
 | `SOS_CACHE` | `true` | enable the cache |
 | `SOS_REDIS_ADDR` | — | shared cache tier (empty = L1-only) |
@@ -144,12 +144,56 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
   `azure`, defaulting to `s3` when the environment names none). `SOS_BUCKET`,
   `SOS_REGION`, and the backend are read from the deployment configuration. GCS
   defaults to keyless auth (Application Default Credentials / Workload Identity);
-  set `SOS_GCS_CREDENTIALS_FILE` in configuration only to point the gateway at a
-  mounted service-account key file. Azure reads its (non-sensitive) account name
-  from `SOS_AZURE_ACCOUNT`, emitted into the manifest when the backend is
-  `azure`. (Note: sensitive credential values — `SOS_SECRET_KEY`,
-  `SOS_AZURE_KEY` — are not yet wired into the emitted Secret; see the
-  credential-delivery follow-up.)
+  `SOS_GCS_CREDENTIALS_FILE` only tells the gateway where to look, and the
+  emitted manifest carries no volume or volumeMount for it (see the deployed
+  key-file gap below). Azure reads its
+  (non-sensitive) account name from `SOS_AZURE_ACCOUNT`, emitted into the
+  manifest when the backend is `azure`. (Note: sensitive credential values —
+  `SOS_SECRET_KEY`, `SOS_AZURE_KEY` — are not yet wired into the emitted Secret;
+  see the credential-delivery follow-up.)
+
+### Cloud credentials in a local run
+
+`SOS_GCS_CREDENTIALS_FILE` means different things on the two paths, because the
+gateway always runs in a container and only ever reads a container path:
+
+- **Deployed**, the value *is* the container path, and the gateway is only told
+  where to look. **Nothing in this repo mounts it**: the Builder emits the env
+  var but no volume or volumeMount, so a deployed `gcs` backend configured with
+  a key-file path names a path that does not exist in the pod unless something
+  outside this agent projects it there. Deployed GCS is expected to use Workload
+  Identity, which needs no file; the key-file path is not delivered end to end
+  yet.
+- **Locally**, the value is a path on your machine, absolute or relative to the
+  service directory (never to whatever directory the agent happens to run from).
+  The Runtime validates it, copies it into an invocation-owned directory under
+  `$CODEFLY_HOME`, mounts *that file only* at
+  `/codefly/credentials/gcs-service-account.json`, and sets
+  `SOS_GCS_CREDENTIALS_FILE` to that container path. The copy is mode `0444` in a
+  `0700` directory, and the gateway container is pinned to the unprivileged user
+  `65532:65532`: it can read the copy and — owning neither it nor root — cannot
+  write to it, and your own key file is never exposed to the container.
+  `codefly destroy` removes the copy, and so does a run that fails part-way.
+
+  The copy is named after a digest of the key, so rotating it on the host —
+  including an atomic replace — changes the mount and the gateway container is
+  recreated on the next run rather than continuing to serve the superseded key.
+
+Two local modes are deliberately **not** supported, and fail or stay unavailable
+rather than half-working:
+
+- **GCS without a key file.** The container inherits no host identity, so
+  Application Default Credentials and Workload Identity are deployment-only.
+  A local `gcs` run without `SOS_GCS_CREDENTIALS_FILE` fails at `Init` telling
+  you to set one.
+- **Azure.** `SOS_AZURE_ACCOUNT` is forwarded (it is a public name, not a
+  credential), but the shared key has no local delivery path yet, so a local
+  `azure` run leaves the gateway unable to authenticate *to Azure Blob storage*
+  — distinct from the caller-facing token above, which is always enforced. Use
+  the MinIO default or `s3`/`gcs` locally.
+
+S3 and MinIO take their credentials as `SOS_ACCESS_KEY` / `SOS_SECRET_KEY`, which
+are values rather than paths and need no host-versus-container distinction.
 
 The agent files live at the repo root (`agent.codefly.yaml`, `main.go`,
 `runtime.go`, `builder.go`, `templates/`); the gateway itself is unchanged and
