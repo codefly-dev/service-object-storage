@@ -12,6 +12,7 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -20,23 +21,26 @@ import (
 // chunkSize bounds each streamed data frame on Get.
 const chunkSize = 256 * 1024
 
-// probeTimeout is the ceiling a Ready call puts on the backend probe, so a
-// backend that accepts a connection and then never answers cannot hold the RPC
-// open. Cloud SDKs retry internally, so an unreachable endpoint takes seconds
-// to give up and this bound, not the SDK, is what makes Ready prompt. A caller
-// must allow more than this per call, or it collects its own deadline instead
-// of the diagnosis.
-const probeTimeout = 3 * time.Second
+// Readiness is the last-probe view Ready reports. The background monitor
+// implements it, so Ready and the orchestrator's health check answer from one
+// probe rather than each running their own.
+type Readiness interface {
+	Verdict() health.Verdict
+}
 
 // Server is the ObjectStorage service implementation.
 type Server struct {
 	storagev0.UnimplementedObjectStorageServer
-	be  backend.Backend
-	hub *events.Hub
+	be        backend.Backend
+	hub       *events.Hub
+	readiness Readiness
 }
 
-// New builds a Server over be, publishing write events to hub.
-func New(be backend.Backend, hub *events.Hub) *Server { return &Server{be: be, hub: hub} }
+// New builds a Server over be, publishing write events to hub and answering
+// Ready from readiness.
+func New(be backend.Backend, hub *events.Hub, readiness Readiness) *Server {
+	return &Server{be: be, hub: hub, readiness: readiness}
+}
 
 // Stat returns object metadata, honoring conditional headers by comparing the
 // fetched ETag (NotModified is carried in the header, not as an error).
@@ -260,21 +264,28 @@ func (s *Server) Capabilities(ctx context.Context, _ *storagev0.CapabilitiesRequ
 	return toProtoCapabilities(s.be.Capabilities()), nil
 }
 
-// Ready probes the backing store on every call, so a probe that succeeded at
-// startup is never replayed as current readiness.
+// Ready reports the most recent background probe, and deliberately does not
+// probe the store itself. Probing per call made this RPC an unpaced amplifier
+// onto the cloud API — a client in a loop became a LIST-per-request stream,
+// whose throttling degrades real traffic — and gave it a private timeout that
+// SOS_PROBE_TIMEOUT could not reach. checked_at_unix_ms carries how fresh the
+// answer is, so a caller can judge staleness rather than be told a cached
+// verdict was measured now.
 func (s *Server) Ready(ctx context.Context, _ *storagev0.ReadyRequest) (*storagev0.Readiness, error) {
-	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-
-	err := s.be.Probe(pctx)
-	res := &storagev0.Readiness{
-		Backend:         s.be.Name(),
-		CheckedAtUnixMs: unixMS(time.Now()),
-		Ready:           err == nil,
+	v := s.readiness.Verdict()
+	res := &storagev0.Readiness{Backend: s.be.Name(), Ready: v.Ready}
+	if v.CheckedAt.IsZero() {
+		// The monitor probes once at startup, so this is the narrow window
+		// before that first probe lands. Reporting it as unready with a stated
+		// cause beats implying a probe ran and passed.
+		res.Code = serr.Unavailable.String()
+		res.Detail = "no readiness probe has completed yet"
+		return res, nil
 	}
-	if err != nil {
-		res.Code = serr.CodeOf(err).String()
-		res.Detail = err.Error()
+	res.CheckedAtUnixMs = unixMS(v.CheckedAt)
+	if !v.Ready {
+		res.Code = v.Code
+		res.Detail = v.Detail
 	}
 	return res, nil
 }

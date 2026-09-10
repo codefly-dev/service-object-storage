@@ -75,10 +75,10 @@ func requireStatus(t *testing.T, hs *grpchealth.Server, service string, want hea
 	}, 5*time.Second, 20*time.Millisecond, "want %s for %q", want, service)
 }
 
-// TestMonitorFollowsAccess covers the whole readiness lifecycle against a real
-// endpoint: it starts serving, stops when access is revoked mid-run, and comes
-// back when access returns — while liveness, the overall service, is never
-// touched.
+// TestMonitorFollowsAccess covers the whole backend-access lifecycle against a
+// real endpoint: the named service starts serving, stops when access is revoked
+// mid-run, and comes back when access returns — while the overall service is
+// never touched.
 func TestMonitorFollowsAccess(t *testing.T) {
 	store := newRevocableStore(t)
 
@@ -103,7 +103,8 @@ func TestMonitorFollowsAccess(t *testing.T) {
 	store.revoke(true)
 	requireStatus(t, hs, serviceName, healthv1.HealthCheckResponse_NOT_SERVING)
 	require.Equal(t, healthv1.HealthCheckResponse_SERVING, servingStatus(t, hs, ""),
-		"a backend outage must drain the replica, not restart it")
+		"the overall service carries liveness AND readiness: draining every replica "+
+			"on a shared-backend outage is a global kill switch, not load shedding")
 
 	store.revoke(false)
 	requireStatus(t, hs, serviceName, healthv1.HealthCheckResponse_SERVING)
@@ -127,4 +128,36 @@ func TestMonitorStartsUnready(t *testing.T) {
 	go health.New(be, hs, serviceName, time.Second, 500*time.Millisecond).Run(ctx)
 
 	requireStatus(t, hs, serviceName, healthv1.HealthCheckResponse_NOT_SERVING)
+}
+
+// TestMonitorRecordsVerdict pins the verdict the Ready RPC reads, so readiness
+// is answered from this one probe instead of each surface running its own.
+func TestMonitorRecordsVerdict(t *testing.T) {
+	store := newRevocableStore(t)
+
+	be, err := miniobe.New(context.Background(), backend.Config{
+		Endpoint:  store.URL,
+		Bucket:    "probe",
+		AccessKey: "probe",
+		SecretKey: "probe-secret",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = be.Close() })
+
+	hs := grpchealth.NewServer()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := health.New(be, hs, serviceName, 50*time.Millisecond, time.Second)
+	go m.Run(ctx)
+
+	require.Eventually(t, func() bool { return m.Verdict().Ready },
+		5*time.Second, 20*time.Millisecond, "a reachable store must record a ready verdict")
+	require.False(t, m.Verdict().CheckedAt.IsZero(), "a recorded verdict must carry when it was measured")
+
+	store.revoke(true)
+	require.Eventually(t, func() bool {
+		v := m.Verdict()
+		return !v.Ready && v.Code == "PermissionDenied"
+	}, 5*time.Second, 20*time.Millisecond, "the verdict must carry the normalized cause")
+	require.NotContains(t, m.Verdict().Detail, "probe-secret", "a verdict must not leak credentials")
 }

@@ -260,11 +260,14 @@ message Readiness {
   bool ready = 1;
   string backend = 2;
   // code is the normalized failure class when ready is false, empty otherwise:
-  // "Unavailable" (endpoint unreachable), "NotFound" (missing bucket or
-  // container), "PermissionDenied" (credentials refused), "Unsupported" (the
-  // backend cannot honor the configured probe strategy), "Internal".
+  // "Unavailable" (no answer — endpoint unreachable, or the probe deadline
+  // expired first), "NotFound" (missing bucket or container),
+  // "PermissionDenied" (credentials refused), "Internal".
   string code = 3;
   string detail = 4;
+  // checked_at_unix_ms is when the reported probe completed, so a caller can
+  // judge how fresh this answer is: it is at most one probe interval old. It is
+  // 0 before the first probe has landed, which is reported as not ready.
   int64 checked_at_unix_ms = 5;
 }
 
@@ -301,9 +304,10 @@ service ObjectStorage {
   // of band, and periodically thereafter to recover any dropped events.
   rpc Watch(WatchRequest) returns (stream WriteEvent);
   rpc Capabilities(CapabilitiesRequest) returns (BackendCapabilities);
-  // Ready probes the backing store and reports whether the configured
-  // bucket/container is reachable with the credentials in force. Every call
-  // probes: readiness that was true at startup is never replayed.
+  // Ready reports whether the configured bucket/container is reachable with the
+  // credentials in force, as of the gateway's most recent background probe.
+  // It does not probe per call: doing so made this RPC an unpaced amplifier
+  // onto the cloud API. Use checked_at_unix_ms to judge freshness.
   rpc Ready(ReadyRequest) returns (Readiness);
   rpc Native(NativeRequest) returns (NativeResult);
 }

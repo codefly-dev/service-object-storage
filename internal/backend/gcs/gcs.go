@@ -375,6 +375,12 @@ func (b *Backend) Probe(ctx context.Context) error {
 
 	switch b.cfg.Strategy() {
 	case backend.ProbeStat:
+		// The SDK maps every 404 to ErrObjectNotExist, a bucket that does not
+		// exist included, so this cannot attest bucket existence — matching the
+		// ProbeStat contract, which promises only that the endpoint answered
+		// and authenticated. Confirming the bucket would need a buckets.get
+		// call, a permission the object-only grant this strategy serves does
+		// not carry. Callers needing that guarantee use ProbeList.
 		_, err := b.bucket.Object(b.cfg.ProbeKey).Attrs(ctx)
 		if err == nil || errors.Is(err, storage.ErrObjectNotExist) {
 			return nil

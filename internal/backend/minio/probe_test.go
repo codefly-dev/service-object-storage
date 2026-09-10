@@ -28,8 +28,7 @@ func s3Error(code string) string {
 	return `<?xml version="1.0" encoding="UTF-8"?><Error><Code>` + code + `</Code><Message>` + code + `</Message></Error>`
 }
 
-// fakeStore is a real HTTP server speaking just enough S3 for a probe. The
-// answer it gives is swappable so a test can revoke access mid-flight.
+// fakeStore is a real HTTP server speaking just enough S3 for a probe.
 type fakeStore struct {
 	*httptest.Server
 	answer chan s3Response
@@ -50,11 +49,6 @@ func newFakeStore(t *testing.T, initial s3Response) *fakeStore {
 	}))
 	t.Cleanup(f.Close)
 	return f
-}
-
-func (f *fakeStore) serve(res s3Response) {
-	<-f.answer
-	f.answer <- res
 }
 
 func openBackend(t *testing.T, cfg backend.Config) backend.Backend {
@@ -115,7 +109,6 @@ func TestProbeNormalizesRefusals(t *testing.T) {
 		{"denied-credentials", backend.ProbeList, s3Response{http.StatusForbidden, s3Error("AccessDenied")}, serr.PermissionDenied},
 		{"missing-bucket", backend.ProbeList, s3Response{http.StatusNotFound, s3Error("NoSuchBucket")}, serr.NotFound},
 		{"throttled", backend.ProbeList, s3Response{http.StatusServiceUnavailable, s3Error("SlowDown")}, serr.Throttled},
-		{"stat-denied", backend.ProbeStat, s3Response{http.StatusForbidden, s3Error("AccessDenied")}, serr.PermissionDenied},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,6 +130,21 @@ func TestProbeNormalizesRefusals(t *testing.T) {
 // and accepted the credentials.
 func TestProbeStatToleratesMissingObject(t *testing.T) {
 	store := newFakeStore(t, s3Response{status: http.StatusNotFound, body: s3Error("NoSuchKey")})
+	be := openBackend(t, backend.Config{
+		Endpoint:      store.URL,
+		ProbeStrategy: backend.ProbeStat,
+		ProbeKey:      "sentinel",
+	})
+	require.NoError(t, be.Probe(context.Background()))
+}
+
+// TestProbeStatToleratesForbidden is the regression this strategy was shipped
+// broken on. An S3-compatible store answers 403, not 404, for a key that does
+// not exist when the caller lacks list permission — precisely the grant `stat`
+// exists to serve. Failing there left readiness permanently red and the pod
+// never Ready, so a 403 must pass exactly as a 404 does.
+func TestProbeStatToleratesForbidden(t *testing.T) {
+	store := newFakeStore(t, s3Response{status: http.StatusForbidden, body: s3Error("AccessDenied")})
 	be := openBackend(t, backend.Config{
 		Endpoint:      store.URL,
 		ProbeStrategy: backend.ProbeStat,

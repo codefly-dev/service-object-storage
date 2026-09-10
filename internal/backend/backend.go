@@ -53,9 +53,14 @@ const (
 	// bucket/container exists and the credentials may list it.
 	ProbeList ProbeStrategy = "list"
 	// ProbeStat heads Config.ProbeKey. It is for deployments whose credentials
-	// deliberately carry no list permission: the object is not required to
-	// exist, since a NotFound answer already proves the store was reached, the
-	// bucket resolved, and the credentials were accepted.
+	// deliberately carry no list permission, and it is deliberately the WEAKER
+	// strategy: a HEAD carries no error body, so it attests only that the
+	// endpoint answered and authenticated the request. The object need not
+	// exist, and on S3-compatible stores a refusal is indistinguishable from an
+	// absent key — without list permission they answer 403 for a key that
+	// merely is not there — so ProbeStat treats both as access. It therefore
+	// does NOT detect a revoked credential or a missing bucket. Use ProbeList
+	// wherever the grant allows it; that is the strategy that detects both.
 	ProbeStat ProbeStrategy = "stat"
 )
 
@@ -207,9 +212,15 @@ type Backend interface {
 	// Probe verifies that the configured bucket/container is reachable and that
 	// the credentials are accepted, using the configured ProbeStrategy. It is
 	// non-mutating and bounded by ctx. Failures are normalized: Unavailable
-	// (endpoint unreachable), NotFound (missing bucket/container),
-	// PermissionDenied (credentials refused), Unsupported (the backend cannot
-	// honor the configured strategy).
+	// (no answer — endpoint unreachable, or the deadline expired first),
+	// NotFound (missing bucket/container), PermissionDenied (credentials
+	// refused). Every registered backend honors both strategies, so a probe
+	// never reports Unsupported.
+	//
+	// What a success attests depends on the strategy — see ProbeList and
+	// ProbeStat. ProbeStat cannot report NotFound or PermissionDenied at all on
+	// S3-compatible stores, because a bodyless HEAD does not distinguish them
+	// from an absent key.
 	Probe(ctx context.Context) error
 
 	// Stat returns object metadata (HEAD). versionID may be empty.

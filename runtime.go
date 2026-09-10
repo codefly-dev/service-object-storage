@@ -57,17 +57,13 @@ const gatewayContainerUser = "65532:65532"
 const readinessBudget = 60 * time.Second
 
 // readinessProbeTimeout bounds a single Ready call, and readinessPollInterval
-// paces the retries between them. The timeout must stay above the gateway's own
-// probe ceiling, or every attempt reports this deadline instead of the backend
-// cause the gateway was about to hand back.
+// paces the retries between them. Ready answers from the gateway's last
+// background probe rather than probing inline, so this bounds the RPC itself,
+// not a backend round trip.
 const (
 	readinessProbeTimeout = 5 * time.Second
 	readinessPollInterval = time.Second
 )
-
-// ensureBucketBudget bounds the wait for the local MinIO to accept the bucket
-// call while it finishes coming up.
-const ensureBucketBudget = 30 * time.Second
 
 // localMinioUser is the root user for the agent-managed local MinIO. The
 // password is generated per run (see startLocalMinIO): the container publishes
@@ -268,27 +264,21 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 // gateway's own probe, awaited in WaitForReady, establishes that.
 func (s *Runtime) ensureBucket(ctx context.Context) error {
 	endpoint := fmt.Sprintf("localhost:%d", s.minioHostPort)
-
-	budget, cancel := context.WithTimeout(ctx, ensureBucketBudget)
-	defer cancel()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
 	var lastErr error
-	for {
+	for retry := 0; retry < 30; retry++ {
 		cl, err := miniogo.New(endpoint, &miniogo.Options{
 			Creds:  miniocreds.NewStaticV4(s.conf.accessKey, s.conf.secretKey, ""),
 			Secure: false,
 		})
 		if err == nil {
-			exists, existErr := cl.BucketExists(budget, s.conf.bucket)
+			exists, existErr := cl.BucketExists(ctx, s.conf.bucket)
 			switch {
 			case existErr != nil:
 				lastErr = existErr
 			case exists:
 				return nil
 			default:
-				if mkErr := cl.MakeBucket(budget, s.conf.bucket, miniogo.MakeBucketOptions{}); mkErr == nil {
+				if mkErr := cl.MakeBucket(ctx, s.conf.bucket, miniogo.MakeBucketOptions{}); mkErr == nil {
 					return nil
 				} else {
 					lastErr = mkErr
@@ -297,13 +287,9 @@ func (s *Runtime) ensureBucket(ctx context.Context) error {
 		} else {
 			lastErr = err
 		}
-
-		select {
-		case <-budget.Done():
-			return s.Wool.Wrapf(lastErr, "minio bucket %q not ready within %s", s.conf.bucket, ensureBucketBudget)
-		case <-ticker.C:
-		}
+		time.Sleep(time.Second)
 	}
+	return s.Wool.Wrapf(lastErr, "minio bucket %q not ready", s.conf.bucket)
 }
 
 // projectGCSCredentials makes the configured GCS service-account key available

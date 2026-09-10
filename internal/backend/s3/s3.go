@@ -131,10 +131,17 @@ func (b *Backend) Probe(ctx context.Context) error {
 	switch b.probe {
 	case backend.ProbeStat:
 		_, err := b.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &b.bucket, Key: &b.probeKey})
-		// A HEAD carries no error body, so a missing object and a missing bucket
-		// are the same bare 404 here — this strategy attests that the endpoint
-		// answered and the credentials were accepted, nothing finer.
-		if err == nil || serr.Is(mapErr(op, err), serr.NotFound) {
+		if err == nil {
+			return nil
+		}
+		// A HEAD carries no error body, so this strategy can only attest that
+		// the endpoint answered and authenticated the request — nothing finer.
+		// Both a 404 and a 403 establish exactly that, and S3 chooses between
+		// them by grant, not by fact: without s3:ListBucket it answers 403 for a
+		// key that merely does not exist. Treating 403 as failure would make the
+		// probe permanently red under the very least-privilege grant this
+		// strategy exists to serve, so both answers pass.
+		if code := serr.CodeOf(mapErr(op, err)); code == serr.NotFound || code == serr.PermissionDenied {
 			return nil
 		}
 		return probeErr(op, err)

@@ -66,9 +66,10 @@ type ObjectStorageClient interface {
 	// of band, and periodically thereafter to recover any dropped events.
 	Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WriteEvent], error)
 	Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*BackendCapabilities, error)
-	// Ready probes the backing store and reports whether the configured
-	// bucket/container is reachable with the credentials in force. Every call
-	// probes: readiness that was true at startup is never replayed.
+	// Ready reports whether the configured bucket/container is reachable with the
+	// credentials in force, as of the gateway's most recent background probe.
+	// It does not probe per call: doing so made this RPC an unpaced amplifier
+	// onto the cloud API. Use checked_at_unix_ms to judge freshness.
 	Ready(ctx context.Context, in *ReadyRequest, opts ...grpc.CallOption) (*Readiness, error)
 	Native(ctx context.Context, in *NativeRequest, opts ...grpc.CallOption) (*NativeResult, error)
 }
@@ -248,9 +249,10 @@ type ObjectStorageServer interface {
 	// of band, and periodically thereafter to recover any dropped events.
 	Watch(*WatchRequest, grpc.ServerStreamingServer[WriteEvent]) error
 	Capabilities(context.Context, *CapabilitiesRequest) (*BackendCapabilities, error)
-	// Ready probes the backing store and reports whether the configured
-	// bucket/container is reachable with the credentials in force. Every call
-	// probes: readiness that was true at startup is never replayed.
+	// Ready reports whether the configured bucket/container is reachable with the
+	// credentials in force, as of the gateway's most recent background probe.
+	// It does not probe per call: doing so made this RPC an unpaced amplifier
+	// onto the cloud API. Use checked_at_unix_ms to judge freshness.
 	Ready(context.Context, *ReadyRequest) (*Readiness, error)
 	Native(context.Context, *NativeRequest) (*NativeResult, error)
 	mustEmbedUnimplementedObjectStorageServer()

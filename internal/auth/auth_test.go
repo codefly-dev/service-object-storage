@@ -19,6 +19,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
@@ -106,7 +107,7 @@ func startGateway(t *testing.T) string {
 		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(serverToken)),
 		grpc.ChainStreamInterceptor(auth.StreamInterceptor(serverToken)),
 	)
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub))
+	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = s.Serve(lis) }()
 	t.Cleanup(func() { s.Stop(); hub.Close(); _ = be.Close() })
 	return lis.Addr().String()

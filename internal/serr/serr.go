@@ -5,6 +5,7 @@
 package serr
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -33,9 +34,11 @@ const (
 	Throttled
 	// InvalidArgument means the request was malformed.
 	InvalidArgument
-	// Unavailable means the backend could not be reached at all — the request
-	// never got an answer from the service (dial refused, DNS failure, TLS
-	// handshake, transport timeout).
+	// Unavailable means the request never got an answer from the service: the
+	// endpoint could not be reached (dial refused, DNS failure, TLS handshake,
+	// transport timeout), or the caller's own deadline expired first. Both are
+	// "no answer", which is what a caller branches on; the message distinguishes
+	// them.
 	Unavailable
 )
 
@@ -107,10 +110,20 @@ func Is(err error, code Code) bool {
 	return err != nil && CodeOf(err) == code
 }
 
-// Unreachable reports whether err is a transport-level failure rather than a
-// response the service produced. Backends use it to separate "endpoint is not
-// there" from "the store said no", which readiness must not conflate.
+// Unreachable reports whether err means the service never answered, rather
+// than a response it produced. Backends use it to separate "no answer" from
+// "the store said no", which readiness must not conflate.
+//
+// A context deadline or cancellation counts: the caller gave up before any
+// answer arrived, which is the same absence of a verdict. Both are matched
+// explicitly rather than left to the net.Error check — context.DeadlineExceeded
+// satisfies net.Error only incidentally, and context.Canceled does not satisfy
+// it at all, so a cancelled probe would otherwise be normalized to Internal and
+// read as a backend fault.
 func Unreachable(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
 	var netErr net.Error
 	return errors.As(err, &netErr)
 }

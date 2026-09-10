@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
-	miniobe "github.com/codefly-dev/service-object-storage/internal/backend/minio"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/health"
+	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
@@ -35,7 +37,7 @@ func newTestClientFor(t *testing.T, be backend.Backend) storagev0.ObjectStorageC
 
 	hub := events.NewHub(be.Name(), be.Identity(), nil)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub))
+	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = s.Serve(lis) }()
 
 	conn, err := grpc.NewClient(
@@ -298,26 +300,6 @@ func TestWatchDeleteMany(t *testing.T) {
 	}, got)
 }
 
-// unreachableMinIO opens the real MinIO client against an endpoint nothing
-// listens on — a port bound and released, so dials are refused.
-func unreachableMinIO(t *testing.T) backend.Backend {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-
-	be, err := miniobe.New(context.Background(), backend.Config{
-		Endpoint:  "http://" + addr,
-		Bucket:    "ready",
-		AccessKey: "ready",
-		SecretKey: "ready-secret",
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = be.Close() })
-	return be
-}
-
 func TestReadyOnReachableBackend(t *testing.T) {
 	c := newTestClient(t)
 	res, err := c.Ready(context.Background(), &storagev0.ReadyRequest{})
@@ -332,7 +314,7 @@ func TestReadyOnReachableBackend(t *testing.T) {
 // exists for: static introspection still answers for a backend nobody can
 // reach, and only Ready says so.
 func TestReadySeparatesCapabilitiesFromAccess(t *testing.T) {
-	c := newTestClientFor(t, unreachableMinIO(t))
+	c := newTestClientFor(t, probetest.UnreachableMinIO(t, "ready"))
 
 	caps, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{})
 	require.NoError(t, err)
@@ -345,5 +327,64 @@ func TestReadySeparatesCapabilitiesFromAccess(t *testing.T) {
 	require.Equal(t, "Unavailable", res.GetCode())
 	require.NotEmpty(t, res.GetDetail())
 	require.NotContains(t, res.GetDetail(), "ready-secret", "a probe failure must not leak credentials")
-	require.Less(t, time.Since(start), 10*time.Second, "Ready must give up on its own ceiling")
+	require.Less(t, time.Since(start), 10*time.Second, "Ready reads a verdict, it must not block on the store")
+}
+
+// countingBackend records how many times the store was probed.
+type countingBackend struct {
+	backend.Backend
+	probes atomic.Int64
+}
+
+func (c *countingBackend) Probe(ctx context.Context) error {
+	c.probes.Add(1)
+	return c.Backend.Probe(ctx)
+}
+
+// fixedReadiness is a verdict that never changes, standing in for the monitor.
+type fixedReadiness struct{ v health.Verdict }
+
+func (f fixedReadiness) Verdict() health.Verdict { return f.v }
+
+// TestReadyDoesNotProbePerCall is the regression behind routing Ready through
+// the monitor. Probing on every call made this RPC an unpaced amplifier onto
+// the cloud API: a client in a loop became one LIST per request, and the
+// resulting throttling degrades the traffic the gateway actually serves.
+func TestReadyDoesNotProbePerCall(t *testing.T) {
+	mem := openMemBackend(t)
+	counting := &countingBackend{Backend: mem}
+
+	hub := events.NewHub(counting.Name(), counting.Identity(), nil)
+	t.Cleanup(hub.Close)
+	srv := server.New(counting, hub, fixedReadiness{health.Verdict{Ready: true, CheckedAt: time.Now()}})
+
+	for i := 0; i < 50; i++ {
+		res, err := srv.Ready(context.Background(), &storagev0.ReadyRequest{})
+		require.NoError(t, err)
+		require.True(t, res.GetReady())
+	}
+	require.Zero(t, counting.probes.Load(), "Ready must answer from the monitor, never probe the store itself")
+}
+
+// TestReadyBeforeFirstProbe pins the startup window: with no probe landed yet,
+// Ready must say so rather than imply a probe ran and passed.
+func TestReadyBeforeFirstProbe(t *testing.T) {
+	be := openMemBackend(t)
+	hub := events.NewHub(be.Name(), be.Identity(), nil)
+	t.Cleanup(hub.Close)
+	srv := server.New(be, hub, fixedReadiness{})
+
+	res, err := srv.Ready(context.Background(), &storagev0.ReadyRequest{})
+	require.NoError(t, err)
+	require.False(t, res.GetReady())
+	require.Equal(t, "Unavailable", res.GetCode())
+	require.Zero(t, res.GetCheckedAtUnixMs(), "an unprobed gateway must not claim a check time")
+}
+
+func openMemBackend(t *testing.T) backend.Backend {
+	t.Helper()
+	be, err := mem.New(context.Background(), backend.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = be.Close() })
+	return be
 }

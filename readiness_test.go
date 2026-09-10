@@ -15,8 +15,8 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
-	miniobe "github.com/codefly-dev/service-object-storage/internal/backend/minio"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
@@ -31,31 +31,11 @@ func serveGateway(t *testing.T, be backend.Backend) string {
 	require.NoError(t, err)
 
 	srv := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub))
+	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
 
 	return ln.Addr().String()
-}
-
-// unreachableMinIO opens the real MinIO client against an endpoint nothing
-// listens on — a port bound and released, so dials are refused.
-func unreachableMinIO(t *testing.T) backend.Backend {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-
-	be, err := miniobe.New(context.Background(), backend.Config{
-		Endpoint:  "http://" + addr,
-		Bucket:    "readiness",
-		AccessKey: "readiness",
-		SecretKey: "readiness-secret",
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = be.Close() })
-	return be
 }
 
 // runtimeAt returns a loaded Runtime whose gRPC endpoint maps to address over
@@ -90,11 +70,11 @@ func runtimeAt(t *testing.T, address string, access ...*basev0.NetworkAccess) *R
 // table, and readiness must not follow it.
 func TestWaitForReadyRejectsUnreachableBackend(t *testing.T) {
 	ctx := context.Background()
-	address := serveGateway(t, unreachableMinIO(t))
+	address := serveGateway(t, probetest.UnreachableMinIO(t, "readiness"))
 
 	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client := storagev0.NewObjectStorageClient(conn)
 
 	caps, err := client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
@@ -155,7 +135,7 @@ func TestWaitForReadyUsesNativeNetworkView(t *testing.T) {
 // TestWaitForReadyReturnsOnCancellation proves the retry loop is cancellable:
 // before, the loop slept through cancellation and ran its full retry count.
 func TestWaitForReadyReturnsOnCancellation(t *testing.T) {
-	rt := runtimeAt(t, serveGateway(t, unreachableMinIO(t)), resources.NewNativeNetworkAccess())
+	rt := runtimeAt(t, serveGateway(t, probetest.UnreachableMinIO(t, "readiness")), resources.NewNativeNetworkAccess())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

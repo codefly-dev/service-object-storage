@@ -117,10 +117,17 @@ func (b *Backend) Probe(ctx context.Context) error {
 	switch b.probe {
 	case backend.ProbeStat:
 		_, err := b.client.StatObject(ctx, b.bucket, b.probeKey, minio.StatObjectOptions{})
-		// A HEAD carries no error body, so a missing object and a missing bucket
-		// are the same bare 404 here — this strategy attests that the endpoint
-		// answered and the credentials were accepted, nothing finer.
-		if err == nil || serr.Is(mapErr(op, err), serr.NotFound) {
+		if err == nil {
+			return nil
+		}
+		// A HEAD carries no error body, so this strategy can only attest that
+		// the endpoint answered and authenticated the request — nothing finer.
+		// Both a 404 and a 403 establish exactly that, and S3-compatible stores
+		// choose between them by grant, not by fact: without list permission
+		// they answer 403 for a key that merely does not exist. Treating 403 as
+		// failure would make the probe permanently red under the very
+		// least-privilege grant this strategy exists to serve, so both pass.
+		if code := serr.CodeOf(mapErr(op, err)); code == serr.NotFound || code == serr.PermissionDenied {
 			return nil
 		}
 		return probeErr(op, err)
@@ -128,11 +135,10 @@ func (b *Backend) Probe(ctx context.Context) error {
 	default:
 		lctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		for obj := range b.client.ListObjects(lctx, b.bucket, minio.ListObjectsOptions{MaxKeys: 1}) {
-			if obj.Err != nil {
-				return probeErr(op, obj.Err)
-			}
-			break
+		// One key is enough to prove the bucket answers, so take at most one
+		// item: a closed channel means an empty bucket, which is still access.
+		if obj, ok := <-b.client.ListObjects(lctx, b.bucket, minio.ListObjectsOptions{MaxKeys: 1}); ok && obj.Err != nil {
+			return probeErr(op, obj.Err)
 		}
 		if err := ctx.Err(); err != nil {
 			return serr.Wrap(serr.Unavailable, op, err)

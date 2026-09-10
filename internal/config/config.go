@@ -103,6 +103,19 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("unknown SOS_PROBE_STRATEGY %q (want %q or %q)",
 			cfg.Backend.ProbeStrategy, backend.ProbeList, backend.ProbeStat)
 	}
+	// A non-positive interval panics time.NewTicker inside the readiness
+	// monitor's goroutine, taking the process down with no way to recover; a
+	// non-positive timeout expires every probe context before it is used, so
+	// readiness is permanently NOT_SERVING with no cause an operator can see.
+	// Both are silent at parse time (envDuration only falls back on empty or
+	// unparseable input, so "0s" and "-1s" arrive intact), so they are rejected
+	// here where the message can name the variable.
+	if cfg.Health.Interval <= 0 {
+		return Config{}, fmt.Errorf("SOS_PROBE_INTERVAL must be positive, got %s", cfg.Health.Interval)
+	}
+	if cfg.Health.Timeout <= 0 {
+		return Config{}, fmt.Errorf("SOS_PROBE_TIMEOUT must be positive, got %s", cfg.Health.Timeout)
+	}
 	// MinIO addresses buckets path-style by default.
 	if cfg.Backend.Kind == "minio" && os.Getenv("SOS_USE_PATH_STYLE") == "" {
 		cfg.Backend.UsePathStyle = true

@@ -148,3 +148,25 @@ func TestFromEnvRejectsUnusableProbe(t *testing.T) {
 		require.ErrorContains(t, err, "SOS_PROBE_KEY")
 	})
 }
+
+// TestFromEnvRejectsUnusablePacing covers the two settings that parse cleanly
+// and then break the monitor at runtime: a non-positive interval panics
+// time.NewTicker in the monitor goroutine and kills the process, and a
+// non-positive timeout expires every probe context before use, pinning
+// readiness to NOT_SERVING with no visible cause.
+func TestFromEnvRejectsUnusablePacing(t *testing.T) {
+	for _, tc := range []struct{ name, key, value, want string }{
+		{"zero interval", "SOS_PROBE_INTERVAL", "0s", "SOS_PROBE_INTERVAL"},
+		{"negative interval", "SOS_PROBE_INTERVAL", "-1s", "SOS_PROBE_INTERVAL"},
+		{"zero timeout", "SOS_PROBE_TIMEOUT", "0s", "SOS_PROBE_TIMEOUT"},
+		{"negative timeout", "SOS_PROBE_TIMEOUT", "-5s", "SOS_PROBE_TIMEOUT"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probeEnv(t)
+			t.Setenv(tc.key, tc.value)
+
+			_, err := config.FromEnv()
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}

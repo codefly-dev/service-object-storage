@@ -1896,12 +1896,15 @@ type Readiness struct {
 	Ready   bool                   `protobuf:"varint,1,opt,name=ready,proto3" json:"ready,omitempty"`
 	Backend string                 `protobuf:"bytes,2,opt,name=backend,proto3" json:"backend,omitempty"`
 	// code is the normalized failure class when ready is false, empty otherwise:
-	// "Unavailable" (endpoint unreachable), "NotFound" (missing bucket or
-	// container), "PermissionDenied" (credentials refused), "Unsupported" (the
-	// backend cannot honor the configured probe strategy), "Internal".
-	Code            string `protobuf:"bytes,3,opt,name=code,proto3" json:"code,omitempty"`
-	Detail          string `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`
-	CheckedAtUnixMs int64  `protobuf:"varint,5,opt,name=checked_at_unix_ms,json=checkedAtUnixMs,proto3" json:"checked_at_unix_ms,omitempty"`
+	// "Unavailable" (no answer — endpoint unreachable, or the probe deadline
+	// expired first), "NotFound" (missing bucket or container),
+	// "PermissionDenied" (credentials refused), "Internal".
+	Code   string `protobuf:"bytes,3,opt,name=code,proto3" json:"code,omitempty"`
+	Detail string `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`
+	// checked_at_unix_ms is when the reported probe completed, so a caller can
+	// judge how fresh this answer is: it is at most one probe interval old. It is
+	// 0 before the first probe has landed, which is reported as not ready.
+	CheckedAtUnixMs int64 `protobuf:"varint,5,opt,name=checked_at_unix_ms,json=checkedAtUnixMs,proto3" json:"checked_at_unix_ms,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }

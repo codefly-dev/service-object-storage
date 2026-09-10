@@ -28,6 +28,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
@@ -189,7 +190,7 @@ func startAuthenticatedGateway(t *testing.T, token string) string {
 		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(token)),
 		grpc.ChainStreamInterceptor(auth.StreamInterceptor(token)),
 	)
-	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub))
+	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { srv.Stop(); hub.Close(); _ = be.Close() })
 	return lis.Addr().String()
@@ -368,9 +369,12 @@ func TestDeploymentTemplates(t *testing.T) {
 
 // requireProbeSemantics pins what the rendered probes attest. A TCP probe
 // passes as soon as the gRPC port is bound, which says nothing about the store
-// behind it: readiness must name the ObjectStorage service, whose serving
-// status follows the backend probe, while liveness stays on the overall
-// service so a backend outage drains the replica instead of restarting it.
+// behind it, so STARTUP names the ObjectStorage service and gates rollout on
+// real backend access. Readiness and liveness stay on the overall service:
+// readiness that follows the backend probe is a global kill switch, since every
+// replica shares one bucket and one credential set and would drain together,
+// emptying the Service's endpoints over an outage the gateway could partly ride
+// out.
 func requireProbeSemantics(t *testing.T, body string) {
 	t.Helper()
 	if strings.Contains(body, "tcpSocket") {
@@ -399,23 +403,29 @@ func requireProbeSemantics(t *testing.T, body string) {
 	}
 	c := containers[0]
 
-	for name, probe := range map[string]map[string]any{"startupProbe": c.StartupProbe, "readinessProbe": c.ReadinessProbe} {
-		grpc, ok := probe["grpc"].(map[string]any)
-		if !ok {
+	startup, ok := c.StartupProbe["grpc"].(map[string]any)
+	if !ok {
+		t.Fatalf("startupProbe is not a grpc probe: %v", c.StartupProbe)
+	}
+	if startup["service"] != storagev0.ObjectStorage_ServiceDesc.ServiceName {
+		t.Errorf("startupProbe must check %q, got %v",
+			storagev0.ObjectStorage_ServiceDesc.ServiceName, startup["service"])
+	}
+
+	// Naming the backend-gated service here would drain every replica at once on
+	// a shared-backend outage, so both must stay on the overall service.
+	for name, probe := range map[string]map[string]any{
+		"readinessProbe": c.ReadinessProbe,
+		"livenessProbe":  c.LivenessProbe,
+	} {
+		grpc, isGRPC := probe["grpc"].(map[string]any)
+		if !isGRPC {
 			t.Errorf("%s is not a grpc probe: %v", name, probe)
 			continue
 		}
-		if grpc["service"] != storagev0.ObjectStorage_ServiceDesc.ServiceName {
-			t.Errorf("%s must check %q, got %v", name, storagev0.ObjectStorage_ServiceDesc.ServiceName, grpc["service"])
+		if _, named := grpc["service"]; named {
+			t.Errorf("%s must check the overall service, got %v", name, grpc["service"])
 		}
-	}
-
-	liveness, ok := c.LivenessProbe["grpc"].(map[string]any)
-	if !ok {
-		t.Fatalf("livenessProbe is not a grpc probe: %v", c.LivenessProbe)
-	}
-	if _, named := liveness["service"]; named {
-		t.Errorf("livenessProbe must check the overall service, got %v", liveness["service"])
 	}
 }
 

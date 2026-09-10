@@ -495,6 +495,13 @@ func (b *Backend) Probe(ctx context.Context) error {
 
 	switch b.probe {
 	case backend.ProbeStat:
+		// Azure reports a missing container as ContainerNotFound and a missing
+		// blob as BlobNotFound, so only the latter is forgiven: unlike the
+		// S3-compatible backends this DOES detect a missing container, and it
+		// has no reason to tolerate 403 because Azure does not mask an absent
+		// blob as a refusal. That is stronger than the ProbeStat contract
+		// guarantees — deliberately kept, but callers must not rely on it,
+		// since the same configuration on S3, MinIO or GCS detects neither.
 		_, err := b.containerClient().NewBlobClient(b.probeKey).GetProperties(ctx, nil)
 		if err == nil || bloberror.HasCode(err, bloberror.BlobNotFound) {
 			return nil

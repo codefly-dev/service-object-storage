@@ -83,7 +83,6 @@ func TestProbeNormalizesRefusals(t *testing.T) {
 	}{
 		{"denied-credentials", backend.ProbeList, http.StatusForbidden, s3Error("AccessDenied"), serr.PermissionDenied},
 		{"missing-bucket", backend.ProbeList, http.StatusNotFound, s3Error("NoSuchBucket"), serr.NotFound},
-		{"stat-denied", backend.ProbeStat, http.StatusForbidden, s3Error("AccessDenied"), serr.PermissionDenied},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,4 +100,29 @@ func TestProbeNormalizesRefusals(t *testing.T) {
 func TestProbeStatToleratesMissingObject(t *testing.T) {
 	be := openProbe(t, fakeS3(t, http.StatusNotFound, ""), backend.ProbeStat)
 	require.NoError(t, be.Probe(context.Background()))
+}
+
+// TestProbeStatToleratesForbidden is the regression this strategy was shipped
+// broken on. S3 answers 403, not 404, for a key that does not exist when the
+// caller lacks s3:ListBucket — precisely the least-privilege grant `stat`
+// exists to serve. Failing the probe there left readiness permanently red and
+// the pod never Ready, so a bodyless 403 must pass exactly as a 404 does.
+func TestProbeStatToleratesForbidden(t *testing.T) {
+	be := openProbe(t, fakeS3(t, http.StatusForbidden, ""), backend.ProbeStat)
+	require.NoError(t, be.Probe(context.Background()))
+}
+
+// TestProbeStatStillReportsUnreachable guards the line the tolerance must not
+// cross: accepting 403 and 404 widens what `stat` forgives, but an endpoint
+// that never answered is still a failure under every strategy.
+func TestProbeStatStillReportsUnreachable(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+
+	be := openProbe(t, "http://"+addr, backend.ProbeStat)
+	err = be.Probe(context.Background())
+	require.Error(t, err)
+	require.Equal(t, serr.Unavailable, serr.CodeOf(err), "got %v", err)
 }
