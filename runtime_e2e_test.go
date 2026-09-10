@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -24,9 +25,11 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +39,7 @@ import (
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
+	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/shared"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -356,6 +360,13 @@ func TestGCSCredentialProjection(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	// Keep the projection out of the developer's real ~/.codefly. Docker reports
+	// mount sources resolved, and macOS temp dirs sit under a symlinked /var, so
+	// the home is resolved up front to keep the inspected paths comparable.
+	codeflyHome, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv(resources.CodeflyHomeEnv, codeflyHome)
+
 	hostDir := t.TempDir()
 	keyFile := path.Join(hostDir, "gcs-key.json")
 	key := disposableServiceAccountKey(t)
@@ -365,7 +376,7 @@ func TestGCSCredentialProjection(t *testing.T) {
 	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
 	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
 
-	_, err := rt.Init(ctx, &runtimev0.InitRequest{
+	_, err = rt.Init(ctx, &runtimev0.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
 		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
@@ -394,23 +405,25 @@ func TestGCSCredentialProjection(t *testing.T) {
 	require.Contains(t, strings.Fields(env), "SOS_GCS_CREDENTIALS_FILE="+gcsCredentialsContainerPath)
 	require.NotContains(t, env, keyFile, "the gateway must never be handed the host path")
 
-	// The probe runs as the gateway image's own user, so what it can read and
-	// write is what the gateway can. It reports a digest rather than the key, so
-	// no credential bytes reach the test log.
-	user := strings.TrimSpace(dockerInspect(t, gatewayID, `{{.Config.User}}`))
-	require.NotEmpty(t, user)
-	// The probe image carries no passwd entry for the gateway's uid, so the group
-	// has to be named numerically alongside it.
-	if !strings.Contains(user, ":") {
-		user += ":" + user
-	}
-	out, err := exec.Command("docker", "run", "--rm", "--user", user,
+	// The read-only guarantee rests on the gateway not owning the file and not
+	// being root, so the container must actually run as the declared user
+	// whatever image SOS_GATEWAY_IMAGE names.
+	require.Equal(t, gatewayContainerUser, strings.TrimSpace(dockerInspect(t, gatewayID, `{{.Config.User}}`)))
+
+	// The probe runs as that same user, so what it can read and write is what the
+	// gateway can. It reports a digest rather than the key, so no credential bytes
+	// reach the test log. Only stdout is read: docker writes image-pull progress
+	// to stderr, and a daemon without the probe image cached would otherwise mix
+	// that chatter into the probe's answer.
+	probe := exec.Command("docker", "run", "--rm", "--user", gatewayContainerUser,
 		"--mount", fmt.Sprintf("type=bind,source=%s,target=%s", projected, gcsCredentialsContainerPath),
 		probeImage, "sh", "-c", fmt.Sprintf(
 			`sha256sum %[1]s | cut -d' ' -f1; if (echo tampered >> %[1]s) 2>/dev/null; then echo WRITABLE; else echo READONLY; fi`,
-			gcsCredentialsContainerPath),
-	).CombinedOutput()
-	require.NoError(t, err, string(out))
+			gcsCredentialsContainerPath))
+	var probeErr bytes.Buffer
+	probe.Stderr = &probeErr
+	out, err := probe.Output()
+	require.NoError(t, err, probeErr.String())
 	require.Equal(t, []string{digest, "READONLY"}, strings.Fields(string(out)))
 
 	onHost, err := os.ReadFile(keyFile)
@@ -449,4 +462,66 @@ func disposableServiceAccountKey(t *testing.T) []byte {
 	})
 	require.NoError(t, err)
 	return blob
+}
+
+// TestGatewayStartFailureIsOwnedByRuntime covers the ownership rule with a real
+// failed start: Docker refuses a container whose published port another
+// container already holds. dockerrun removes the container it could not start,
+// but the environment around it still holds an open Docker client, and a
+// container that was already present and merely failed to restart is not
+// removed at all. Both are released only by Shutdown, so the Runtime has to own
+// the environment before it is started rather than after.
+func TestGatewayStartFailureIsOwnedByRuntime(t *testing.T) {
+	if os.Getenv("SOS_GATEWAY_IMAGE") == "" {
+		t.Skip("SOS_GATEWAY_IMAGE not set; skipping gateway rollback test")
+	}
+	ctx := context.Background()
+
+	codeflyHome, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv(resources.CodeflyHomeEnv, codeflyHome)
+
+	port := holdPortInDocker(t)
+
+	rt, _, _ := loadedRuntime(t, ctx)
+	require.NoError(t, rt.LoadConfiguration(ctx, nil))
+	// startGateway publishes the resolved bearer, so the container under test is
+	// the one Init would have built: the held port is the only reason it fails.
+	rt.gatewayToken, err = rt.resolveGatewayToken()
+	require.NoError(t, err)
+
+	containerName := dockerrun.ContainerName(rt.UniqueWithWorkspace() + "-gateway")
+
+	require.Error(t, rt.startGateway(ctx, port))
+	require.NotNil(t, rt.gatewayEnv,
+		"the Runtime must own the environment it created, or nothing can release it")
+
+	require.NoError(t, rt.teardown(ctx))
+	require.Nil(t, rt.gatewayEnv)
+	require.Empty(t, containersNamed(t, containerName))
+	require.NoDirExists(t, path.Join(codeflyHome, "runtime-credentials"))
+}
+
+// holdPortInDocker publishes a free host port from a throwaway container and
+// returns it, so the next container asking for it is refused by the daemon.
+func holdPortInDocker(t *testing.T) uint16 {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := uint16(listener.Addr().(*net.TCPAddr).Port)
+	require.NoError(t, listener.Close())
+
+	name := fmt.Sprintf("sos-port-holder-%d", port)
+	out, err := exec.Command("docker", "run", "-d", "--name", name,
+		"-p", fmt.Sprintf("%d:9464", port), probeImage, "sleep", "300").CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+	return port
+}
+
+func containersNamed(t *testing.T, name string) string {
+	t.Helper()
+	out, err := exec.Command("docker", "ps", "-a", "--filter", "name=^/"+name+"$", "--format", "{{.Names}}").Output()
+	require.NoError(t, err)
+	return strings.TrimSpace(string(out))
 }
