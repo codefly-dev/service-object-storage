@@ -128,6 +128,10 @@ func (c *Caching) Name() string                       { return c.be.Name() }
 func (c *Caching) Identity() string                   { return c.be.Identity() }
 func (c *Caching) Capabilities() backend.Capabilities { return c.be.Capabilities() }
 
+// Probe goes straight to the origin: a cached read proves nothing about
+// current access to the store.
+func (c *Caching) Probe(ctx context.Context) error { return c.be.Probe(ctx) }
+
 func (c *Caching) List(ctx context.Context, opts backend.ListOptions) (*backend.ListResult, error) {
 	// v0: lists are not cached (snapshot semantics make them the most dangerous
 	// to cache); pass through for correctness.

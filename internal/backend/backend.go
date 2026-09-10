@@ -36,6 +36,40 @@ type Config struct {
 
 	// PresignMaxExpiry caps presign lifetimes; 0 means the backend default.
 	PresignMaxExpiry time.Duration
+
+	// ProbeStrategy selects how Probe verifies access; empty means ProbeList.
+	ProbeStrategy ProbeStrategy
+	// ProbeKey is the object ProbeStat heads. It need not exist.
+	ProbeKey string
+}
+
+// ProbeStrategy names how a backend verifies access to its bucket/container.
+// Both strategies are non-mutating: a probe must never create or delete an
+// object to prove the store answers.
+type ProbeStrategy string
+
+const (
+	// ProbeList enumerates one key. It is the default, and proves the
+	// bucket/container exists and the credentials may list it.
+	ProbeList ProbeStrategy = "list"
+	// ProbeStat heads Config.ProbeKey. It is for deployments whose credentials
+	// deliberately carry no list permission, and it is deliberately the WEAKER
+	// strategy: a HEAD carries no error body, so it attests only that the
+	// endpoint answered and authenticated the request. The object need not
+	// exist, and on S3-compatible stores a refusal is indistinguishable from an
+	// absent key — without list permission they answer 403 for a key that
+	// merely is not there — so ProbeStat treats both as access. It therefore
+	// does NOT detect a revoked credential or a missing bucket. Use ProbeList
+	// wherever the grant allows it; that is the strategy that detects both.
+	ProbeStat ProbeStrategy = "stat"
+)
+
+// Strategy resolves the configured probe strategy.
+func (c Config) Strategy() ProbeStrategy {
+	if c.ProbeStrategy == "" {
+		return ProbeList
+	}
+	return c.ProbeStrategy
 }
 
 // ObjectInfo is object metadata — and every field the cache needs. ETag is an
@@ -171,8 +205,23 @@ type Backend interface {
 	// accounts, or two MinIO clusters with a bucket named "data", must not
 	// collide on a shared Redis tier.
 	Identity() string
-	// Capabilities reports what this backend honors.
+	// Capabilities reports what this backend honors. It is static feature
+	// introspection computed from the backend kind and its configuration: it
+	// reaches no network and proves nothing about access — see Probe.
 	Capabilities() Capabilities
+	// Probe verifies that the configured bucket/container is reachable and that
+	// the credentials are accepted, using the configured ProbeStrategy. It is
+	// non-mutating and bounded by ctx. Failures are normalized: Unavailable
+	// (no answer — endpoint unreachable, or the deadline expired first),
+	// NotFound (missing bucket/container), PermissionDenied (credentials
+	// refused). Every registered backend honors both strategies, so a probe
+	// never reports Unsupported.
+	//
+	// What a success attests depends on the strategy — see ProbeList and
+	// ProbeStat. ProbeStat cannot report NotFound or PermissionDenied at all on
+	// S3-compatible stores, because a bodyless HEAD does not distinguish them
+	// from an absent key.
+	Probe(ctx context.Context) error
 
 	// Stat returns object metadata (HEAD). versionID may be empty.
 	Stat(ctx context.Context, key, versionID string) (*ObjectInfo, error)

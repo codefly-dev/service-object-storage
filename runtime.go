@@ -52,6 +52,19 @@ const gcsCredentialsContainerPath = "/codefly/credentials/gcs-service-account.js
 // the guarantee hold for whichever image is run.
 const gatewayContainerUser = "65532:65532"
 
+// readinessBudget bounds the whole wait for the gateway in Start: one overall
+// deadline, so a slow attempt spends the budget instead of extending it.
+const readinessBudget = 60 * time.Second
+
+// readinessProbeTimeout bounds a single Ready call, and readinessPollInterval
+// paces the retries between them. Ready answers from the gateway's last
+// background probe rather than probing inline, so this bounds the RPC itself,
+// not a backend round trip.
+const (
+	readinessProbeTimeout = 5 * time.Second
+	readinessPollInterval = time.Second
+)
+
 // localMinioUser is the root user for the agent-managed local MinIO. The
 // password is generated per run (see startLocalMinIO): the container publishes
 // on all interfaces so the gateway can reach it on Linux, so a fixed password
@@ -244,6 +257,11 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 
 // ensureBucket creates the configured bucket if it does not yet exist, retrying
 // while MinIO finishes coming up.
+//
+// Succeeding here says nothing about the gateway: the agent reaches MinIO on
+// localhost with the root credentials, while the gateway reaches it over the
+// container bridge with whatever credentials it was configured with. Only the
+// gateway's own probe, awaited in WaitForReady, establishes that.
 func (s *Runtime) ensureBucket(ctx context.Context) error {
 	endpoint := fmt.Sprintf("localhost:%d", s.minioHostPort)
 	var lastErr error
@@ -459,44 +477,75 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	return s.Runtime.StartResponse()
 }
 
-// WaitForReady dials the gateway's gRPC endpoint and calls Capabilities until it
-// answers — the honest readiness signal that the gateway opened its backend.
+// WaitForReady polls the gateway's Ready RPC until it reports access to its
+// backend. Capabilities is deliberately not used: it answers from a static
+// feature table, so it succeeds against a gateway whose store is unreachable or
+// whose credentials are refused.
+//
+// The gateway is addressed through the NATIVE network view. The agent is a host
+// process whatever runtime context the service itself was given, and a
+// container-only name resolves to nothing from here.
 func (s *Runtime) WaitForReady(ctx context.Context) error {
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.GrpcEndpoint, s.Runtime.NetworkAccess())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.GrpcEndpoint, resources.NewNativeNetworkAccess())
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot find network instance")
 	}
 	address := instance.Address
 	s.Wool.Debug("waiting for object-storage gateway", wool.Field("address", address))
 
-	var lastErr error
-	for retry := 0; retry < 30; retry++ {
-		conn, dialErr := grpc.NewClient(address,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			auth.DialOption(s.gatewayToken))
-		if dialErr != nil {
-			lastErr = dialErr
-		} else {
-			client := storagev0.NewObjectStorageClient(conn)
-			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			_, capErr := client.Capabilities(cctx, &storagev0.CapabilitiesRequest{})
-			cancel()
-			_ = conn.Close()
-			if capErr == nil {
-				return nil
-			}
-			lastErr = capErr
+	conn, err := grpc.NewClient(address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		auth.DialOption(s.gatewayToken))
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot create gateway client for %s", address)
+	}
+	defer func() { _ = conn.Close() }()
+	client := storagev0.NewObjectStorageClient(conn)
+
+	start := time.Now()
+	budget, cancel := context.WithTimeout(ctx, readinessBudget)
+	defer cancel()
+	ticker := time.NewTicker(readinessPollInterval)
+	defer ticker.Stop()
+
+	lastErr := "no attempt completed"
+poll:
+	for {
+		// Stop rather than start a probe the budget cannot see through: a
+		// truncated attempt reports this deadline and buries the cause the last
+		// full attempt established.
+		if deadline, ok := budget.Deadline(); ok && time.Until(deadline) < readinessProbeTimeout {
+			break
+		}
+
+		attempt, attemptCancel := context.WithTimeout(budget, readinessProbeTimeout)
+		res, callErr := client.Ready(attempt, &storagev0.ReadyRequest{})
+		attemptCancel()
+
+		switch {
+		case callErr != nil:
 			// A rejected credential is not a gateway that is still coming up:
-			// retrying cannot change the answer, and doing so for 30 seconds
+			// retrying cannot change the answer, and spending the budget on it
 			// reports the failure as backend readiness instead of as the
 			// mismatched token it is.
-			if status.Code(capErr) == codes.Unauthenticated {
-				return s.Wool.Wrapf(capErr, "object-storage gateway rejected the agent's credential")
+			if status.Code(callErr) == codes.Unauthenticated {
+				return s.Wool.Wrapf(callErr, "object-storage gateway rejected the agent's credential")
 			}
+			lastErr = callErr.Error()
+		case res.GetReady():
+			return nil
+		default:
+			lastErr = fmt.Sprintf("%s: %s", res.GetCode(), res.GetDetail())
 		}
-		time.Sleep(time.Second)
+
+		select {
+		case <-budget.Done():
+			break poll
+		case <-ticker.C:
+		}
 	}
-	return s.Wool.Wrapf(lastErr, "object-storage gateway not ready")
+	return s.Wool.NewError("object-storage gateway at %s not ready after %s: %s",
+		address, time.Since(start).Round(time.Millisecond), lastErr)
 }
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {

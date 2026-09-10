@@ -35,6 +35,7 @@ The honest intersection across all four backends (the surface OpenDAL /
 | `Copy` | server-side copy where supported |
 | `Presign` | time-limited URL the client uses directly over plain HTTP (no cloud SDK) |
 | `Capabilities` | machine-readable feature set — introspect before calling |
+| `Ready` | probe the backing store: is the bucket reachable with these credentials? |
 | `Native` | escape hatch for backend-specific verbs |
 
 Errors are normalized to gRPC status codes (`NotFound`, `AlreadyExists`,
@@ -72,6 +73,79 @@ without it the cache is L1-only.
 | `SOS_CACHE` | `true` | enable the cache |
 | `SOS_REDIS_ADDR` | — | shared cache tier (empty = L1-only) |
 | `SOS_CACHE_MAX_OBJECT_BYTES` | `1048576` | max byte-cached object size |
+| `SOS_PROBE_STRATEGY` | `list` | readiness probe: `list` \| `stat` |
+| `SOS_PROBE_KEY` | — | required for `stat`; the object headed (need not exist) |
+| `SOS_PROBE_INTERVAL` | `10s` | how often readiness is re-probed |
+| `SOS_PROBE_TIMEOUT` | `5s` | per-probe deadline |
+
+## Readiness
+
+`Capabilities` is **static feature introspection**: it answers from a table
+keyed by backend kind and configuration, reaches no network, and therefore
+succeeds against a gateway whose store is unreachable or whose credentials are
+refused. Readiness is a separate, live question, answered by a **non-mutating
+probe** of the configured bucket/container:
+
+| Strategy | Verb | Requires | Notes |
+|----------|------|----------|-------|
+| `list` (default) | list one key | list permission on the bucket | detects a missing bucket AND refused credentials |
+| `stat` | HEAD `SOS_PROBE_KEY` | read permission on one key | least-privilege fallback; attests reachability only — see below |
+
+A probe never creates or deletes anything, and its failure is normalized to a
+cause the operator can act on: `Unavailable` (endpoint unreachable), `NotFound`
+(missing bucket/container), `PermissionDenied` (credentials refused).
+
+**`stat` is deliberately the weaker strategy.** It answers over HTTP HEAD, which
+carries no error body, so the only thing it can attest is that the endpoint
+answered and authenticated the request. Two consequences you must not design
+around:
+
+- It does **not** detect a missing bucket/container. A HEAD for an absent key
+  and a HEAD against a bucket that does not exist are the same bare 404 on S3,
+  MinIO and GCS alike.
+- It does **not** detect revoked credentials. S3-compatible stores answer `403`
+  rather than `404` for a key that merely does not exist when the caller lacks
+  list permission — the exact grant `stat` exists to serve — so `stat` must
+  treat `403` as access, and a genuinely revoked grant reads the same way.
+
+Use `list` wherever the grant allows it: it is the only strategy that detects
+either condition. Reach for `stat` only when the credentials carry no list
+permission at all, and accept that readiness then means "the store answered",
+not "the store will serve reads".
+
+Two surfaces expose this:
+
+One background probe every `SOS_PROBE_INTERVAL` (bounded by
+`SOS_PROBE_TIMEOUT`) feeds both surfaces, so they never disagree and neither
+adds load of its own:
+
+- **`Ready` RPC** — reports `ready`, the normalized `code`, the backend
+  `detail`, and `checked_at_unix_ms` so a caller can judge freshness. It answers
+  from the latest background probe rather than probing per call: probing per
+  call made it an unpaced amplifier onto the cloud API, where a client in a loop
+  becomes one LIST per request and the resulting throttling degrades real
+  traffic. The agent's `Start` waits on this before reporting the service up.
+- **gRPC health service** (`grpc.health.v1`) — the same probe publishes the
+  serving status of `codefly.storage.v0.ObjectStorage`.
+
+**Which Kubernetes probe checks what, and why.** The **startup** probe checks
+`codefly.storage.v0.ObjectStorage`, so a replica must prove real access to the
+bucket before it joins rotation — a bad bucket or credential stalls the rollout
+while the previous pods keep serving. **Readiness and liveness check the overall
+(`""`) service**, which stays `SERVING` while the process serves.
+
+Readiness deliberately does *not* follow the backend probe. Every replica shares
+one bucket and one credential set, so a cloud outage, a deleted bucket or a
+revoked grant fails all of them within a single interval; draining on that
+empties the Service's endpoint list and converts a degraded gateway — one that
+can still serve presigned URLs and cached reads — into an unreachable one.
+Access lost after startup is reported per request as `UNAVAILABLE`, which tells
+a client more than a connection failure does, and liveness stays put so nothing
+is restarted over it.
+
+Cloud backends are qualified per provider: MinIO permissions do not imply S3,
+GCS, or Azure parity, so the grant each strategy needs must be verified against
+the real backend before a deployment relies on it.
 
 ## Authentication
 
@@ -138,7 +212,12 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
   "test on MinIO, ship on S3", decided by config. Both containers publish on all
   interfaces so a consumer container reaches them over the Docker host bridge on
   Linux; each is protected by a per-run credential rather than by the binding —
-  a random MinIO root password, and the gateway token described above.
+  a random MinIO root password, and the gateway token described above. Creating
+  the bucket proves nothing about the gateway: the agent reaches MinIO on
+  localhost with the root credentials, the gateway reaches it over the container
+  bridge with its own, so `Start` still waits on the gateway's `Ready` probe.
+  The agent probes over the **native** network view, since it is a host process
+  even when the service it started runs in a container.
 - **Deployed**: the Builder emits a Kubernetes Deployment running the gateway
   image against the configured cloud backend (`SOS_BACKEND` = `s3` | `gcs` |
   `azure`, defaulting to `s3` when the environment names none). `SOS_BUCKET`,

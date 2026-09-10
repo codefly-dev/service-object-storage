@@ -84,18 +84,38 @@ rendering it as YAML would ship GCS prose into every s3/azure manifest. */}}
             limits:
               cpu: "1"
               memory: 512Mi
+          # Startup checks the ObjectStorage service, whose serving status
+          # follows a probe of the configured bucket — a listening socket is not
+          # access to the store. Gating rollout on it means a replica must prove
+          # real access before it joins rotation, so a misconfigured bucket or
+          # credential stalls the rollout while the previous pods keep serving.
+          #
+          # Readiness and liveness check the overall ("") service, which stays
+          # SERVING while the process serves. Readiness deliberately does NOT
+          # follow the backend probe: every replica shares one bucket and one
+          # credential set, so a backend outage, a deleted bucket or a revoked
+          # grant fails all of them within one probe interval. Draining on that
+          # empties the Service's endpoint list and turns a degraded gateway —
+          # one that can still serve presigned URLs and cached reads — into an
+          # unreachable one. Lost access is reported per request as UNAVAILABLE
+          # instead, and liveness stays put so nothing gets restarted over it.
+          #
+          # The grpc probe handler requires Kubernetes >= 1.24 (GA in 1.27); on
+          # older API servers the field is pruned and the Deployment is rejected
+          # for specifying no handler.
           startupProbe:
-            tcpSocket:
+            grpc:
               port: 9464
+              service: codefly.storage.v0.ObjectStorage
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:
-            tcpSocket:
+            grpc:
               port: 9464
             periodSeconds: 5
             timeoutSeconds: 3
           livenessProbe:
-            tcpSocket:
+            grpc:
               port: 9464
             periodSeconds: 30
             timeoutSeconds: 5

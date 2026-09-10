@@ -33,6 +33,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/minio"
@@ -83,7 +84,7 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(cached, hub))
+	storagev0.RegisterObjectStorageServer(s, server.New(cached, hub, probetest.Monitor(t, cached)))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",

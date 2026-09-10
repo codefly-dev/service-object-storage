@@ -12,6 +12,7 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -20,15 +21,26 @@ import (
 // chunkSize bounds each streamed data frame on Get.
 const chunkSize = 256 * 1024
 
+// Readiness is the last-probe view Ready reports. The background monitor
+// implements it, so Ready and the orchestrator's health check answer from one
+// probe rather than each running their own.
+type Readiness interface {
+	Verdict() health.Verdict
+}
+
 // Server is the ObjectStorage service implementation.
 type Server struct {
 	storagev0.UnimplementedObjectStorageServer
-	be  backend.Backend
-	hub *events.Hub
+	be        backend.Backend
+	hub       *events.Hub
+	readiness Readiness
 }
 
-// New builds a Server over be, publishing write events to hub.
-func New(be backend.Backend, hub *events.Hub) *Server { return &Server{be: be, hub: hub} }
+// New builds a Server over be, publishing write events to hub and answering
+// Ready from readiness.
+func New(be backend.Backend, hub *events.Hub, readiness Readiness) *Server {
+	return &Server{be: be, hub: hub, readiness: readiness}
+}
 
 // Stat returns object metadata, honoring conditional headers by comparing the
 // fetched ETag (NotModified is carried in the header, not as an error).
@@ -245,8 +257,37 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 	}
 }
 
+// Capabilities reports the static feature set. It deliberately touches no
+// network: what the backend supports is a property of its kind and
+// configuration, not of whether it is currently reachable — that is Ready.
 func (s *Server) Capabilities(ctx context.Context, _ *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
 	return toProtoCapabilities(s.be.Capabilities()), nil
+}
+
+// Ready reports the most recent background probe, and deliberately does not
+// probe the store itself. Probing per call made this RPC an unpaced amplifier
+// onto the cloud API — a client in a loop became a LIST-per-request stream,
+// whose throttling degrades real traffic — and gave it a private timeout that
+// SOS_PROBE_TIMEOUT could not reach. checked_at_unix_ms carries how fresh the
+// answer is, so a caller can judge staleness rather than be told a cached
+// verdict was measured now.
+func (s *Server) Ready(ctx context.Context, _ *storagev0.ReadyRequest) (*storagev0.Readiness, error) {
+	v := s.readiness.Verdict()
+	res := &storagev0.Readiness{Backend: s.be.Name(), Ready: v.Ready}
+	if v.CheckedAt.IsZero() {
+		// The monitor probes once at startup, so this is the narrow window
+		// before that first probe lands. Reporting it as unready with a stated
+		// cause beats implying a probe ran and passed.
+		res.Code = serr.Unavailable.String()
+		res.Detail = "no readiness probe has completed yet"
+		return res, nil
+	}
+	res.CheckedAtUnixMs = unixMS(v.CheckedAt)
+	if !v.Ready {
+		res.Code = v.Code
+		res.Detail = v.Detail
+	}
+	return res, nil
 }
 
 func (s *Server) Native(ctx context.Context, req *storagev0.NativeRequest) (*storagev0.NativeResult, error) {

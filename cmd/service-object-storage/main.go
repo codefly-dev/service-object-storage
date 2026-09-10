@@ -17,6 +17,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
+	grpchealth "google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/auth"
@@ -24,6 +26,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/config"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 
 	// Backends register themselves via init(); importing them compiles each into
@@ -88,7 +91,14 @@ func run() error {
 	}
 
 	grpcServer := grpc.NewServer(options...)
-	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub))
+
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	defer stopMonitor()
+	// The monitor is the single prober: the health service and the Ready RPC
+	// both read its verdict, so it must exist before the storage service that
+	// answers from it.
+	monitor := serveHealth(monitorCtx, grpcServer, store, cfg.Health)
+	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub, monitor))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -134,6 +144,27 @@ func openStore(ctx context.Context, cfg config.Config) (backend.Backend, redis.U
 		}
 	}
 	return cache.New(be, rdb, cfg.Cache.Options), rdb, nil
+}
+
+// serveHealth registers the gRPC health service, starts the backend-access
+// monitor behind it, and returns the monitor so the storage service can answer
+// Ready from the same probe.
+//
+// The overall ("") service carries liveness AND readiness: it stays SERVING for
+// as long as the process serves. The ObjectStorage service follows the backend
+// probe and is what a startupProbe gates on, so a replica must prove access
+// once before joining rotation — while a backend outage later, which would fail
+// every replica at once, is reported per request instead of emptying the
+// Service's endpoints.
+func serveHealth(ctx context.Context, srv *grpc.Server, store backend.Backend, cfg config.HealthConfig) *health.Monitor {
+	hs := grpchealth.NewServer()
+	healthv1.RegisterHealthServer(srv, hs)
+	hs.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
+
+	monitor := health.New(store, hs, storagev0.ObjectStorage_ServiceDesc.ServiceName,
+		cfg.Interval, cfg.Timeout)
+	go monitor.Run(ctx)
+	return monitor
 }
 
 // gracefulStop drains in-flight RPCs, but escalates to a hard Stop if they do

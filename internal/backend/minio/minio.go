@@ -42,6 +42,8 @@ type Backend struct {
 	bucket     string
 	endpoint   string
 	presignMax time.Duration
+	probe      backend.ProbeStrategy
+	probeKey   string
 }
 
 // New opens a MinIO backend against cfg.Bucket.
@@ -79,6 +81,8 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 		bucket:     cfg.Bucket,
 		endpoint:   endpoint,
 		presignMax: cfg.PresignMaxExpiry,
+		probe:      cfg.Strategy(),
+		probeKey:   cfg.ProbeKey,
 	}, nil
 }
 
@@ -104,6 +108,52 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		BatchDeleteMax:      1000,
 		NativeVerbs:         nil,
 	}
+}
+
+// Probe verifies access to the bucket without mutating it.
+func (b *Backend) Probe(ctx context.Context) error {
+	const op = "minio.Probe"
+
+	switch b.probe {
+	case backend.ProbeStat:
+		_, err := b.client.StatObject(ctx, b.bucket, b.probeKey, minio.StatObjectOptions{})
+		if err == nil {
+			return nil
+		}
+		// A HEAD carries no error body, so this strategy can only attest that
+		// the endpoint answered and authenticated the request — nothing finer.
+		// Both a 404 and a 403 establish exactly that, and S3-compatible stores
+		// choose between them by grant, not by fact: without list permission
+		// they answer 403 for a key that merely does not exist. Treating 403 as
+		// failure would make the probe permanently red under the very
+		// least-privilege grant this strategy exists to serve, so both pass.
+		if code := serr.CodeOf(mapErr(op, err)); code == serr.NotFound || code == serr.PermissionDenied {
+			return nil
+		}
+		return probeErr(op, err)
+
+	default:
+		lctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		// One key is enough to prove the bucket answers, so take at most one
+		// item: a closed channel means an empty bucket, which is still access.
+		if obj, ok := <-b.client.ListObjects(lctx, b.bucket, minio.ListObjectsOptions{MaxKeys: 1}); ok && obj.Err != nil {
+			return probeErr(op, obj.Err)
+		}
+		if err := ctx.Err(); err != nil {
+			return serr.Wrap(serr.Unavailable, op, err)
+		}
+		return nil
+	}
+}
+
+// probeErr normalizes a probe failure, separating an endpoint that never
+// answered from a refusal the service actually returned.
+func probeErr(op string, err error) error {
+	if serr.Unreachable(err) {
+		return serr.Wrap(serr.Unavailable, op, err)
+	}
+	return mapErr(op, err)
 }
 
 // mapErr normalizes a minio error into a serr.Error.

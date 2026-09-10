@@ -1,6 +1,7 @@
 package serr_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -32,4 +33,19 @@ func TestCodeOfPlainError(t *testing.T) {
 func TestCodeString(t *testing.T) {
 	require.Equal(t, "PreconditionFailed", serr.PreconditionFailed.String())
 	require.Equal(t, "Internal", serr.Internal.String())
+}
+
+// TestUnreachableClassifiesNoAnswer pins what a probe failure normalizes to
+// when the service never answered. A context deadline satisfies net.Error only
+// incidentally and context.Canceled does not satisfy it at all, so a cancelled
+// probe used to fall through to Internal — telling an operator the store
+// misbehaved when the gateway had simply stopped waiting.
+func TestUnreachableClassifiesNoAnswer(t *testing.T) {
+	require.True(t, serr.Unreachable(context.DeadlineExceeded))
+	require.True(t, serr.Unreachable(context.Canceled))
+	require.True(t, serr.Unreachable(fmt.Errorf("probe: %w", context.Canceled)))
+
+	// A refusal the service produced is an answer, and must stay one.
+	require.False(t, serr.Unreachable(errors.New("AccessDenied")))
+	require.False(t, serr.Unreachable(serr.New(serr.PermissionDenied, "probe", "denied")))
 }

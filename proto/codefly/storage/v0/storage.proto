@@ -243,6 +243,34 @@ message BackendCapabilities {
   repeated string native_verbs = 11;
 }
 
+message ReadyRequest {}
+
+// Readiness is the gateway's live view of ACCESS to the configured
+// bucket/container: the result of a non-mutating probe against the backing
+// store. It is the complement of BackendCapabilities — capabilities are static
+// feature introspection that reaches no network and proves nothing about
+// connectivity or credentials.
+//
+// The RPC itself succeeds whenever the gateway is serving, exactly as the gRPC
+// health protocol does; an unready gateway is reported as ready=false with the
+// cause, so a caller distinguishes "the gateway is unreachable" from "the
+// gateway is up but its store is not". detail is a backend error message and
+// never carries credentials.
+message Readiness {
+  bool ready = 1;
+  string backend = 2;
+  // code is the normalized failure class when ready is false, empty otherwise:
+  // "Unavailable" (no answer — endpoint unreachable, or the probe deadline
+  // expired first), "NotFound" (missing bucket or container),
+  // "PermissionDenied" (credentials refused), "Internal".
+  string code = 3;
+  string detail = 4;
+  // checked_at_unix_ms is when the reported probe completed, so a caller can
+  // judge how fresh this answer is: it is at most one probe interval old. It is
+  // 0 before the first probe has landed, which is reported as not ready.
+  int64 checked_at_unix_ms = 5;
+}
+
 message NativeRequest {
   string verb = 1;
   map<string, string> params = 2;
@@ -276,5 +304,10 @@ service ObjectStorage {
   // of band, and periodically thereafter to recover any dropped events.
   rpc Watch(WatchRequest) returns (stream WriteEvent);
   rpc Capabilities(CapabilitiesRequest) returns (BackendCapabilities);
+  // Ready reports whether the configured bucket/container is reachable with the
+  // credentials in force, as of the gateway's most recent background probe.
+  // It does not probe per call: doing so made this RPC an unpaced amplifier
+  // onto the cloud API. Use checked_at_unix_ms to judge freshness.
+  rpc Ready(ReadyRequest) returns (Readiness);
   rpc Native(NativeRequest) returns (NativeResult);
 }

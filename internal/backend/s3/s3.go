@@ -51,6 +51,8 @@ type Backend struct {
 	bucket     string
 	endpoint   string
 	presignMax time.Duration
+	probe      backend.ProbeStrategy
+	probeKey   string
 }
 
 // New opens an S3 backend against cfg.Bucket. Credentials come from the static
@@ -87,6 +89,8 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		bucket:     cfg.Bucket,
 		endpoint:   cfg.Endpoint,
 		presignMax: cfg.PresignMaxExpiry,
+		probe:      cfg.Strategy(),
+		probeKey:   cfg.ProbeKey,
 	}, nil
 }
 
@@ -118,6 +122,49 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		BatchDeleteMax:      batchDeleteMax,
 		NativeVerbs:         nil,
 	}
+}
+
+// Probe verifies access to the bucket without mutating it.
+func (b *Backend) Probe(ctx context.Context) error {
+	const op = "s3.Probe"
+
+	switch b.probe {
+	case backend.ProbeStat:
+		_, err := b.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &b.bucket, Key: &b.probeKey})
+		if err == nil {
+			return nil
+		}
+		// A HEAD carries no error body, so this strategy can only attest that
+		// the endpoint answered and authenticated the request — nothing finer.
+		// Both a 404 and a 403 establish exactly that, and S3 chooses between
+		// them by grant, not by fact: without s3:ListBucket it answers 403 for a
+		// key that merely does not exist. Treating 403 as failure would make the
+		// probe permanently red under the very least-privilege grant this
+		// strategy exists to serve, so both answers pass.
+		if code := serr.CodeOf(mapErr(op, err)); code == serr.NotFound || code == serr.PermissionDenied {
+			return nil
+		}
+		return probeErr(op, err)
+
+	default:
+		_, err := b.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:  &b.bucket,
+			MaxKeys: aws.Int32(1),
+		})
+		return probeErr(op, err)
+	}
+}
+
+// probeErr normalizes a probe failure, separating an endpoint that never
+// answered from a refusal the service actually returned.
+func probeErr(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if serr.Unreachable(err) {
+		return serr.Wrap(serr.Unavailable, op, err)
+	}
+	return mapErr(op, err)
 }
 
 // mapErr normalizes an AWS SDK error into a serr.Error. It prefers typed
