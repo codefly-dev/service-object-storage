@@ -67,7 +67,7 @@ without it the cache is L1-only.
 | `SOS_REGION` | `us-east-1` | |
 | `SOS_ENDPOINT` | — | MinIO / S3-compatible / Azurite endpoint |
 | `SOS_ACCESS_KEY` / `SOS_SECRET_KEY` | — | S3 / MinIO credentials |
-| `SOS_GCS_CREDENTIALS_FILE` | — | GCS service-account JSON (else ADC) |
+| `SOS_GCS_CREDENTIALS_FILE` | — | GCS service-account JSON (else ADC); local only — rejected for deployments |
 | `SOS_AZURE_ACCOUNT` / `SOS_AZURE_KEY` | — | Azure account + shared key |
 | `SOS_CACHE` | `true` | enable the cache |
 | `SOS_REDIS_ADDR` | — | shared cache tier (empty = L1-only) |
@@ -143,11 +143,14 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
   image against the configured cloud backend (`SOS_BACKEND` = `s3` | `gcs` |
   `azure`, defaulting to `s3` when the environment names none). `SOS_BUCKET`,
   `SOS_REGION`, and the backend are read from the deployment configuration. GCS
-  defaults to keyless auth (Application Default Credentials / Workload Identity);
-  set `SOS_GCS_CREDENTIALS_FILE` in configuration only to point the gateway at a
-  mounted service-account key file. Azure reads its (non-sensitive) account name
-  from `SOS_AZURE_ACCOUNT`, emitted into the manifest when the backend is
-  `azure`. (Note: sensitive credential values — `SOS_SECRET_KEY`,
+  authenticates keylessly, via Application Default Credentials / Workload
+  Identity — bind the workload's Kubernetes ServiceAccount to a GCP service
+  account and no key file is needed. A `SOS_GCS_CREDENTIALS_FILE` configured for
+  a deployment is **rejected by the Builder**, not rendered: nothing here mounts
+  a service-account key, so emitting the path would name a file the pod does not
+  have. It remains a local-profile setting. Azure reads its (non-sensitive)
+  account name from `SOS_AZURE_ACCOUNT`, emitted into the manifest when the
+  backend is `azure`. (Note: sensitive credential values — `SOS_SECRET_KEY`,
   `SOS_AZURE_KEY` — are not yet wired into the emitted Secret; see the
   credential-delivery follow-up.)
 

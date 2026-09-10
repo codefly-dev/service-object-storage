@@ -304,20 +304,17 @@ func TestDeploymentTemplates(t *testing.T) {
 	cases := []struct {
 		name             string
 		params           deploymentTemplateParameters
-		wantGCSFile      bool
 		wantAzureAccount string
 	}{
-		{"s3", deploymentTemplateParameters{Backend: "s3", Bucket: "documents", Region: "us-east-1"}, false, ""},
+		{"s3", deploymentTemplateParameters{Backend: "s3", Bucket: "documents", Region: "us-east-1"}, ""},
 		// Azure with no account name emits no SOS_AZURE_ACCOUNT env.
-		{"azure", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1"}, false, ""},
+		{"azure", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1"}, ""},
 		// Azure with an account name emits the non-sensitive SOS_AZURE_ACCOUNT.
-		{"azure-account", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1", AzureAccount: "acmestorage"}, false, "acmestorage"},
-		// GCS with no key file authenticates via Workload Identity — no
-		// credentials-file env, and crucially no required secret mount that
-		// would wedge the pod when the operator runs keyless.
-		{"gcs-adc", deploymentTemplateParameters{Backend: "gcs", Bucket: "documents", Region: "us-east-1"}, false, ""},
-		// GCS with an explicit key-file path emits SOS_GCS_CREDENTIALS_FILE.
-		{"gcs-file", deploymentTemplateParameters{Backend: "gcs", Bucket: "documents", Region: "us-east-1", GCSCredentialsFile: "/var/secrets/gcs/key.json"}, true, ""},
+		{"azure-account", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1", AzureAccount: "acmestorage"}, "acmestorage"},
+		// GCS authenticates via Workload Identity — no credentials-file env, and
+		// crucially no required secret mount that would wedge the pod when the
+		// operator runs keyless.
+		{"gcs", deploymentTemplateParameters{Backend: "gcs", Bucket: "documents", Region: "us-east-1"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -331,8 +328,11 @@ func TestDeploymentTemplates(t *testing.T) {
 			if !strings.Contains(body, `name: SOS_BACKEND`) || !strings.Contains(body, `value: "`+tc.params.Backend+`"`) {
 				t.Errorf("SOS_BACKEND not set to %q:\n%s", tc.params.Backend, body)
 			}
-			if gcsWired := strings.Contains(body, "SOS_GCS_CREDENTIALS_FILE"); gcsWired != tc.wantGCSFile {
-				t.Errorf("SOS_GCS_CREDENTIALS_FILE present=%v, want %v:\n%s", gcsWired, tc.wantGCSFile, body)
+			// No rendering names a key-file path: nothing in this manifest
+			// mounts one, so an emitted path would point at a file the pod does
+			// not have. Deploy rejects a configured path instead.
+			if strings.Contains(body, "name: SOS_GCS_CREDENTIALS_FILE") {
+				t.Errorf("manifest names an unmounted GCS key file:\n%s", body)
 			}
 			azureWired := strings.Contains(body, "SOS_AZURE_ACCOUNT")
 			if azureWired != (tc.wantAzureAccount != "") {
@@ -404,21 +404,23 @@ func deployRequest(destination string, values map[string]string) *builderv0.Depl
 // typo'd map key (e.g. SOS_AZURE_ACCOUNT) fails here rather than shipping green.
 func TestDeployResolvesBackendFromConfiguration(t *testing.T) {
 	cases := []struct {
-		name   string
-		config map[string]string
-		want   []string
+		name     string
+		config   map[string]string
+		want     []string
+		unwanted []string
 	}{
 		{
-			name: "gcs-with-key-file",
+			name: "gcs-keyless",
 			config: map[string]string{
-				"SOS_BACKEND":              "gcs",
-				"SOS_BUCKET":               "prod-docs",
-				"SOS_GCS_CREDENTIALS_FILE": "/var/secrets/gcs/key.json",
+				"SOS_BACKEND": "gcs",
+				"SOS_BUCKET":  "prod-docs",
 			},
 			want: []string{
 				"name: SOS_BACKEND", `value: "gcs"`, `value: "prod-docs"`,
-				"name: SOS_GCS_CREDENTIALS_FILE", `value: "/var/secrets/gcs/key.json"`,
 			},
+			// Deployed GCS authenticates via Workload Identity. A key-file path
+			// would name a file nothing mounts, so none is rendered.
+			unwanted: []string{"name: SOS_GCS_CREDENTIALS_FILE"},
 		},
 		{
 			name: "azure-with-account",
@@ -457,13 +459,19 @@ func TestDeployResolvesBackendFromConfiguration(t *testing.T) {
 					t.Errorf("rendered manifest missing %q:\n%s", want, body)
 				}
 			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(body, unwanted) {
+					t.Errorf("rendered manifest carries %q:\n%s", unwanted, body)
+				}
+			}
 		})
 	}
 }
 
 // TestDeployRejectsBrokenBackendConfiguration guards the validation that keeps a
 // misconfigured deploy from being reported as a success and then crashing the
-// gateway at runtime: an unknown backend kind, or azure without its account name.
+// gateway at runtime: an unknown backend kind, azure without its account name,
+// or a credential this deployment has no channel to deliver.
 func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -479,6 +487,18 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 			name:    "azure-without-account",
 			config:  map[string]string{"SOS_BACKEND": "azure", "SOS_BUCKET": "prod-docs"},
 			wantMsg: "requires SOS_AZURE_ACCOUNT",
+		},
+		{
+			// Rendering this would name a key path nothing mounts: the
+			// configuration channel carries the path, never the service-account
+			// JSON, so the gateway would look for a file the pod does not have.
+			name: "gcs-with-key-file",
+			config: map[string]string{
+				"SOS_BACKEND":              "gcs",
+				"SOS_BUCKET":               "prod-docs",
+				"SOS_GCS_CREDENTIALS_FILE": "/var/secrets/gcs/key.json",
+			},
+			wantMsg: "SOS_GCS_CREDENTIALS_FILE cannot be delivered",
 		},
 		{
 			// Rendering this would start a gateway enforcing a credential no
