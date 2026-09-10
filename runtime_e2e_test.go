@@ -33,9 +33,12 @@ import (
 	"github.com/codefly-dev/core/shared"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	"github.com/codefly-dev/service-object-storage/internal/auth"
 )
 
 // TestRuntimeEndToEndPutGet scaffolds a service through the Builder, drives the
@@ -98,8 +101,15 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	// Register teardown before Init: Init starts the MinIO and gateway containers
 	// one after the other, so a failure between them (MinIO up, gateway not) must
 	// still clean up what did start. Destroy nil-checks each environment, so it is
-	// safe even if Init failed before starting anything.
-	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
+	// safe even if Init failed before starting anything. The flag keeps this
+	// safety net from running a second Shutdown after the explicit teardown the
+	// test asserts on below.
+	destroyed := false
+	defer func() {
+		if !destroyed {
+			_, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+		}
+	}()
 
 	init, err := rt.Init(ctx, &runtimev0.InitRequest{
 		RuntimeContext:          runtimeContext,
@@ -114,7 +124,8 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	// A consumer running in its own container reaches these through
 	// host.docker.internal, which resolves to the bridge gateway on Linux — a
 	// 127.0.0.1-bound port is unreachable there. Both must publish on all
-	// interfaces or the container topology this agent advertises is broken.
+	// interfaces or the container topology this agent advertises is broken; the
+	// token checked below is what keeps that binding from being an open door.
 	gatewayID, err := rt.gatewayEnv.ContainerID()
 	require.NoError(t, err)
 	requirePublishedOnAllInterfaces(t, gatewayID, gatewayContainerPort)
@@ -127,8 +138,24 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	endpoint, err := resources.GetConfigurationValue(ctx, conf, "object-storage", "endpoint")
 	require.NoError(t, err)
 	require.NotEmpty(t, endpoint)
+	connection, err := resources.GetConfigurationValue(ctx, conf, "object-storage", "connection")
+	require.NoError(t, err)
 
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	token, err := resources.GetConfigurationValue(ctx, conf, "object-storage", "token")
+	require.NoError(t, err)
+	require.NotEmpty(t, token, "the runtime must hand consumers a gateway credential")
+	require.NotContains(t, endpoint, token, "endpoint must not carry the credential")
+	require.NotContains(t, connection, token, "connection string must not carry the credential")
+	requireTokenIsSecret(t, conf, token)
+
+	// Every RPC an unauthenticated peer on the published port could try — unary,
+	// client-streaming and server-streaming — must be refused before it reaches
+	// the backend.
+	requireUnauthenticatedPeerIsRefused(t, endpoint)
+
+	conn, err := grpc.NewClient(endpoint,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		auth.DialOption(token))
 	require.NoError(t, err)
 	defer conn.Close()
 	client := storagev0.NewObjectStorageClient(conn)
@@ -166,6 +193,114 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	require.Equal(t, payload, body)
 	require.Equal(t, "text/plain", hdr.GetInfo().GetContentType())
 	require.Equal(t, int64(len(payload)), hdr.GetInfo().GetSize())
+
+	// Teardown owns exactly what it started. The agent creates no Docker network
+	// of its own, so removing both containers removes everything it holds —
+	// including the only place the session token lives.
+	_, err = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	require.NoError(t, err)
+	destroyed = true
+	requireContainerRemoved(t, gatewayID)
+	requireContainerRemoved(t, minioID)
+}
+
+// requireContainerRemoved asserts the container no longer exists on the daemon.
+func requireContainerRemoved(t *testing.T, containerID string) {
+	t.Helper()
+	err := exec.Command("docker", "inspect", containerID).Run()
+	require.Error(t, err, "container %s survived teardown", containerID)
+}
+
+// requireTokenIsSecret asserts the gateway credential is carried as a
+// secret-marked configuration value, so nothing downstream logs or renders it.
+func requireTokenIsSecret(t *testing.T, conf *basev0.Configuration, token string) {
+	t.Helper()
+	for _, info := range conf.GetInfos() {
+		for _, value := range info.GetConfigurationValues() {
+			if value.GetKey() == "token" {
+				require.Equal(t, token, value.GetValue())
+				require.True(t, value.GetSecret(), "gateway token must be marked secret")
+				return
+			}
+		}
+	}
+	t.Fatal("no token value in the runtime configuration")
+}
+
+// requireUnauthenticatedPeerIsRefused dials the published gateway port the way
+// any other host on the network could — no credential at all, then a plausible
+// wrong one — and asserts every read, write, delete, presign and subscribe is
+// rejected. This is the acceptance case for the all-interface binding asserted
+// above: reachable, but useless without the session token.
+func requireUnauthenticatedPeerIsRefused(t *testing.T, endpoint string) {
+	t.Helper()
+	peers := map[string][]grpc.DialOption{
+		"no credentials": nil,
+		"wrong token":    {auth.DialOption("0000000000000000000000000000000000000000000000000000000000000000")},
+	}
+	for peerName, extra := range peers {
+		conn, err := grpc.NewClient(endpoint,
+			append(extra, grpc.WithTransportCredentials(insecure.NewCredentials()))...)
+		require.NoError(t, err)
+		client := storagev0.NewObjectStorageClient(conn)
+
+		for rpcName, call := range map[string]func(context.Context, storagev0.ObjectStorageClient) error{
+			"Capabilities": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+				_, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+				return err
+			},
+			"Stat": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+				_, err := c.Stat(ctx, &storagev0.StatRequest{Key: "e2e/hello.txt"})
+				return err
+			},
+			"Delete": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+				_, err := c.Delete(ctx, &storagev0.DeleteRequest{Key: "e2e/hello.txt"})
+				return err
+			},
+			"Presign": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+				_, err := c.Presign(ctx, &storagev0.PresignRequest{Key: "e2e/hello.txt", ExpirySeconds: 60})
+				return err
+			},
+			"Put": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+				st, sErr := c.Put(ctx)
+				if sErr != nil {
+					return sErr
+				}
+				if sErr = st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{
+					Header: &storagev0.PutHeader{Key: "e2e/intruder.txt", TotalSize: 4},
+				}}); sErr != nil && sErr != io.EOF {
+					return sErr
+				}
+				_, sErr = st.CloseAndRecv()
+				return sErr
+			},
+			"Get": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+				st, sErr := c.Get(ctx, &storagev0.GetRequest{Key: "e2e/hello.txt"})
+				if sErr != nil {
+					return sErr
+				}
+				_, sErr = st.Recv()
+				return sErr
+			},
+			"Watch": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+				st, sErr := c.Watch(ctx, &storagev0.WatchRequest{})
+				if sErr != nil {
+					return sErr
+				}
+				_, sErr = st.Recv()
+				return sErr
+			},
+		} {
+			t.Run(peerName+"/"+rpcName, func(t *testing.T) {
+				cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				err := call(cctx, client)
+				require.Error(t, err)
+				require.Equal(t, codes.Unauthenticated, status.Code(err), "got %v", err)
+			})
+		}
+		_ = conn.Close()
+	}
 }
 
 // requirePublishedOnAllInterfaces asserts the container's port is published on

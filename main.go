@@ -15,6 +15,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -78,6 +79,7 @@ type resolved struct {
 	secretKey          string
 	gcsCredentialsFile string
 	azureAccount       string
+	authToken          string
 }
 
 type Service struct {
@@ -85,6 +87,13 @@ type Service struct {
 	*Settings
 
 	conf resolved
+
+	// gatewayToken is the bearer every caller must present to the gateway. The
+	// Runtime generates one per run and hands it to consumers through the
+	// configuration channel as a secret value — never inside the connection
+	// string. It lives outside resolved because LoadConfiguration rebuilds
+	// resolved from the incoming configuration on every call.
+	gatewayToken string
 
 	GrpcEndpoint *basev0.Endpoint
 }
@@ -110,6 +119,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 				Fields: []*agentv0.ConfigurationValueInformation{
 					{Name: "connection", Description: "grpc connection string"},
 					{Name: "endpoint", Description: "host:port of the gRPC endpoint"},
+					{Name: "token", Description: "bearer sent as the x-codefly-token grpc metadata header"},
 				},
 			},
 		},
@@ -151,6 +161,7 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 			"SOS_SECRET_KEY":           &r.secretKey,
 			"SOS_GCS_CREDENTIALS_FILE": &r.gcsCredentialsFile,
 			"SOS_AZURE_ACCOUNT":        &r.azureAccount,
+			"SOS_AUTH_TOKEN":           &r.authToken,
 		} {
 			v, err := resources.GetConfigurationValue(ctx, conf, "object-storage", key)
 			if err == nil && v != "" {
@@ -158,6 +169,10 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 			}
 		}
 	}
+	// Normalized at the single boundary where it enters, for the same reason the
+	// gateway trims its own env read: a secret carrying a trailing newline would
+	// otherwise be handed to consumers in one form and enforced in another.
+	r.authToken = strings.TrimSpace(r.authToken)
 	s.conf = r
 	return nil
 }
@@ -173,17 +188,21 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	if err := s.LoadConfiguration(ctx, conf); err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot load configuration")
 	}
+	values := []*basev0.ConfigurationValue{
+		{Key: "connection", Value: s.createConnectionString(instance.Address)},
+		{Key: "endpoint", Value: instance.Address},
+	}
+	// The token travels as its own secret value: putting it in the connection
+	// string would leak it into every log line and manifest that carries an
+	// endpoint.
+	if s.gatewayToken != "" {
+		values = append(values, &basev0.ConfigurationValue{Key: "token", Value: s.gatewayToken, Secret: true})
+	}
 	return &basev0.Configuration{
 		Origin:         s.Base.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
 		Infos: []*basev0.ConfigurationInformation{
-			{
-				Name: "object-storage",
-				ConfigurationValues: []*basev0.ConfigurationValue{
-					{Key: "connection", Value: s.createConnectionString(instance.Address)},
-					{Key: "endpoint", Value: instance.Address},
-				},
-			},
+			{Name: "object-storage", ConfigurationValues: values},
 		},
 	}, nil
 }

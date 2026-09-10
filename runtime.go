@@ -12,7 +12,9 @@ import (
 	miniogo "github.com/minio/minio-go/v7"
 	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
@@ -23,6 +25,7 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	"github.com/codefly-dev/service-object-storage/internal/auth"
 )
 
 // gatewayContainerPort is the port the gateway listens on inside its container
@@ -114,6 +117,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		}
 	}
 
+	s.gatewayToken, err = s.resolveGatewayToken()
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+
 	if err = s.startGateway(ctx, uint16(instance.Port)); err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -128,6 +136,24 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	w.Debug("init successful")
 	return s.Runtime.InitResponse()
+}
+
+// resolveGatewayToken returns the bearer the gateway will enforce and consumers
+// will present. A configured token is honored so an operator who pins one is not
+// silently overridden; otherwise a fresh one is generated per run, which is what
+// stands between the all-interface published port and bucket-wide
+// read/write/delete/presign, and which revokes every token a previous run handed
+// out.
+//
+// Generating a new token changes the gateway container's environment, and
+// dockerrun fingerprints the environment, so each run deliberately recreates the
+// container rather than reattaching to the previous one. Making the token stable
+// to recover that reattach would silently give up the revocation property.
+func (s *Runtime) resolveGatewayToken() (string, error) {
+	if s.conf.authToken != "" {
+		return s.conf.authToken, nil
+	}
+	return randomSecret()
 }
 
 // startLocalMinIO brings up a MinIO container, maps it to a free host port, and
@@ -224,7 +250,8 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	// Consumers running in their own container reach the gateway through
 	// host.docker.internal (the Container network instance the agent advertises),
 	// which resolves to the bridge gateway on Linux — unreachable if the port is
-	// bound only to 127.0.0.1. Publish on all interfaces, as MinIO does.
+	// bound only to 127.0.0.1. Publish on all interfaces, as MinIO does; what
+	// makes that safe is SOS_AUTH_TOKEN below, not the binding.
 	runner.WithPublicPorts()
 	envs := []*resources.EnvironmentVariable{
 		resources.Env("SOS_LISTEN", fmt.Sprintf(":%d", gatewayContainerPort)),
@@ -232,6 +259,7 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 		resources.Env("SOS_BUCKET", s.conf.bucket),
 		resources.Env("SOS_REGION", s.conf.region),
 		resources.Env("SOS_CACHE", "false"),
+		resources.Env("SOS_AUTH_TOKEN", s.gatewayToken),
 	}
 	if s.conf.endpoint != "" {
 		envs = append(envs, resources.Env("SOS_ENDPOINT", s.conf.endpoint))
@@ -278,9 +306,14 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	address := instance.Address
 	s.Wool.Debug("waiting for object-storage gateway", wool.Field("address", address))
 
+	var lastErr error
 	for retry := 0; retry < 30; retry++ {
-		conn, dialErr := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if dialErr == nil {
+		conn, dialErr := grpc.NewClient(address,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			auth.DialOption(s.gatewayToken))
+		if dialErr != nil {
+			lastErr = dialErr
+		} else {
 			client := storagev0.NewObjectStorageClient(conn)
 			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			_, capErr := client.Capabilities(cctx, &storagev0.CapabilitiesRequest{})
@@ -289,10 +322,18 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 			if capErr == nil {
 				return nil
 			}
+			lastErr = capErr
+			// A rejected credential is not a gateway that is still coming up:
+			// retrying cannot change the answer, and doing so for 30 seconds
+			// reports the failure as backend readiness instead of as the
+			// mismatched token it is.
+			if status.Code(capErr) == codes.Unauthenticated {
+				return s.Wool.Wrapf(capErr, "object-storage gateway rejected the agent's credential")
+			}
 		}
 		time.Sleep(time.Second)
 	}
-	return s.Wool.NewError("object-storage gateway not ready")
+	return s.Wool.Wrapf(lastErr, "object-storage gateway not ready")
 }
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
@@ -330,9 +371,9 @@ func freeHostPort() (uint16, error) {
 	return uint16(l.Addr().(*net.TCPAddr).Port), nil
 }
 
-// randomSecret returns an unguessable hex secret for the local MinIO root
-// password, so the on-host MinIO published for the gateway is not reachable
-// with a well-known credential.
+// randomSecret returns an unguessable hex secret. Both the MinIO root password
+// and the gateway bearer are generated this way, so neither published port is
+// reachable with a well-known credential.
 func randomSecret() (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {

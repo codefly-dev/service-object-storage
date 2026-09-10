@@ -46,6 +46,18 @@ spec:
               value: "{{ .Deployment.Parameters.Bucket }}"
             - name: SOS_REGION
               value: "{{ .Deployment.Parameters.Region }}"
+            # The gateway refuses to start on an unauthenticated listener unless
+            # this is set. In the deployed profile caller identity is enforced by
+            # the cluster — NetworkPolicy plus service-mesh mTLS in front of this
+            # ClusterIP — not by the gateway.
+            #
+            # Do not replace this with SOS_AUTH_TOKEN on its own. The gateway
+            # would then enforce a credential its consumers do not have, because
+            # nothing delivers that secret to their object-storage
+            # configuration. Both halves have to land together; see README
+            # "Authentication".
+            - name: SOS_ALLOW_ANONYMOUS
+              value: "true"
 {{- if and (eq .Deployment.Parameters.Backend "gcs") .Deployment.Parameters.GCSCredentialsFile (not .Restricted) }}
             # Optional static service-account key file. Unset, GCS authenticates
             # via Application Default Credentials / Workload Identity (the
