@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/codefly-dev/service-object-storage/internal/auth"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/cache"
 )
@@ -16,8 +18,13 @@ import (
 // Config is the fully resolved server configuration.
 type Config struct {
 	ListenAddr string
-	Backend    backend.Config
-	Cache      CacheConfig
+	// AuthToken is the shared secret every caller must present as the
+	// auth.MetadataKey metadata header. Empty means the listener is
+	// unauthenticated, which FromEnv only resolves when the operator has
+	// explicitly accepted it.
+	AuthToken string
+	Backend   backend.Config
+	Cache     CacheConfig
 }
 
 // CacheConfig controls the caching layer. When RedisAddr is empty the cache is
@@ -35,6 +42,7 @@ type CacheConfig struct {
 func FromEnv() (Config, error) {
 	cfg := Config{
 		ListenAddr: env("SOS_LISTEN", ":9464"),
+		AuthToken:  os.Getenv("SOS_AUTH_TOKEN"),
 		Backend: backend.Config{
 			Kind:               env("SOS_BACKEND", "minio"),
 			Bucket:             os.Getenv("SOS_BUCKET"),
@@ -64,11 +72,35 @@ func FromEnv() (Config, error) {
 	if cfg.Backend.Bucket == "" {
 		return Config{}, fmt.Errorf("SOS_BUCKET is required")
 	}
+	if err := checkListenerIsAuthenticated(cfg.AuthToken); err != nil {
+		return Config{}, err
+	}
 	// MinIO addresses buckets path-style by default.
 	if cfg.Backend.Kind == "minio" && os.Getenv("SOS_USE_PATH_STYLE") == "" {
 		cfg.Backend.UsePathStyle = true
 	}
 	return cfg, nil
+}
+
+// checkListenerIsAuthenticated refuses to resolve a configuration that would
+// serve bucket-wide read/write/delete/presign to anyone who can reach the
+// listen port. The gateway always binds every interface inside its container —
+// Docker port publishing cannot forward to a loopback-bound process — so the
+// listen address says nothing about who can reach it, and the token is the only
+// thing the gateway itself can enforce.
+func checkListenerIsAuthenticated(token string) error {
+	// Trimmed, so a token that is only whitespace (an env file with a stray
+	// blank line) counts as absent rather than as a credential nobody can send.
+	if strings.TrimSpace(token) != "" {
+		return nil
+	}
+	if envBool("SOS_ALLOW_ANONYMOUS", false) {
+		return nil
+	}
+	return fmt.Errorf("SOS_AUTH_TOKEN is required: without it every caller that can reach the listener has bucket-wide read/write/delete/presign. "+
+		"Set SOS_AUTH_TOKEN to a shared secret and have clients send it as the %q gRPC metadata header, "+
+		"or set SOS_ALLOW_ANONYMOUS=true if the listener is confined to a private boundary enforced elsewhere (cluster NetworkPolicy / service-mesh mTLS)",
+		auth.MetadataKey)
 }
 
 func env(key, def string) string {

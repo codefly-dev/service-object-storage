@@ -60,6 +60,8 @@ without it the cache is L1-only.
 | Var | Default | Notes |
 |-----|---------|-------|
 | `SOS_LISTEN` | `:9464` | gRPC listen address |
+| `SOS_AUTH_TOKEN` | — | shared secret every caller must present (see [Authentication](#authentication)) |
+| `SOS_ALLOW_ANONYMOUS` | `false` | accept unauthenticated callers; required when `SOS_AUTH_TOKEN` is unset |
 | `SOS_BACKEND` | `minio` | `minio` \| `s3` \| `gcs` \| `azure` \| `mem` |
 | `SOS_BUCKET` | — | required (container for Azure) |
 | `SOS_REGION` | `us-east-1` | |
@@ -71,6 +73,45 @@ without it the cache is L1-only.
 | `SOS_REDIS_ADDR` | — | shared cache tier (empty = L1-only) |
 | `SOS_CACHE_MAX_OBJECT_BYTES` | `1048576` | max byte-cached object size |
 
+## Authentication
+
+The gateway holds the backend credentials and exposes bucket-wide read, write,
+delete, presign and subscribe. Anyone who can reach its port can use all of it,
+so **the gateway refuses to start on an unauthenticated listener** unless the
+operator says otherwise: `SOS_AUTH_TOKEN` must be set, or `SOS_ALLOW_ANONYMOUS`
+must be `true`.
+
+With `SOS_AUTH_TOKEN` set, every RPC — unary and streaming, `Capabilities`
+included — must carry the secret as the `x-codefly-token` gRPC metadata header,
+the same key the codefly host already uses to authenticate agent plugins.
+Anything else is rejected with `UNAUTHENTICATED` before it reaches a backend.
+The token is compared in constant time.
+
+Which layer enforces caller identity, per profile:
+
+| Profile | Enforced by | How the token is delivered |
+|---------|-------------|----------------------------|
+| Local (`codefly run`, tests) | **The gateway.** The agent generates a fresh token every run. | The `object-storage` configuration group, as a `secret`-marked `token` value beside `endpoint` and `connection`. |
+| Deployed (Kubernetes) | **The cluster** — NetworkPolicy plus service-mesh mTLS in front of the ClusterIP. The manifest sets `SOS_ALLOW_ANONYMOUS=true` explicitly and says so in a comment. | Not delivered: the Secret channel that would carry it to both the gateway and its consumers is the same one `SOS_SECRET_KEY` / `SOS_AZURE_KEY` still wait on. Set `SOS_AUTH_TOKEN` through that Secret to move enforcement into the gateway and drop the opt-out. |
+
+The token never appears in the endpoint or connection string, in the startup
+log, in the rendered manifest, or in an image layer.
+
+**Migrating an existing deployment.** A gateway that used to start with no
+authentication now needs one explicit choice. Set `SOS_AUTH_TOKEN` and have
+consumers send the header, or set `SOS_ALLOW_ANONYMOUS=true` to keep the old
+behavior and record that some other layer is doing the enforcing. Randomized
+MinIO credentials do not satisfy the check — they protect the MinIO port, not
+this one.
+
+**Limitation.** The token authenticates the caller but the local profile carries
+it over plaintext gRPC, so a passive on-path observer on the host's network
+could capture it. It is regenerated every run, which bounds the window and
+revokes tokens from earlier runs. TLS/mTLS for the local topology is not
+implemented here — see
+[#3](https://github.com/codefly-dev/service-object-storage/issues/3) for the
+general authentication design.
+
 ## Running as a codefly service
 
 This repo ships a **codefly service agent** (`codefly.dev/object-storage`) so the
@@ -80,7 +121,10 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
 
 - **Local / test**: the agent's Runtime starts a **MinIO** container, creates the
   bucket, and runs the gateway container (`SOS_BACKEND=minio`) pointed at it —
-  "test on MinIO, ship on S3", decided by config.
+  "test on MinIO, ship on S3", decided by config. Both containers publish on all
+  interfaces so a consumer container reaches them over the Docker host bridge on
+  Linux; each is protected by a per-run credential rather than by the binding —
+  a random MinIO root password, and the gateway token described above.
 - **Deployed**: the Builder emits a Kubernetes Deployment running the gateway
   image against the configured cloud backend (`SOS_BACKEND` = `s3` | `gcs` |
   `azure`, defaulting to `s3` when the environment names none). `SOS_BUCKET`,
@@ -124,6 +168,7 @@ proto/codefly/storage/v0/    the uniform API
 gen/                         generated gRPC stubs
 internal/backend/            Backend interface + s3, gcs, azure, minio, mem
 internal/cache/              two-tier read-through cache
+internal/auth/               caller authentication on the gRPC surface
 internal/server/             gRPC ObjectStorage implementation
 internal/config/             env configuration
 cmd/service-object-storage/  the server binary

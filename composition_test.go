@@ -101,6 +101,71 @@ func TestConnectionString(t *testing.T) {
 	}
 }
 
+// TestConnectionConfigurationCarriesTokenAsSecret pins how a consumer receives
+// the gateway credential: as its own secret-marked value, never folded into the
+// connection string or endpoint that get logged and templated everywhere.
+func TestConnectionConfigurationCarriesTokenAsSecret(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService()
+	identity := &basev0.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
+	if err := svc.Base.HeadlessLoad(ctx, identity); err != nil {
+		t.Fatalf("HeadlessLoad: %v", err)
+	}
+	const token = "b6f1a0c9d8e7f6a5b4c3d2e1f0a9b8c7"
+	svc.gatewayToken = token
+
+	conf, err := svc.CreateConnectionConfiguration(ctx, nil, &basev0.NetworkInstance{Address: "localhost:9464", Access: resources.NewNativeNetworkAccess()})
+	if err != nil {
+		t.Fatalf("CreateConnectionConfiguration: %v", err)
+	}
+
+	values := map[string]*basev0.ConfigurationValue{}
+	for _, info := range conf.Infos {
+		for _, value := range info.ConfigurationValues {
+			values[value.Key] = value
+		}
+	}
+	tokenValue, ok := values["token"]
+	if !ok {
+		t.Fatalf("no token value in connection configuration: %+v", values)
+	}
+	if tokenValue.Value != token {
+		t.Errorf("token = %q, want the generated one", tokenValue.Value)
+	}
+	if !tokenValue.Secret {
+		t.Error("token must be marked secret so it is never logged or displayed")
+	}
+	for _, key := range []string{"connection", "endpoint"} {
+		if strings.Contains(values[key].GetValue(), token) {
+			t.Errorf("%s value leaks the token: %q", key, values[key].GetValue())
+		}
+	}
+}
+
+// TestConnectionConfigurationWithoutTokenOmitsIt covers the Builder, which
+// shares the Service but never generates a token: it must not advertise an
+// empty credential a consumer would then try to present.
+func TestConnectionConfigurationWithoutTokenOmitsIt(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService()
+	identity := &basev0.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
+	if err := svc.Base.HeadlessLoad(ctx, identity); err != nil {
+		t.Fatalf("HeadlessLoad: %v", err)
+	}
+
+	conf, err := svc.CreateConnectionConfiguration(ctx, nil, &basev0.NetworkInstance{Address: "localhost:9464", Access: resources.NewNativeNetworkAccess()})
+	if err != nil {
+		t.Fatalf("CreateConnectionConfiguration: %v", err)
+	}
+	for _, info := range conf.Infos {
+		for _, value := range info.ConfigurationValues {
+			if value.Key == "token" {
+				t.Fatalf("unexpected token value %+v", value)
+			}
+		}
+	}
+}
+
 func TestSettings_YAMLRoundTrip(t *testing.T) {
 	var s Settings
 	if err := yaml.Unmarshal([]byte("backend: s3\nbucket: docs\nregion: us-east-2\n"), &s); err != nil {
@@ -156,6 +221,15 @@ func TestDeploymentTemplates(t *testing.T) {
 			// block startup when no key is supplied.
 			if strings.Contains(body, "gcs-credentials") {
 				t.Errorf("unexpected gcs-credentials volume wiring:\n%s", body)
+			}
+			// The gateway refuses an unauthenticated listener unless the
+			// manifest says so, so a deployment that stops emitting this opt-out
+			// without also delivering SOS_AUTH_TOKEN would CrashLoop.
+			if !strings.Contains(body, "name: SOS_ALLOW_ANONYMOUS") {
+				t.Errorf("deployed profile must declare its unauthenticated listener:\n%s", body)
+			}
+			if strings.Contains(body, "name: SOS_AUTH_TOKEN") {
+				t.Errorf("manifest must not carry the gateway credential:\n%s", body)
 			}
 		})
 	}

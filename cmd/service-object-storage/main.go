@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	"github.com/codefly-dev/service-object-storage/internal/auth"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/config"
@@ -74,7 +75,7 @@ func run() error {
 	hub := events.NewHub(store.Name(), store.Identity(), rdb)
 	defer hub.Close()
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(serverOptions(cfg)...)
 	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub))
 
 	sig := make(chan os.Signal, 1)
@@ -85,9 +86,31 @@ func run() error {
 		gracefulStop(grpcServer, shutdownGrace)
 	}()
 
-	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s)",
-		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket)
+	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s auth=%s)",
+		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, authMode(cfg))
 	return grpcServer.Serve(lis)
+}
+
+// serverOptions installs the authentication interceptors when a token is
+// configured. Config resolution refuses an empty token unless the operator
+// accepted an unauthenticated listener, so the empty case here is that choice.
+func serverOptions(cfg config.Config) []grpc.ServerOption {
+	if cfg.AuthToken == "" {
+		return nil
+	}
+	return []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(cfg.AuthToken)),
+		grpc.ChainStreamInterceptor(auth.StreamInterceptor(cfg.AuthToken)),
+	}
+}
+
+// authMode names the enforcement state for the startup log without ever
+// putting the token itself in it.
+func authMode(cfg config.Config) string {
+	if cfg.AuthToken == "" {
+		return "none"
+	}
+	return "token"
 }
 
 // openStore opens the configured backend and, when caching is enabled, wraps it
