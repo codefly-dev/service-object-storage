@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	miniogo "github.com/minio/minio-go/v7"
@@ -35,18 +39,39 @@ const gatewayContainerPort = 9464
 // minioContainerPort is MinIO's S3 API port inside its container.
 const minioContainerPort = 9000
 
+// gcsCredentialsContainerPath is where the gateway container reads its GCS
+// service-account key. The agent projects the operator's host file there and
+// points SOS_GCS_CREDENTIALS_FILE at this path, so the value the gateway sees
+// is always a container path.
+const gcsCredentialsContainerPath = "/codefly/credentials/gcs-service-account.json"
+
+// gatewayContainerUser is the unprivileged uid:gid the gateway runs as. The
+// published image already declares it, but SOS_GATEWAY_IMAGE can name another
+// one, and the projected credential is kept unwritable by file mode alone — a
+// container running as root would ignore that. Setting the user explicitly makes
+// the guarantee hold for whichever image is run.
+const gatewayContainerUser = "65532:65532"
+
 // localMinioUser is the root user for the agent-managed local MinIO. The
 // password is generated per run (see startLocalMinIO): the container publishes
 // on all interfaces so the gateway can reach it on Linux, so a fixed password
 // would be a known credential on the host's network.
 const localMinioUser = "minioadmin"
 
+// containerEnvironment is the part of dockerrun.DockerEnvironment the Runtime
+// owns: something it can identify and tear down. Teardown is the path that has
+// to keep working when Docker does not, so it is reachable through this seam.
+type containerEnvironment interface {
+	ContainerID() (string, error)
+	Shutdown(context.Context) error
+}
+
 type Runtime struct {
 	*services.DefaultRuntime
 	*Service
 
-	minioEnv   *dockerrun.DockerEnvironment
-	gatewayEnv *dockerrun.DockerEnvironment
+	minioEnv   containerEnvironment
+	gatewayEnv containerEnvironment
 
 	// minioHostPort is the host port MinIO is mapped to; the agent reaches it at
 	// localhost and the gateway container at host.docker.internal.
@@ -54,6 +79,10 @@ type Runtime struct {
 
 	// minioPassword is the MinIO root password generated for this run.
 	minioPassword string
+
+	// gcsCredentialsHostFile is the projected copy of the configured GCS
+	// service-account key that the gateway container mounts.
+	gcsCredentialsHostFile string
 }
 
 func NewRuntime() *Runtime {
@@ -111,18 +140,28 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
+	// Project credentials before any container exists: a missing or unreadable
+	// key file must fail with its own cause rather than as a gateway that comes
+	// up and cannot authenticate.
+	if err = s.projectGCSCredentials(); err != nil {
+		return s.Runtime.InitError(err)
+	}
+
 	if s.runsLocalMinIO() {
 		if err = s.startLocalMinIO(ctx); err != nil {
+			s.rollbackInit(ctx)
 			return s.Runtime.InitError(err)
 		}
 	}
 
 	s.gatewayToken, err = s.resolveGatewayToken()
 	if err != nil {
+		s.rollbackInit(ctx)
 		return s.Runtime.InitError(err)
 	}
 
 	if err = s.startGateway(ctx, uint16(instance.Port)); err != nil {
+		s.rollbackInit(ctx)
 		return s.Runtime.InitError(err)
 	}
 
@@ -175,6 +214,9 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create minio environment")
 	}
+	// Own the environment before starting it: a container that is created and
+	// then exits still has to be removed, and only Shutdown does that.
+	s.minioEnv = runner
 	runner.WithOutput(os.Stdout)
 	runner.WithPortMapping(ctx, s.minioHostPort, minioContainerPort)
 	// The gateway container reaches MinIO through host.docker.internal, which on
@@ -189,7 +231,6 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start minio")
 	}
-	s.minioEnv = runner
 
 	// The agent reaches MinIO on the host; the gateway resolves the same store
 	// through host.docker.internal (dockerrun injects it into the container).
@@ -233,6 +274,122 @@ func (s *Runtime) ensureBucket(ctx context.Context) error {
 	return s.Wool.Wrapf(lastErr, "minio bucket %q not ready", s.conf.bucket)
 }
 
+// projectGCSCredentials makes the configured GCS service-account key available
+// to the gateway container. The configured value names a file on this machine —
+// relative to the service directory when it is not absolute — and the gateway
+// reads it at gcsCredentialsContainerPath.
+//
+// The key is copied into an invocation-owned directory instead of being mounted
+// from where the operator keeps it: the gateway runs as gatewayContainerUser,
+// which cannot read a 0600 key owned by the operator. The copy is mode 0444 in a
+// 0700 directory, so the container user can read it and — not being its owner,
+// and not root — cannot write to it, while no other host user can reach it. The
+// gateway therefore never has a path to the operator's file.
+func (s *Runtime) projectGCSCredentials() error {
+	if s.conf.backend != "gcs" {
+		return nil
+	}
+	if s.conf.gcsCredentialsFile == "" {
+		return s.Wool.NewError("backend gcs has no usable credentials for a local run: set SOS_GCS_CREDENTIALS_FILE in the object-storage configuration to a service-account JSON key on this machine. Application Default Credentials and Workload Identity are deployment-only modes — the gateway container inherits no host identity")
+	}
+
+	source := s.conf.gcsCredentialsFile
+	if !filepath.IsAbs(source) {
+		source = filepath.Join(s.Location, source)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot use SOS_GCS_CREDENTIALS_FILE %q", source)
+	}
+	if !info.Mode().IsRegular() {
+		return s.Wool.NewError("SOS_GCS_CREDENTIALS_FILE %q is not a regular file", source)
+	}
+	key, err := os.ReadFile(source)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot read SOS_GCS_CREDENTIALS_FILE %q", source)
+	}
+	if !json.Valid(key) {
+		return s.Wool.NewError("SOS_GCS_CREDENTIALS_FILE %q is not valid JSON: the gateway cannot open a GCS client from it and would exit at startup", source)
+	}
+
+	dir := s.projectedCredentialsDir()
+	if err = os.RemoveAll(dir); err != nil {
+		return s.Wool.Wrapf(err, "cannot reset credential projection")
+	}
+	if err = os.MkdirAll(dir, 0o700); err != nil {
+		return s.Wool.Wrapf(err, "cannot create credential projection")
+	}
+	// The file name carries the key's digest so that replacing the key changes
+	// the mount source. dockerrun fingerprints mounts and reuses a container
+	// whose fingerprint is unchanged, so a fixed name would leave a running
+	// gateway serving the superseded key while the host copy showed the new one.
+	// A generated gateway token already changes the environment every run and
+	// would mask this, but resolveGatewayToken honors a token the operator pins:
+	// with a pinned token the mount source is the only thing that still moves
+	// when the key is rotated.
+	digest := sha256.Sum256(key)
+	projected := filepath.Join(dir, fmt.Sprintf("%x-%s", digest[:6], filepath.Base(gcsCredentialsContainerPath)))
+	if err = os.WriteFile(projected, key, 0o444); err != nil {
+		return s.Wool.Wrapf(err, "cannot project gcs credentials")
+	}
+	// WriteFile's mode is masked by the process umask, and the container user is
+	// not the file's owner: under a umask that clears the other-read bit the
+	// gateway could not read its own credential. Chmod is not masked.
+	if err = os.Chmod(projected, 0o444); err != nil {
+		return s.Wool.Wrapf(err, "cannot restrict projected gcs credentials")
+	}
+	s.gcsCredentialsHostFile = projected
+	return nil
+}
+
+// projectedCredentialsDir is where this service's projected credentials live.
+func (s *Runtime) projectedCredentialsDir() string {
+	return filepath.Join(resources.CodeflyHomeDir(), "runtime-credentials", s.UniqueWithWorkspace())
+}
+
+// discardProjectedCredentials removes the projected copy from the host.
+func (s *Runtime) discardProjectedCredentials() {
+	if s.gcsCredentialsHostFile == "" {
+		return
+	}
+	_ = os.RemoveAll(s.projectedCredentialsDir())
+	s.gcsCredentialsHostFile = ""
+}
+
+// teardown releases everything the Runtime owns, running every step even when
+// an earlier one fails: a gateway that cannot be shut down must not strand the
+// MinIO container, and neither may leave the projected credential on disk. An
+// environment that fails to shut down keeps its reference so a later attempt
+// can retry it.
+func (s *Runtime) teardown(ctx context.Context) error {
+	var errs []error
+	if s.gatewayEnv != nil {
+		if err := s.gatewayEnv.Shutdown(ctx); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot shut down gateway"))
+		} else {
+			s.gatewayEnv = nil
+		}
+	}
+	if s.minioEnv != nil {
+		if err := s.minioEnv.Shutdown(ctx); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot shut down minio"))
+		} else {
+			s.minioEnv = nil
+		}
+	}
+	s.discardProjectedCredentials()
+	return errors.Join(errs...)
+}
+
+// rollbackInit releases what Init already owns after a failed startup. The
+// startup error is what the caller reports, so a teardown failure is logged
+// rather than substituted for it.
+func (s *Runtime) rollbackInit(ctx context.Context) {
+	if err := s.teardown(ctx); err != nil {
+		s.Wool.Warn("cannot fully roll back after failed init", wool.ErrField(err))
+	}
+}
+
 // startGateway runs the gateway container, mapping the assigned host port onto
 // the gateway's listen port and pointing it at the resolved backend.
 func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
@@ -245,7 +402,11 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create gateway environment")
 	}
+	// Own the environment before starting it: a container that is created and
+	// then exits still has to be removed, and only Shutdown does that.
+	s.gatewayEnv = runner
 	runner.WithOutput(os.Stdout)
+	runner.WithUser(gatewayContainerUser)
 	runner.WithPortMapping(ctx, hostPort, gatewayContainerPort)
 	// Consumers running in their own container reach the gateway through
 	// host.docker.internal (the Container network instance the agent advertises),
@@ -270,12 +431,15 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 			resources.Env("SOS_SECRET_KEY", s.conf.secretKey),
 		)
 	}
-	// Forward the cloud-backend credentials the same way s3's are: LoadConfiguration
-	// resolves them, so a local run against gcs/azure (not the minio fixture) must
-	// carry them through or the gateway starts without the credentials it resolved.
-	if s.conf.gcsCredentialsFile != "" {
-		envs = append(envs, resources.Env("SOS_GCS_CREDENTIALS_FILE", s.conf.gcsCredentialsFile))
+	// The configured key file lives on the host, so the gateway is given the
+	// projected copy and the container path it appears at — never the host path,
+	// which does not exist inside the container.
+	if s.gcsCredentialsHostFile != "" {
+		runner.WithMount(s.gcsCredentialsHostFile, gcsCredentialsContainerPath)
+		envs = append(envs, resources.Env("SOS_GCS_CREDENTIALS_FILE", gcsCredentialsContainerPath))
 	}
+	// The account name is not a credential; the shared key that pairs with it has
+	// no local delivery path, so an azure backend only authenticates deployed.
 	if s.conf.azureAccount != "" {
 		envs = append(envs, resources.Env("SOS_AZURE_ACCOUNT", s.conf.azureAccount))
 	}
@@ -283,7 +447,6 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start gateway")
 	}
-	s.gatewayEnv = runner
 	return nil
 }
 
@@ -344,15 +507,8 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	if s.gatewayEnv != nil {
-		if err := s.gatewayEnv.Shutdown(ctx); err != nil {
-			return s.Runtime.DestroyError(err)
-		}
-	}
-	if s.minioEnv != nil {
-		if err := s.minioEnv.Shutdown(ctx); err != nil {
-			return s.Runtime.DestroyError(err)
-		}
+	if err := s.teardown(ctx); err != nil {
+		return s.Runtime.DestroyError(err)
 	}
 	return s.Runtime.DestroyResponse()
 }
