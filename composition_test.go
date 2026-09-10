@@ -93,6 +93,39 @@ func TestLoadConfigurationNormalizesAuthToken(t *testing.T) {
 	}
 }
 
+// TestLoadConfigurationNormalizesGCSCredentialsFile guards the same whitespace
+// trap on the key-file path. A path delivered through a YAML block scalar or an
+// env file arrives with a trailing newline: untrimmed it reaches the gateway as
+// a path that cannot open, and the Builder interpolates a raw newline into its
+// rejection message. A whitespace-only value is not a configured path at all and
+// must read as unset rather than as a path naming nothing.
+func TestLoadConfigurationNormalizesGCSCredentialsFile(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"trailing-newline", "/var/secrets/gcs/key.json\n", "/var/secrets/gcs/key.json"},
+		{"whitespace-only-reads-as-unset", "   ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := NewService()
+			conf := &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+				Name: "object-storage",
+				ConfigurationValues: []*basev0.ConfigurationValue{
+					{Key: "SOS_GCS_CREDENTIALS_FILE", Value: tc.value},
+				},
+			}}}
+			if err := svc.LoadConfiguration(context.Background(), conf); err != nil {
+				t.Fatalf("LoadConfiguration: %v", err)
+			}
+			if svc.conf.gcsCredentialsFile != tc.want {
+				t.Fatalf("gcsCredentialsFile = %q, want %q", svc.conf.gcsCredentialsFile, tc.want)
+			}
+		})
+	}
+}
+
 // TestResolveGatewayToken covers both arms of the choice the Runtime makes: a
 // pinned token is honored rather than silently overridden, and its absence
 // yields a fresh per-run secret.
@@ -330,9 +363,12 @@ func TestDeploymentTemplates(t *testing.T) {
 			}
 			// No rendering names a key-file path: nothing in this manifest
 			// mounts one, so an emitted path would point at a file the pod does
-			// not have. Deploy rejects a configured path instead.
-			if strings.Contains(body, "name: SOS_GCS_CREDENTIALS_FILE") {
-				t.Errorf("manifest names an unmounted GCS key file:\n%s", body)
+			// not have. Deploy rejects a configured path instead. Matched on the
+			// bare name rather than "name: ..." so that explaining the absence in
+			// a rendered YAML comment fails here too: that prose shipped into
+			// every s3/azure manifest, which is why it is a template comment now.
+			if strings.Contains(body, "SOS_GCS_CREDENTIALS_FILE") {
+				t.Errorf("manifest mentions an unmounted GCS key file:\n%s", body)
 			}
 			azureWired := strings.Contains(body, "SOS_AZURE_ACCOUNT")
 			if azureWired != (tc.wantAzureAccount != "") {
@@ -423,6 +459,32 @@ func TestDeployResolvesBackendFromConfiguration(t *testing.T) {
 			unwanted: []string{"name: SOS_GCS_CREDENTIALS_FILE"},
 		},
 		{
+			// The guard is gcs-only, so this configuration deploys. It is the
+			// one case that exercises the rendering path with a key file
+			// actually resolved: the manifest still must not carry it.
+			name: "non-gcs-backend-ignores-key-file",
+			config: map[string]string{
+				"SOS_BACKEND":              "s3",
+				"SOS_BUCKET":               "prod-docs",
+				"SOS_GCS_CREDENTIALS_FILE": "/var/secrets/gcs/key.json",
+			},
+			want:     []string{"name: SOS_BACKEND", `value: "s3"`},
+			unwanted: []string{"SOS_GCS_CREDENTIALS_FILE", "/var/secrets/gcs/key.json"},
+		},
+		{
+			// A whitespace-only path is not a configured path: trimmed at the
+			// LoadConfiguration boundary, it reads as unset and deploys keyless
+			// rather than being rejected for naming nothing.
+			name: "gcs-whitespace-only-key-file-is-unset",
+			config: map[string]string{
+				"SOS_BACKEND":              "gcs",
+				"SOS_BUCKET":               "prod-docs",
+				"SOS_GCS_CREDENTIALS_FILE": "   ",
+			},
+			want:     []string{"name: SOS_BACKEND", `value: "gcs"`},
+			unwanted: []string{"SOS_GCS_CREDENTIALS_FILE"},
+		},
+		{
 			name: "azure-with-account",
 			config: map[string]string{
 				"SOS_BACKEND":       "azure",
@@ -477,6 +539,9 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 		name    string
 		config  map[string]string
 		wantMsg string
+		// wantMsgAlso is a second required fragment, for messages that have to
+		// stay actionable on more than one kind of cluster.
+		wantMsgAlso string
 	}{
 		{
 			name:    "unsupported-backend",
@@ -499,6 +564,22 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 				"SOS_GCS_CREDENTIALS_FILE": "/var/secrets/gcs/key.json",
 			},
 			wantMsg: "SOS_GCS_CREDENTIALS_FILE cannot be delivered",
+			// Workload Identity is GKE-only. On EKS/AKS/on-prem there is no
+			// metadata server, so a message naming only WI prescribes a remedy
+			// the operator cannot perform; it must also name the mount route.
+			wantMsgAlso: "mount the key from an overlay of your own",
+		},
+		{
+			// The same path carrying the trailing newline a YAML block scalar or
+			// an env file adds. It is still rejected, and the message must not
+			// interpolate the raw newline mid-sentence.
+			name: "gcs-with-key-file-trailing-newline",
+			config: map[string]string{
+				"SOS_BACKEND":              "gcs",
+				"SOS_BUCKET":               "prod-docs",
+				"SOS_GCS_CREDENTIALS_FILE": "/var/secrets/gcs/key.json\n",
+			},
+			wantMsg: "nothing here mounts /var/secrets/gcs/key.json into the pod",
 		},
 		{
 			// Rendering this would start a gateway enforcing a credential no
@@ -524,6 +605,11 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 			}
 			if msg := resp.GetState().GetMessage(); !strings.Contains(msg, tc.wantMsg) {
 				t.Errorf("error message = %q, want it to contain %q", msg, tc.wantMsg)
+			}
+			if tc.wantMsgAlso != "" {
+				if msg := resp.GetState().GetMessage(); !strings.Contains(msg, tc.wantMsgAlso) {
+					t.Errorf("error message = %q, want it to contain %q", msg, tc.wantMsgAlso)
+				}
 			}
 			// A rejected deploy must not leave a half-written manifest behind.
 			if _, err := os.Stat(filepath.Join(destination, "base", "deployment.yaml")); err == nil {

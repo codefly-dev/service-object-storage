@@ -67,7 +67,7 @@ without it the cache is L1-only.
 | `SOS_REGION` | `us-east-1` | |
 | `SOS_ENDPOINT` | — | MinIO / S3-compatible / Azurite endpoint |
 | `SOS_ACCESS_KEY` / `SOS_SECRET_KEY` | — | S3 / MinIO credentials |
-| `SOS_GCS_CREDENTIALS_FILE` | — | GCS service-account JSON (else ADC); local only — rejected for deployments |
+| `SOS_GCS_CREDENTIALS_FILE` | — | path the gateway reads a GCS service-account JSON from (else ADC) |
 | `SOS_AZURE_ACCOUNT` / `SOS_AZURE_KEY` | — | Azure account + shared key |
 | `SOS_CACHE` | `true` | enable the cache |
 | `SOS_REDIS_ADDR` | — | shared cache tier (empty = L1-only) |

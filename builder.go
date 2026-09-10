@@ -119,13 +119,17 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	// service-account JSON, and the only file seam the manifest has is
 	// ConfigMap-backed — the wrong home for a private key. Emitting the env var
 	// anyway names a path that does not exist, and the gateway then fails on its
-	// first storage call after passing every probe. Deployed GCS authenticates
-	// keylessly via Workload Identity, so reject the path rather than render a
-	// manifest that lies about it.
+	// first storage call after passing every probe. Keyless auth is the remedy
+	// on GKE; off GKE (EKS, AKS, on-prem) there is no Workload Identity and no
+	// metadata server, so the key has to be mounted by an overlay this agent
+	// does not own and the env var patched on there. Either way, reject the
+	// path rather than render a manifest that lies about it.
 	if parameters.Backend == "gcs" && s.conf.gcsCredentialsFile != "" {
 		return s.Builder.DeployError(fmt.Errorf("SOS_GCS_CREDENTIALS_FILE cannot be delivered by this deployment: "+
-			"nothing mounts %s into the pod, so the gateway would name a path that does not exist; "+
-			"unset it and grant the workload's Kubernetes ServiceAccount access via GCP Workload Identity "+
+			"nothing here mounts %s into the pod, so the gateway would name a path that does not exist; "+
+			"on GKE, unset it and bind the workload's Kubernetes ServiceAccount to a GCP service account "+
+			"(Workload Identity); elsewhere, mount the key from an overlay of your own and patch "+
+			"SOS_GCS_CREDENTIALS_FILE onto the container there "+
 			"(see README \"Running as a codefly service\")", s.conf.gcsCredentialsFile))
 	}
 	// A configured gateway token cannot be honored by this deployment: the
