@@ -19,7 +19,10 @@ import (
 type Config struct {
 	ListenAddr string
 	// AuthToken is the shared secret every caller must present as the
-	// auth.MetadataKey metadata header. Empty means the listener is
+	// auth.MetadataKey metadata header, whitespace-trimmed: a secret delivered
+	// through a YAML block scalar or an env file arrives with a trailing
+	// newline, and enforcing that byte would reject every client that sends the
+	// secret the operator thinks they configured. Empty means the listener is
 	// unauthenticated, which FromEnv only resolves when the operator has
 	// explicitly accepted it.
 	AuthToken string
@@ -42,7 +45,7 @@ type CacheConfig struct {
 func FromEnv() (Config, error) {
 	cfg := Config{
 		ListenAddr: env("SOS_LISTEN", ":9464"),
-		AuthToken:  os.Getenv("SOS_AUTH_TOKEN"),
+		AuthToken:  strings.TrimSpace(os.Getenv("SOS_AUTH_TOKEN")),
 		Backend: backend.Config{
 			Kind:               env("SOS_BACKEND", "minio"),
 			Bucket:             os.Getenv("SOS_BUCKET"),
@@ -89,12 +92,20 @@ func FromEnv() (Config, error) {
 // listen address says nothing about who can reach it, and the token is the only
 // thing the gateway itself can enforce.
 func checkListenerIsAuthenticated(token string) error {
-	// Trimmed, so a token that is only whitespace (an env file with a stray
-	// blank line) counts as absent rather than as a credential nobody can send.
-	if strings.TrimSpace(token) != "" {
+	anonymous := envBool("SOS_ALLOW_ANONYMOUS", false)
+	if token != "" {
+		// Both set is a contradiction, not a preference: "here is a credential"
+		// and "accept callers with no credential" cannot both be the intent, and
+		// silently picking one leaves the operator believing the other. It is
+		// also the shape a half-finished migration takes — a token added to the
+		// Secret while the manifest still carries the opt-out.
+		if anonymous {
+			return fmt.Errorf("SOS_AUTH_TOKEN and SOS_ALLOW_ANONYMOUS=true are mutually exclusive: " +
+				"unset SOS_ALLOW_ANONYMOUS to enforce the token, or unset SOS_AUTH_TOKEN to accept anonymous callers")
+		}
 		return nil
 	}
-	if envBool("SOS_ALLOW_ANONYMOUS", false) {
+	if anonymous {
 		return nil
 	}
 	return fmt.Errorf("SOS_AUTH_TOKEN is required: without it every caller that can reach the listener has bucket-wide read/write/delete/presign. "+

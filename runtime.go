@@ -12,7 +12,9 @@ import (
 	miniogo "github.com/minio/minio-go/v7"
 	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
@@ -115,11 +117,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		}
 	}
 
-	// A fresh bearer per run: the gateway port is published on all interfaces so
-	// consumer containers can reach it, so the token is what stands between that
-	// port and bucket-wide read/write/delete/presign. Regenerating it each run
-	// revokes every token handed out by a previous one.
-	s.gatewayToken, err = randomSecret()
+	s.gatewayToken, err = s.resolveGatewayToken()
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -138,6 +136,24 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	w.Debug("init successful")
 	return s.Runtime.InitResponse()
+}
+
+// resolveGatewayToken returns the bearer the gateway will enforce and consumers
+// will present. A configured token is honored so an operator who pins one is not
+// silently overridden; otherwise a fresh one is generated per run, which is what
+// stands between the all-interface published port and bucket-wide
+// read/write/delete/presign, and which revokes every token a previous run handed
+// out.
+//
+// Generating a new token changes the gateway container's environment, and
+// dockerrun fingerprints the environment, so each run deliberately recreates the
+// container rather than reattaching to the previous one. Making the token stable
+// to recover that reattach would silently give up the revocation property.
+func (s *Runtime) resolveGatewayToken() (string, error) {
+	if s.conf.authToken != "" {
+		return s.conf.authToken, nil
+	}
+	return randomSecret()
 }
 
 // startLocalMinIO brings up a MinIO container, maps it to a free host port, and
@@ -290,11 +306,14 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	address := instance.Address
 	s.Wool.Debug("waiting for object-storage gateway", wool.Field("address", address))
 
+	var lastErr error
 	for retry := 0; retry < 30; retry++ {
 		conn, dialErr := grpc.NewClient(address,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			auth.DialOption(s.gatewayToken))
-		if dialErr == nil {
+		if dialErr != nil {
+			lastErr = dialErr
+		} else {
 			client := storagev0.NewObjectStorageClient(conn)
 			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			_, capErr := client.Capabilities(cctx, &storagev0.CapabilitiesRequest{})
@@ -303,10 +322,18 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 			if capErr == nil {
 				return nil
 			}
+			lastErr = capErr
+			// A rejected credential is not a gateway that is still coming up:
+			// retrying cannot change the answer, and doing so for 30 seconds
+			// reports the failure as backend readiness instead of as the
+			// mismatched token it is.
+			if status.Code(capErr) == codes.Unauthenticated {
+				return s.Wool.Wrapf(capErr, "object-storage gateway rejected the agent's credential")
+			}
 		}
 		time.Sleep(time.Second)
 	}
-	return s.Wool.NewError("object-storage gateway not ready")
+	return s.Wool.Wrapf(lastErr, "object-storage gateway not ready")
 }
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {

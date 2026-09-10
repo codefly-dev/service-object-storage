@@ -49,11 +49,13 @@ spec:
             # The gateway refuses to start on an unauthenticated listener unless
             # this is set. In the deployed profile caller identity is enforced by
             # the cluster — NetworkPolicy plus service-mesh mTLS in front of this
-            # ClusterIP — not by the gateway, because the Secret channel that
-            # would carry SOS_AUTH_TOKEN to both the gateway and its consumers is
-            # not wired yet (see the credential-delivery follow-up in README).
-            # Set SOS_AUTH_TOKEN through that Secret to move enforcement into the
-            # gateway and drop this line.
+            # ClusterIP — not by the gateway.
+            #
+            # Do not replace this with SOS_AUTH_TOKEN on its own. The gateway
+            # would then enforce a credential its consumers do not have, because
+            # nothing delivers that secret to their object-storage
+            # configuration. Both halves have to land together; see README
+            # "Authentication".
             - name: SOS_ALLOW_ANONYMOUS
               value: "true"
 {{- if and (eq .Deployment.Parameters.Backend "gcs") .Deployment.Parameters.GCSCredentialsFile (not .Restricted) }}

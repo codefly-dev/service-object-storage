@@ -15,6 +15,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -78,6 +79,7 @@ type resolved struct {
 	secretKey          string
 	gcsCredentialsFile string
 	azureAccount       string
+	authToken          string
 }
 
 type Service struct {
@@ -159,6 +161,7 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 			"SOS_SECRET_KEY":           &r.secretKey,
 			"SOS_GCS_CREDENTIALS_FILE": &r.gcsCredentialsFile,
 			"SOS_AZURE_ACCOUNT":        &r.azureAccount,
+			"SOS_AUTH_TOKEN":           &r.authToken,
 		} {
 			v, err := resources.GetConfigurationValue(ctx, conf, "object-storage", key)
 			if err == nil && v != "" {
@@ -166,6 +169,10 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 			}
 		}
 	}
+	// Normalized at the single boundary where it enters, for the same reason the
+	// gateway trims its own env read: a secret carrying a trailing newline would
+	// otherwise be handed to consumers in one form and enforced in another.
+	r.authToken = strings.TrimSpace(r.authToken)
 	s.conf = r
 	return nil
 }

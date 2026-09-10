@@ -118,6 +118,19 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	if parameters.Backend == "azure" && parameters.AzureAccount == "" {
 		return s.Builder.DeployError(fmt.Errorf("backend azure requires SOS_AZURE_ACCOUNT (the storage account name)"))
 	}
+	// A configured gateway token cannot be honored by this deployment: the
+	// manifest carries no secret values (DeployKustomize is not wired for
+	// configuration inputs here, the same gap SOS_SECRET_KEY / SOS_AZURE_KEY sit
+	// behind), and CreateConnectionConfiguration only emits a token the Runtime
+	// generated, so consumers would receive none. Accepting it would render a
+	// manifest that either crash-loops the gateway or, worse, starts a gateway
+	// enforcing a credential every consumer lacks. Reject it where the manifest
+	// is owned, as with an unsupported backend.
+	if s.conf.authToken != "" {
+		return s.Builder.DeployError(fmt.Errorf("SOS_AUTH_TOKEN cannot be delivered by this deployment: " +
+			"the emitted Secret carries no configuration values and consumers would receive no credential; " +
+			"caller identity in the deployed profile is enforced by the cluster (see README \"Authentication\")"))
+	}
 	return s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
