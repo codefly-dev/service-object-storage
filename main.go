@@ -79,8 +79,9 @@ type resolved struct {
 	secretKey string
 	// gcsCredentialsFile names a GCS service-account key. A local run reads it
 	// as a path on the operator's machine and the Runtime projects it into the
-	// gateway container; a deployment reads it as the path the key is already
-	// mounted at inside the pod.
+	// gateway container. A deployment does not read it at all: nothing in the
+	// emitted manifest mounts a key, so Builder.Deploy rejects a configured
+	// path rather than render one the pod cannot open.
 	gcsCredentialsFile string
 	azureAccount       string
 	authToken          string
@@ -177,6 +178,12 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 	// gateway trims its own env read: a secret carrying a trailing newline would
 	// otherwise be handed to consumers in one form and enforced in another.
 	r.authToken = strings.TrimSpace(r.authToken)
+	// Same boundary, same reason: a path delivered through a YAML block scalar
+	// or an env file arrives with a trailing newline. Untrimmed it reaches the
+	// gateway as a path that cannot open, and it interpolates a raw newline into
+	// the Builder's rejection message; a whitespace-only value would read as a
+	// configured path while naming nothing.
+	r.gcsCredentialsFile = strings.TrimSpace(r.gcsCredentialsFile)
 	s.conf = r
 	return nil
 }

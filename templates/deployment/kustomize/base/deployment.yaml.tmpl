@@ -58,15 +58,12 @@ spec:
             # "Authentication".
             - name: SOS_ALLOW_ANONYMOUS
               value: "true"
-{{- if and (eq .Deployment.Parameters.Backend "gcs") .Deployment.Parameters.GCSCredentialsFile (not .Restricted) }}
-            # Optional static service-account key file. Unset, GCS authenticates
-            # via Application Default Credentials / Workload Identity (the
-            # keyless default the backend supports). The key name is
-            # credential-like, so a literal value is only emitted for
-            # unrestricted output; restricted deployments use Workload Identity.
-            - name: SOS_GCS_CREDENTIALS_FILE
-              value: "{{ .Deployment.Parameters.GCSCredentialsFile }}"
-{{- end }}
+{{- /* GCS renders no SOS_GCS_CREDENTIALS_FILE: nothing here mounts a
+service-account key, so a path would name a file the pod does not have.
+Deployed GCS authenticates via Workload Identity, or via a key an overlay
+outside this agent mounts and patches the env var for; Deploy rejects a
+configured key-file path rather than emit one. Kept as a template comment:
+rendering it as YAML would ship GCS prose into every s3/azure manifest. */}}
 {{- if and (eq .Deployment.Parameters.Backend "azure") .Deployment.Parameters.AzureAccount }}
             # Azure Blob storage account name. Non-sensitive (it is the public
             # blob endpoint host), so it is emitted for restricted output too;

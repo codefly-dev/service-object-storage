@@ -144,9 +144,10 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
   `azure`, defaulting to `s3` when the environment names none). `SOS_BUCKET`,
   `SOS_REGION`, and the backend are read from the deployment configuration. GCS
   defaults to keyless auth (Application Default Credentials / Workload Identity);
-  `SOS_GCS_CREDENTIALS_FILE` only tells the gateway where to look, and the
-  emitted manifest carries no volume or volumeMount for it (see the deployed
-  key-file gap below). Azure reads its
+  a `SOS_GCS_CREDENTIALS_FILE` configured for a deployment is **rejected by the
+  Builder**, not rendered: nothing here mounts a service-account key, so emitting
+  the path would name a file the pod does not have (see the deployed key-file
+  rule below). Azure reads its
   (non-sensitive) account name from `SOS_AZURE_ACCOUNT`, emitted into the
   manifest when the backend is `azure`. (Note: sensitive credential values —
   `SOS_SECRET_KEY`, `SOS_AZURE_KEY` — are not yet wired into the emitted Secret;
@@ -154,16 +155,17 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
 
 ### Cloud credentials in a local run
 
-`SOS_GCS_CREDENTIALS_FILE` means different things on the two paths, because the
-gateway always runs in a container and only ever reads a container path:
+`SOS_GCS_CREDENTIALS_FILE` is a local-profile setting. The gateway always runs
+in a container and only ever reads a container path, which is why the two
+profiles treat a configured value differently:
 
-- **Deployed**, the value *is* the container path, and the gateway is only told
-  where to look. **Nothing in this repo mounts it**: the Builder emits the env
-  var but no volume or volumeMount, so a deployed `gcs` backend configured with
-  a key-file path names a path that does not exist in the pod unless something
-  outside this agent projects it there. Deployed GCS is expected to use Workload
-  Identity, which needs no file; the key-file path is not delivered end to end
-  yet.
+- **Deployed**, the value is **rejected rather than rendered**. Nothing in this
+  repo mounts a service-account key, so a path emitted into the manifest would
+  name a file the pod does not have; `Builder.Deploy` fails the deploy with an
+  actionable message instead. Deployed GCS authenticates keylessly — Workload
+  Identity on GKE. Off GKE (EKS, AKS, on-prem) there is no Workload Identity and
+  no metadata server: mount the key from an overlay this agent does not own and
+  patch `SOS_GCS_CREDENTIALS_FILE` onto the container there.
 - **Locally**, the value is a path on your machine, absolute or relative to the
   service directory (never to whatever directory the agent happens to run from).
   The Runtime validates it, copies it into an invocation-owned directory under

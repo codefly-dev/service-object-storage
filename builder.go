@@ -25,9 +25,6 @@ type deploymentTemplateParameters struct {
 	Backend string
 	Bucket  string
 	Region  string
-	// GCSCredentialsFile is the path to a GCS service-account key file. Empty
-	// means Application Default Credentials / Workload Identity.
-	GCSCredentialsFile string
 	// AzureAccount is the Azure Blob storage account name. It is non-sensitive
 	// (it forms the public blob endpoint host); the shared key that pairs with
 	// it is sensitive and travels via the Secret, not the manifest.
@@ -95,11 +92,10 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 
 	parameters := &deploymentTemplateParameters{
-		Backend:            s.conf.backend,
-		Bucket:             s.conf.bucket, // LoadConfiguration already defaults bucket/region.
-		Region:             s.conf.region,
-		GCSCredentialsFile: s.conf.gcsCredentialsFile,
-		AzureAccount:       s.conf.azureAccount,
+		Backend:      s.conf.backend,
+		Bucket:       s.conf.bucket, // LoadConfiguration already defaults bucket/region.
+		Region:       s.conf.region,
+		AzureAccount: s.conf.azureAccount,
 	}
 	// Local runs default to MinIO; a deployment that names no backend targets
 	// S3. An explicit backend (including minio-against-an-endpoint) is honored.
@@ -117,6 +113,24 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 	if parameters.Backend == "azure" && parameters.AzureAccount == "" {
 		return s.Builder.DeployError(fmt.Errorf("backend azure requires SOS_AZURE_ACCOUNT (the storage account name)"))
+	}
+	// A key-file path cannot be honored by this deployment: nothing projects the
+	// key into the pod. The configuration channel carries the path, never the
+	// service-account JSON, and the only file seam the manifest has is
+	// ConfigMap-backed — the wrong home for a private key. Emitting the env var
+	// anyway names a path that does not exist, and the gateway then fails on its
+	// first storage call after passing every probe. Keyless auth is the remedy
+	// on GKE; off GKE (EKS, AKS, on-prem) there is no Workload Identity and no
+	// metadata server, so the key has to be mounted by an overlay this agent
+	// does not own and the env var patched on there. Either way, reject the
+	// path rather than render a manifest that lies about it.
+	if parameters.Backend == "gcs" && s.conf.gcsCredentialsFile != "" {
+		return s.Builder.DeployError(fmt.Errorf("SOS_GCS_CREDENTIALS_FILE cannot be delivered by this deployment: "+
+			"nothing here mounts %s into the pod, so the gateway would name a path that does not exist; "+
+			"on GKE, unset it and bind the workload's Kubernetes ServiceAccount to a GCP service account "+
+			"(Workload Identity); elsewhere, mount the key from an overlay of your own and patch "+
+			"SOS_GCS_CREDENTIALS_FILE onto the container there "+
+			"(see README \"Running as a codefly service\")", s.conf.gcsCredentialsFile))
 	}
 	// A configured gateway token cannot be honored by this deployment: the
 	// manifest carries no secret values (DeployKustomize is not wired for
