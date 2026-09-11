@@ -130,5 +130,6 @@ RepoDigest both equal
 `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`.
 CI now fetches that exact multi-platform image for both integration and E2E,
 without changing production image selection or substituting another version.
-Actionlint passed. Production cold pulls from Docker Hub remain an external
+Actionlint reports the pre-existing unused `i` loop-variable warning (SC2034);
+no suppression was added. Production cold pulls from Docker Hub remain an external
 registry dependency; this CI workaround does not claim to repair that service.
