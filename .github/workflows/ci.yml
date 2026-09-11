@@ -41,7 +41,7 @@ jobs:
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
+            quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:9000/minio/health/live && break
             sleep 1
@@ -64,6 +64,12 @@ jobs:
           cache: true
       - name: build gateway image
         run: docker build -t service-object-storage:e2e .
+      # Docker Hub denies this historical image. The publisher's Quay mirror
+      # has the identical multi-platform digest already used by the Runtime.
+      - name: fetch the exact runtime MinIO image
+        run: |
+          docker pull quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+          docker tag quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e minio/minio:RELEASE.2025-04-22T22-12-26Z
       - name: end-to-end put/get through the agent runtime
         env:
           SOS_GATEWAY_IMAGE: service-object-storage:e2e

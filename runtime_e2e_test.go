@@ -81,6 +81,7 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, init)
+	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 
 	_, err = rt.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
@@ -95,6 +96,7 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	requirePublishedOnAllInterfaces(t, gatewayID, gatewayContainerPort)
 	minioID, err := rt.minioEnv.ContainerID()
 	require.NoError(t, err)
+	requireMinIOFilesystemOwner(t, rt, minioID)
 	requirePublishedOnAllInterfaces(t, minioID, minioContainerPort)
 
 	conf, err := resources.ExtractConfiguration(init.RuntimeConfigurations, resources.NewRuntimeContextNative())
@@ -277,6 +279,11 @@ func requireUnauthenticatedPeerIsRefused(t *testing.T, endpoint string) {
 func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.NetworkMapping, *basev0.RuntimeContext) {
 	t.Helper()
 
+	// Keep all persistent test data outside the developer's real Codefly home.
+	codeflyHome, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv(resources.CodeflyHomeEnv, codeflyHome)
+	t.Setenv("SOS_LOCAL_MINIO_INITIALIZE", "true")
 	workspace := &resources.Workspace{Name: "test"}
 	tmpDir := t.TempDir()
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
@@ -285,6 +292,7 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 
 	identity := &basev0.ServiceIdentity{
 		Name:                service.Name,
+		Version:             service.Version,
 		Module:              "mod",
 		Workspace:           workspace.Name,
 		WorkspacePath:       tmpDir,
@@ -292,7 +300,7 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 	}
 
 	builder := NewBuilder()
-	_, err := builder.Load(ctx, &builderv0.LoadRequest{
+	_, err = builder.Load(ctx, &builderv0.LoadRequest{
 		DisableCatch: true,
 		Identity:     identity,
 		CreationMode: &builderv0.CreationMode{Communicate: false},
@@ -360,13 +368,6 @@ func TestGCSCredentialProjection(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Keep the projection out of the developer's real ~/.codefly. Docker reports
-	// mount sources resolved, and macOS temp dirs sit under a symlinked /var, so
-	// the home is resolved up front to keep the inspected paths comparable.
-	codeflyHome, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	t.Setenv(resources.CodeflyHomeEnv, codeflyHome)
-
 	hostDir := t.TempDir()
 	keyFile := path.Join(hostDir, "gcs-key.json")
 	key := disposableServiceAccountKey(t)
@@ -376,7 +377,7 @@ func TestGCSCredentialProjection(t *testing.T) {
 	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
 	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
 
-	_, err = rt.Init(ctx, &runtimev0.InitRequest{
+	response, err := rt.Init(ctx, &runtimev0.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
 		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
@@ -388,6 +389,7 @@ func TestGCSCredentialProjection(t *testing.T) {
 		}}},
 	})
 	require.NoError(t, err)
+	require.Equal(t, runtimev0.InitStatus_READY, response.GetStatus().GetState(), response.GetStatus().GetMessage())
 	require.Nil(t, rt.minioEnv, "a gcs run must not stand up the local MinIO fixture")
 
 	projected := rt.gcsCredentialsHostFile
@@ -477,18 +479,15 @@ func TestGatewayStartFailureIsOwnedByRuntime(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	codeflyHome, err := filepath.EvalSymlinks(t.TempDir())
-	require.NoError(t, err)
-	t.Setenv(resources.CodeflyHomeEnv, codeflyHome)
-
 	port := holdPortInDocker(t)
 
 	rt, _, _ := loadedRuntime(t, ctx)
 	require.NoError(t, rt.LoadConfiguration(ctx, nil))
 	// startGateway publishes the resolved bearer, so the container under test is
 	// the one Init would have built: the held port is the only reason it fails.
-	rt.gatewayToken, err = rt.resolveGatewayToken()
+	token, err := rt.resolveGatewayToken()
 	require.NoError(t, err)
+	rt.gatewayToken = token
 
 	containerName := dockerrun.ContainerName(rt.UniqueWithWorkspace() + "-gateway")
 
@@ -499,7 +498,7 @@ func TestGatewayStartFailureIsOwnedByRuntime(t *testing.T) {
 	require.NoError(t, rt.teardown(ctx))
 	require.Nil(t, rt.gatewayEnv)
 	require.Empty(t, containersNamed(t, containerName))
-	require.NoDirExists(t, path.Join(codeflyHome, "runtime-credentials"))
+	require.NoDirExists(t, path.Join(resources.CodeflyHomeDir(), "runtime-credentials"))
 }
 
 // holdPortInDocker publishes a free host port from a throwaway container and
