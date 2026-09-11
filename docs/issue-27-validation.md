@@ -121,3 +121,14 @@ and 28 existing findings in Core's owning Docker runner package. No lint
 suppressions or unrelated cleanup were added. These are not green lint claims.
 No shared Wiki containers, retained volumes, keys or local document data were
 modified. Recovery/adoption remains separate under the Wiki handoff.
+
+The first review-fix CI run, 34651106418 at `eed693d`, failed before integration
+tests because Docker Hub denied `minio/minio` pulls (exit 125). The full failed
+job log was inspected, and denial of the Runtime's historical tag reproduced
+locally. The publisher's Quay manifest and the locally retained Docker Hub
+RepoDigest both equal
+`sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e`.
+CI now fetches that exact multi-platform image for both integration and E2E,
+without changing production image selection or substituting another version.
+Actionlint passed. Production cold pulls from Docker Hub remain an external
+registry dependency; this CI workaround does not claim to repair that service.
