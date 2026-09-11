@@ -6,9 +6,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	miniogo "github.com/minio/minio-go/v7"
-	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +18,8 @@ import (
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/shared"
+	miniogo "github.com/minio/minio-go/v7"
+	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -62,6 +63,7 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	init()
 	firstID, err := rt.minioEnv.ContainerID()
 	require.NoError(t, err)
+	requireMinIOFilesystemOwner(t, rt, firstID)
 	firstPassword, firstToken := rt.minioPassword, rt.gatewayToken
 	keys := []string{"sources/handbook/original.txt", "sources/handbook/nested/bytes.bin"}
 	payloads := [][]byte{[]byte("persistent source bytes\n"), bytes.Repeat([]byte{0, 1, 255, 42}, 32768)}
@@ -130,6 +132,7 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	init()
 	secondID, err := rt.minioEnv.ContainerID()
 	require.NoError(t, err)
+	requireMinIOFilesystemOwner(t, rt, secondID)
 	require.NotEqual(t, firstID, secondID)
 	require.True(t, firstPassword != rt.minioPassword, "MinIO credentials must rotate")
 	require.True(t, firstToken != rt.gatewayToken, "gateway credentials must rotate")
@@ -209,6 +212,9 @@ func TestMinIOMissingBucketFailsClosed(t *testing.T) {
 	defer func() { require.NoError(t, rt.teardown(context.Background())) }()
 	require.NoError(t, rt.LoadConfiguration(ctx, nil))
 	require.NoError(t, rt.startLocalMinIO(ctx))
+	id, err := rt.minioEnv.ContainerID()
+	require.NoError(t, err)
+	requireMinIOFilesystemOwner(t, rt, id)
 	cl, err := miniogo.New(fmt.Sprintf("localhost:%d", rt.minioHostPort), &miniogo.Options{Creds: miniocreds.NewStaticV4(localMinioUser, rt.minioPassword, "")})
 	require.NoError(t, err)
 	require.NoError(t, cl.RemoveBucket(ctx, rt.conf.bucket))
@@ -222,4 +228,48 @@ func TestMinIOMissingBucketFailsClosed(t *testing.T) {
 	exists, err := cl.BucketExists(ctx, rt.conf.bucket)
 	require.NoError(t, err)
 	require.False(t, exists)
+}
+
+// Assert the actual container declaration even on Docker Desktop, whose bind
+// mount ownership translation masked the Linux bug. After the test tears down
+// its containers, check the host can manage every retained file and directory.
+// No permission repair or data deletion is used to make cleanup pass.
+func requireMinIOFilesystemOwner(t *testing.T, rt *Runtime, containerID string) {
+	t.Helper()
+	owner := fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid())
+	require.Equal(t, owner, strings.TrimSpace(dockerInspect(t, containerID, `{{.Config.User}}`)), "MinIO must write as the owner of its private host data")
+	data := filepath.Join(minioCustodyDir(dockerrun.ContainerName(rt.UniqueWithWorkspace()+"-minio")), "data")
+	t.Cleanup(func() {
+		metadataFiles := 0
+		err := filepath.WalkDir(data, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				// Removing a nested entry requires write permission on its parent. An
+				// empty disposable probe also verifies that without changing object data.
+				probe, err := os.CreateTemp(path, ".owner-proof-*")
+				if err != nil {
+					return err
+				}
+				if err = probe.Close(); err != nil {
+					return err
+				}
+				return os.Remove(probe.Name())
+			}
+			if entry.Name() == "xl.meta" {
+				metadataFiles++
+			}
+			if entry.Type().IsRegular() {
+				file, err := os.OpenFile(path, os.O_RDWR, 0)
+				if err != nil {
+					return err
+				}
+				return file.Close()
+			}
+			return nil
+		})
+		require.NoError(t, err, "retained MinIO data must remain manageable by its host owner after teardown")
+		require.Positive(t, metadataFiles, "must inspect real MinIO metadata, not an empty fixture")
+	})
 }

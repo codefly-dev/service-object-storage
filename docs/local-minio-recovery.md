@@ -19,8 +19,10 @@ The agent now declares a bind mount at `/data`, backed by:
 `CODEFLY_HOME` defaults to `~/.codefly`. The container name is Core's name for
 `UniqueWithWorkspace() + "-minio"`, including the workspace, module, service and
 naming scope. This is durable local data, **not a runtime cache**. Preserve the
-whole custody directory in backups. Stop, Destroy, failed startup and normal
-configuration replacement never delete this directory. Keep the same
+whole custody directory in backups. MinIO runs with the agent process's effective
+UID:GID so files remain manageable by that host user on Linux. The Runtime does
+not recursively chown existing data or broaden its permissions. Stop, Destroy,
+failed startup and normal configuration replacement never delete this directory. Keep the same
 `CODEFLY_HOME` and naming scope across runs. A changed scope is a different store.
 The Docker daemon must share the agent's host filesystem (local Docker or Docker
 Desktop). This is not a remote-daemon storage provisioner.
@@ -70,15 +72,18 @@ No recovery of the Wiki's retained objects is claimed by this PR.
    Mount the already verified retained source volume **read-only** into a
    disposable copy container, and mount only that staging directory writable.
    Copy the complete filesystem, including `.minio.sys`, hidden files, bucket
-   metadata and object versions. For example, with operator-verified variables:
+   metadata and object versions. Run the following from the account that will run
+   the candidate agent, with operator-verified variables. Only the new staging
+   copy is assigned to that account; the retained source remains read-only:
 
    ```sh
    docker volume inspect "$recovery_source_volume" >/dev/null || exit 1
    mkdir -m 700 "$recovery_staging" || exit 1
-   docker run --rm --network none \
+   docker run --rm --network none --user 0:0 \
+     -e RECOVERY_UID="$(id -u)" -e RECOVERY_GID="$(id -g)" \
      --mount "type=volume,source=$recovery_source_volume,target=/source,readonly,volume-nocopy" \
      --mount "type=bind,source=$recovery_staging,target=/destination" \
-     busybox:1.36 sh -ec 'cp -a /source/. /destination/'
+     busybox:1.36 sh -ec 'cp -a /source/. /destination/; chown -R "$RECOVERY_UID:$RECOVERY_GID" /destination'
    ```
 
    Check the copy command's status and verify a full relative-path/content-hash

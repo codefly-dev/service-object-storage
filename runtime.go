@@ -251,6 +251,11 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 		resources.Env("MINIO_ROOT_USER", localMinioUser),
 		resources.Env("MINIO_ROOT_PASSWORD", s.minioPassword),
 	)
+	// The agent owns the private bind directory. Container root would leave
+	// nested MinIO files owned by root on Linux, making backup, recovery and
+	// disposable-test cleanup fail for the agent user. Core fingerprints User,
+	// so this identity is also retained across configuration replacement.
+	runner.WithUser(fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()))
 	runner.WithMount(data, "/data")
 	runner.WithCommand("server", "/data")
 	if err = runner.Init(ctx); err != nil {

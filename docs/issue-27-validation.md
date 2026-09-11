@@ -53,3 +53,37 @@ Recovery and adoption remain separate work under
 See [recovery instructions](local-minio-recovery.md): retain and copy the source
 read-only into a separately owned candidate, preserve filesystem metadata and
 versions, and verify authenticated reads before scheduling any shared rollout.
+
+## Linux ownership follow-up
+
+The earlier macOS passes did not establish Linux success. Full logs from
+[run 34635423818](https://github.com/codefly-dev/service-object-storage/actions/runs/34635423818)
+show all three failing E2E tests reached a Linux `TempDir RemoveAll` permission
+error: `TestMinIOPersistentCustody` and `TestRuntimeEndToEndPutGet` could not unlink
+object `xl.meta`; `TestMinIOMissingBucketFailsClosed` could not unlink
+`.minio.sys/config/config.json/xl.meta`. MinIO ran as image-default root and wrote
+root-owned files inside the agent user's private bind mount. Docker Desktop's
+ownership translation masked this defect locally.
+
+The Runtime now reuses Core's `WithUser` to run MinIO with the agent's effective
+UID:GID. It does not modify ownership or permissions of retained data. The three
+regressions inspect the actual container user (including replacement) and, after
+container teardown, walk the complete retained data tree as the host user. They
+verify read/write access to real MinIO metadata and directory management without
+privileged cleanup. Existing byte, metadata, key, token-revocation and fail-closed
+assertions remain in force. Applying these tests to the previous Runtime via a
+Go source overlay fails on the missing container user even on macOS.
+
+Follow-up local build, vet (including e2e), tidy, race tests and gateway image
+build passed. Broader e2e-tagged lint still reports the same 13 existing findings.
+Initial local test attempts encountered transient Docker port-binding failures;
+another attempt started before the new image tag was available. Those attempts
+failed and were not counted as validation. The full suite was rerun after the
+image build completed and passed all E2E tests with zero skips (36.285s). An
+intermediate GCS projection attempt failed on an empty projection path; the
+positive Runtime tests now assert Init READY with its error message, so future
+initialization failures cannot be hidden behind that secondary assertion.
+The final full run includes a passing GCS projection test. Final local and hosted
+Linux results are recorded on
+[PR #28](https://github.com/codefly-dev/service-object-storage/pull/28) and its
+commit-specific Checks tab; the failed run above is not treated as green.
