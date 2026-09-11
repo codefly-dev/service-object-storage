@@ -87,3 +87,37 @@ The final full run includes a passing GCS projection test. Final local and hoste
 Linux results are recorded on
 [PR #28](https://github.com/codefly-dev/service-object-storage/pull/28) and its
 commit-specific Checks tab; the failed run above is not treated as green.
+
+## Review fixes: structured custody, generation fencing and bootstrap state
+
+Four additional review failures were implemented after the earlier green run:
+
+- Custody v2 hashes a JSON tuple of workspace/module/service/scope, and records
+  that tuple. The colliding `documents-archive/object-storage` and
+  `documents/archive-object-storage` identities cannot accept each other's data.
+  Incumbent conflicts and ambiguous v1 directories fail without replacement.
+- Core's name-based `Shutdown` could delete a successor. Dependency
+  [Core PR462](https://github.com/codefly-dev/core/pull/462), pinned at
+  `69492a82459027ec36d64b0f291a9043b4c99dfa`, removes only its acquired container
+  ID while retaining log cleanup. The agent holds custody through gateway Init.
+- Pending provisioning resumes after interruption before container creation;
+  atomic, synced record commitment follows successful bucket provisioning.
+  Missing committed buckets and missing custody evidence still fail closed.
+- Docker rootless/userns mapping is rejected before custody mutation. Mock
+  daemon tests verify even the lock directory is absent after rejection.
+  No live rootless daemon was available; this is an explicit unsupported-mode
+  rejection, not a claim of rootless filesystem compatibility.
+
+Local build, vet (including e2e), tidy, all race tests and full E2E passed.
+Full E2E took 38.013s, with no skipped tests. It reads authenticated objects after
+stale Runtime teardown, checks exact bytes/metadata and credential rotation,
+resumes interrupted bootstrap and rejects identity collisions/legacy custody.
+The separate Docker runner race suite passed in 89.629s. Its new regression
+fails against unmodified Core: recorded stop/remove requests target the
+successor instead of the acquired ID.
+
+Full golangci-lint remains failing on 13 existing agent findings (with e2e),
+and 28 existing findings in Core's owning Docker runner package. No lint
+suppressions or unrelated cleanup were added. These are not green lint claims.
+No shared Wiki containers, retained volumes, keys or local document data were
+modified. Recovery/adoption remains separate under the Wiki handoff.

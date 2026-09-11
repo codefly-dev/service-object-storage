@@ -26,6 +26,7 @@ type minioCustody struct {
 	Owner   string `json:"owner"`
 	Bucket  string `json:"bucket"`
 	ID      string `json:"id"`
+	Phase   string `json:"phase,omitempty"`
 }
 
 func minioCustodyDir(owner string) string {
@@ -33,16 +34,39 @@ func minioCustodyDir(owner string) string {
 	return filepath.Join(resources.CodeflyHomeDir(), "object-storage", fmt.Sprintf("%x", digest))
 }
 
+// JSON encodes boundaries that Docker's display-name normalization erases.
+func (s *Runtime) minioOwner() string {
+	identity, _ := json.Marshal([4]string{s.Identity.Workspace, s.Identity.Module, s.Identity.Name, s.Environment.NamingScope})
+	return string(identity)
+}
+
 func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) {
-	owner := dockerrun.ContainerName(s.UniqueWithWorkspace() + "-minio")
+	owner := s.minioOwner()
+	displayName := dockerrun.ContainerName(s.UniqueWithWorkspace() + "-minio")
 	root, err := filepath.Abs(minioCustodyDir(owner))
 	if err != nil {
+		return "", nil, err
+	}
+	cli, err := dockerrun.NewClient()
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = cli.Close() }()
+	if host := cli.DaemonHost(); !strings.HasPrefix(host, "unix://") && !strings.HasPrefix(host, "npipe://") {
+		return "", nil, fmt.Errorf("local MinIO custody requires a Docker daemon sharing the agent host filesystem")
+	}
+	info, err := cli.Info(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("inspect Docker user mapping: %w", err)
+	}
+	if err = validateMinIODaemon(info.SecurityOptions); err != nil {
 		return "", nil, err
 	}
 	if err = os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return "", nil, err
 	}
-	lock := flock.New(root + ".lock")
+	// Serialize even identities whose legacy Docker display names collide.
+	lock := flock.New(minioCustodyDir(displayName) + ".lock")
 	locked, err := lock.TryLock()
 	if err != nil {
 		return "", nil, err
@@ -55,15 +79,11 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 		release()
 		return "", nil, fmt.Errorf("MinIO custody: %w; preserve existing data and follow README recovery instructions", err)
 	}
-	cli, err := dockerrun.NewClient()
-	if err != nil {
-		return fail(err)
+	// A v1 location cannot establish which structured identity owns it.
+	if _, legacyErr := os.Lstat(minioCustodyDir(displayName)); !errors.Is(legacyErr, os.ErrNotExist) {
+		return fail(fmt.Errorf("ambiguous legacy custody at %s; explicit verified recovery is required (stat: %v)", minioCustodyDir(displayName), legacyErr))
 	}
-	defer func() { _ = cli.Close() }()
-	if host := cli.DaemonHost(); !strings.HasPrefix(host, "unix://") && !strings.HasPrefix(host, "npipe://") {
-		return fail(fmt.Errorf("local MinIO custody requires a Docker daemon sharing the agent host filesystem"))
-	}
-	existing, err := cli.ContainerInspect(ctx, owner)
+	existing, err := cli.ContainerInspect(ctx, displayName)
 	present := err == nil
 	if err != nil && !errdefs.IsNotFound(err) {
 		return fail(err)
@@ -76,11 +96,19 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 			return fail(err)
 		}
 	}
-	_, recordErr := os.Stat(filepath.Join(root, "custody.json"))
-	s.minioNewStore = errors.Is(recordErr, os.ErrNotExist)
 	if err = ensureMinIOCustody(root, owner, s.conf.bucket, os.Getenv("SOS_LOCAL_MINIO_INITIALIZE") == "true", present); err != nil {
 		return fail(err)
 	}
+	record, err := os.ReadFile(filepath.Join(root, "custody.json"))
+	if err != nil {
+		return fail(err)
+	}
+	var custody minioCustody
+	if err = json.Unmarshal(record, &custody); err != nil {
+		return fail(err)
+	}
+	s.minioNewStore = custody.Phase == "pending"
+	s.minioCustodyRoot = root
 	return data, release, nil
 }
 
@@ -114,17 +142,26 @@ func ensureMinIOCustody(root, owner, bucket string, initialize, present bool) er
 		if genErr != nil {
 			return genErr
 		}
-		record, err = json.Marshal(minioCustody{Version: 1, Owner: owner, Bucket: bucket, ID: id})
+		record, err = json.Marshal(minioCustody{Version: 2, Owner: owner, Bucket: bucket, ID: id, Phase: "pending"})
 		if err != nil {
 			return err
 		}
 		if err = os.Mkdir(data, 0o700); err != nil {
 			return err
 		}
-		if err = os.WriteFile(markerPath, record, 0o600); err != nil {
+		if err = writeCustodyRecord(markerPath, record); err != nil {
 			return err
 		}
-		if err = os.WriteFile(recordPath, record, 0o600); err != nil {
+		if err = writeCustodyRecord(recordPath, record); err != nil {
+			return err
+		}
+		parent, openErr := os.Open(filepath.Dir(root))
+		if openErr != nil {
+			return openErr
+		}
+		syncErr := parent.Sync()
+		closeErr := parent.Close()
+		if err = errors.Join(syncErr, closeErr); err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -134,7 +171,7 @@ func ensureMinIOCustody(root, owner, bucket string, initialize, present bool) er
 	if err = json.Unmarshal(record, &custody); err != nil {
 		return fmt.Errorf("invalid custody record: %w", err)
 	}
-	if custody.Version != 1 || custody.Owner != owner || custody.Bucket != bucket || custody.ID == "" {
+	if custody.Version != 2 || custody.Owner != owner || custody.Bucket != bucket || custody.ID == "" || (custody.Phase != "pending" && custody.Phase != "committed") {
 		return fmt.Errorf("custody record owner, bucket, or version mismatch at %s", recordPath)
 	}
 	// Refuse symlink substitutions and missing data; Docker must not create an
@@ -156,8 +193,77 @@ func ensureMinIOCustody(root, owner, bucket string, initialize, present bool) er
 	if err = json.Unmarshal(marker, &actual); err != nil {
 		return err
 	}
+	// The marker is immutable; the independent record commits provisioning.
+	if actual.Phase != "pending" {
+		return fmt.Errorf("invalid data marker phase at %s", markerPath)
+	}
+	actual.Phase = custody.Phase
 	if actual != custody {
 		return fmt.Errorf("data marker disagrees with custody record at %s", markerPath)
+	}
+	return nil
+}
+
+// Rename and fsync make pending -> committed a single durable transition.
+// A failed update leaves evidence and never grants permission to reinitialize.
+func writeCustodyRecord(path string, record []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".custody-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err = file.Write(record); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(file.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
+}
+
+func (s *Runtime) commitMinIOProvisioning() error {
+	path := filepath.Join(s.minioCustodyRoot, "custody.json")
+	record, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var custody minioCustody
+	if err = json.Unmarshal(record, &custody); err != nil {
+		return err
+	}
+	custody.Phase = "committed"
+	record, err = json.Marshal(custody)
+	if err != nil {
+		return err
+	}
+	if err = writeCustodyRecord(path, record); err != nil {
+		return err
+	}
+	s.minioNewStore = false
+	return nil
+}
+
+// Host UID:GID is valid only without a daemon-wide user namespace translation.
+// Reject before creating locks or custody; never chown retained data to guess.
+func validateMinIODaemon(options []string) error {
+	for _, option := range options {
+		name := strings.SplitN(strings.TrimPrefix(option, "name="), ",", 2)[0]
+		if name == "rootless" || name == "userns" {
+			return fmt.Errorf("local MinIO custody does not support Docker %s UID mapping; use a local daemon without rootless/userns-remap, or configure an external storage backend; retained data was not changed", name)
+		}
 	}
 	return nil
 }

@@ -91,8 +91,9 @@ type Runtime struct {
 	minioHostPort uint16
 
 	// minioPassword is the MinIO root password generated for this run.
-	minioPassword string
-	minioNewStore bool
+	minioPassword    string
+	minioNewStore    bool
+	minioCustodyRoot string
 
 	// gcsCredentialsHostFile is the projected copy of the configured GCS
 	// service-account key that the gateway container mounts.
@@ -162,13 +163,16 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 
 	if s.runsLocalMinIO() {
-		if err = s.startLocalMinIO(ctx); err != nil {
+		release, startErr := s.startLocalMinIOWithRelease(ctx)
+		if startErr != nil {
+			err = startErr
 			if errors.Is(err, errMinIOCustody) {
 				return s.Runtime.InitError(err)
 			}
 			s.rollbackInit(ctx)
 			return s.Runtime.InitError(err)
 		}
+		defer release() // Serialize the whole MinIO/gateway initialization, including rollback.
 	}
 
 	s.gatewayToken, err = s.resolveGatewayToken()
@@ -217,26 +221,38 @@ var errMinIOCustody = errors.New("MinIO custody preflight failed")
 // startLocalMinIO validates durable custody before core can replace a container.
 // Only an explicit first bootstrap may create the bucket.
 func (s *Runtime) startLocalMinIO(ctx context.Context) error {
+	release, err := s.startLocalMinIOWithRelease(ctx)
+	if err == nil {
+		release()
+	}
+	return err
+}
+
+func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func(), result error) {
 	data, release, err := s.prepareMinIOData(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errMinIOCustody, err)
+		return nil, fmt.Errorf("%w: %w", errMinIOCustody, err)
 	}
-	defer release()
+	defer func() {
+		if result != nil {
+			release()
+		}
+	}()
 	port, err := freeHostPort()
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot allocate minio port")
+		return nil, s.Wool.Wrapf(err, "cannot allocate minio port")
 	}
 	s.minioHostPort = port
 
 	password, err := randomSecret()
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot generate minio credentials")
+		return nil, s.Wool.Wrapf(err, "cannot generate minio credentials")
 	}
 	s.minioPassword = password
 
 	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, minioImage, s.UniqueWithWorkspace()+"-minio")
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create minio environment")
+		return nil, s.Wool.Wrapf(err, "cannot create minio environment")
 	}
 	// Own the environment before starting it: a container that is created and
 	// then exits still has to be removed, and only Shutdown does that.
@@ -259,7 +275,7 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 	runner.WithMount(data, "/data")
 	runner.WithCommand("server", "/data")
 	if err = runner.Init(ctx); err != nil {
-		return s.Wool.Wrapf(err, "cannot start minio")
+		return nil, s.Wool.Wrapf(err, "cannot start minio")
 	}
 
 	// The agent reaches MinIO on the host; the gateway resolves the same store
@@ -269,7 +285,13 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 	s.conf.accessKey = localMinioUser
 	s.conf.secretKey = s.minioPassword
 
-	return s.ensureBucket(ctx)
+	if err = s.ensureBucket(ctx); err != nil {
+		return nil, err
+	}
+	if err = s.commitMinIOProvisioning(); err != nil {
+		return nil, err
+	}
+	return release, nil
 }
 
 // ensureBucket creates the configured bucket if it does not yet exist, retrying

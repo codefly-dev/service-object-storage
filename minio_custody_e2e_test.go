@@ -139,9 +139,9 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	requireContainerRemoved(t, firstID)
 	_, err = connect(firstToken).Stat(ctx, &storagev0.StatRequest{Key: keys[0]})
 	require.Equal(t, codes.Unauthenticated, status.Code(err), "the previous gateway token must be revoked")
+	require.NoError(t, previous.teardown(ctx), "stale teardown must preserve both successor containers")
 	verify()
-	owner := dockerrun.ContainerName(rt.UniqueWithWorkspace() + "-minio")
-	root := minioCustodyDir(owner)
+	root := minioCustodyDir(rt.minioOwner())
 	marker := filepath.Join(root, "data", ".codefly-custody.json")
 	originalMarker, err := os.ReadFile(marker)
 	require.NoError(t, err)
@@ -238,7 +238,7 @@ func requireMinIOFilesystemOwner(t *testing.T, rt *Runtime, containerID string) 
 	t.Helper()
 	owner := fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid())
 	require.Equal(t, owner, strings.TrimSpace(dockerInspect(t, containerID, `{{.Config.User}}`)), "MinIO must write as the owner of its private host data")
-	data := filepath.Join(minioCustodyDir(dockerrun.ContainerName(rt.UniqueWithWorkspace()+"-minio")), "data")
+	data := filepath.Join(minioCustodyDir(rt.minioOwner()), "data")
 	t.Cleanup(func() {
 		metadataFiles := 0
 		err := filepath.WalkDir(data, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -272,4 +272,65 @@ func requireMinIOFilesystemOwner(t *testing.T, rt *Runtime, containerID string) 
 		require.NoError(t, err, "retained MinIO data must remain manageable by its host owner after teardown")
 		require.Positive(t, metadataFiles, "must inspect real MinIO metadata, not an empty fixture")
 	})
+}
+
+func TestMinIOBootstrapResumesAfterInterruption(t *testing.T) {
+	ctx := context.Background()
+	rt, _, _ := loadedRuntime(t, ctx)
+	defer func() { require.NoError(t, rt.teardown(context.Background())) }()
+	require.NoError(t, rt.LoadConfiguration(ctx, nil))
+	// Exact persisted state when freeHostPort, randomSecret, image fetch or
+	// ContainerStart fails after successful custody preflight.
+	_, release, err := rt.prepareMinIOData(ctx)
+	require.NoError(t, err)
+	require.True(t, rt.minioNewStore)
+	release()
+	require.Nil(t, rt.minioEnv)
+	err = rt.startLocalMinIO(ctx)
+	require.NoError(t, err)
+	require.False(t, rt.minioNewStore)
+	require.NoError(t, rt.ensureBucket(ctx))
+}
+
+func TestMinIORejectsAmbiguousLegacyCustody(t *testing.T) {
+	ctx := context.Background()
+	rt, _, _ := loadedRuntime(t, ctx)
+	require.NoError(t, rt.LoadConfiguration(ctx, nil))
+	legacy := minioCustodyDir(dockerrun.ContainerName(rt.UniqueWithWorkspace() + "-minio"))
+	require.NoError(t, os.MkdirAll(legacy, 0o700))
+	sentinel := filepath.Join(legacy, "retained-object")
+	require.NoError(t, os.WriteFile(sentinel, []byte("preserve"), 0o600))
+	_, _, err := rt.prepareMinIOData(ctx)
+	require.ErrorContains(t, err, "ambiguous legacy custody")
+	_, err = os.Stat(minioCustodyDir(rt.minioOwner()))
+	require.True(t, os.IsNotExist(err), "bootstrap must not substitute a new empty store")
+	body, err := os.ReadFile(sentinel)
+	require.NoError(t, err)
+	require.Equal(t, "preserve", string(body))
+}
+
+func TestMinIORejectsCollidingContainerIdentity(t *testing.T) {
+	ctx := context.Background()
+	first, _, _ := loadedRuntime(t, ctx)
+	// Preserve the disposable workspace/scope while constructing two valid
+	// identities whose Docker display names are identical.
+	first.Identity.Module, first.Identity.Name = "documents-archive", "object-storage"
+	require.NoError(t, first.LoadConfiguration(ctx, nil))
+	defer func() { require.NoError(t, first.teardown(context.Background())) }()
+	require.NoError(t, first.startLocalMinIO(ctx))
+	firstID, err := first.minioEnv.ContainerID()
+	require.NoError(t, err)
+	second := NewRuntime()
+	identity := *first.Identity
+	identity.Module, identity.Name = "documents", "archive-object-storage"
+	_, err = second.Load(ctx, &runtimev0.LoadRequest{Identity: shared.Must(identity.Proto()), Environment: first.Environment, DisableCatch: true})
+	require.NoError(t, err)
+	require.NoError(t, second.LoadConfiguration(ctx, nil))
+	require.Equal(t, dockerrun.ContainerName(first.UniqueWithWorkspace()), dockerrun.ContainerName(second.UniqueWithWorkspace()))
+	require.ErrorContains(t, second.startLocalMinIO(ctx), "different /data mount")
+	require.NoError(t, first.ensureBucket(ctx), "incumbent must still be usable")
+	require.NoError(t, exec.Command("docker", "inspect", firstID).Run())
+	require.NoError(t, first.teardown(ctx))
+	t.Setenv("SOS_LOCAL_MINIO_INITIALIZE", "false")
+	require.ErrorContains(t, second.startLocalMinIO(ctx), "missing custody record")
 }

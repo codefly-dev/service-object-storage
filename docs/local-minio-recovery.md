@@ -12,24 +12,28 @@ weaken session revocation; it would not establish data custody.
 The agent now declares a bind mount at `/data`, backed by:
 
 ```
-<CODEFLY_HOME>/object-storage/<sha256(container-name)>/data
-<CODEFLY_HOME>/object-storage/<sha256(container-name)>/custody.json
+<CODEFLY_HOME>/object-storage/<sha256(structured-identity)>/data
+<CODEFLY_HOME>/object-storage/<sha256(structured-identity)>/custody.json
 ```
 
-`CODEFLY_HOME` defaults to `~/.codefly`. The container name is Core's name for
-`UniqueWithWorkspace() + "-minio"`, including the workspace, module, service and
-naming scope. This is durable local data, **not a runtime cache**. Preserve the
+`CODEFLY_HOME` defaults to `~/.codefly`. The structured identity is the JSON array `[workspace,module,service,namingScope]`;
+Docker display names are not ownership evidence. Version 1 records keyed by
+container name are ambiguous and require verified recovery in a separate scope. This is durable local data, **not a runtime cache**. Preserve the
 whole custody directory in backups. MinIO runs with the agent process's effective
 UID:GID so files remain manageable by that host user on Linux. The Runtime does
 not recursively chown existing data or broaden its permissions. Stop, Destroy,
 failed startup and normal configuration replacement never delete this directory. Keep the same
 `CODEFLY_HOME` and naming scope across runs. A changed scope is a different store.
 The Docker daemon must share the agent's host filesystem (local Docker or Docker
-Desktop). This is not a remote-daemon storage provisioner.
+Desktop). Rootless and userns-remap daemons are rejected before custody mutation
+because host and container numeric UIDs do not identify the same filesystem user.
+Use a compatible local daemon or an external backend; do not chown retained data.
 
 The record binds the owner, bucket and format version to a random custody ID;
-`data/.codefly-custody.json` must match. A process lock serializes provisioning
-and MinIO initialization. Before Core can recreate a container, the agent checks
+`data/.codefly-custody.json` must match its immutable fields. The record starts
+`pending` and is atomically committed and synced after bucket provisioning. A process lock serializes provisioning
+and the complete MinIO/gateway initialization. Core teardown uses the acquired
+container ID, so an old Runtime cannot remove its successor. Before Core can recreate a container, the agent checks
 its actual `/data` mount against the declared location. Missing records, missing
 or mismatched markers, symlinks, changed buckets and legacy volume mounts fail
 visibly. An established store whose bucket is absent also fails rather than
@@ -42,8 +46,9 @@ Only after confirming that this is a new service/scope with no data to recover,
 set `SOS_LOCAL_MINIO_INITIALIZE=true` **on the agent process** for its first run.
 Unset it afterward. This is a bootstrap switch, not a gateway configuration or
 an adoption switch. It cannot override an existing directory, legacy container,
-or custody mismatch. A failed partial bootstrap leaves evidence and fails
-closed on retry; inspect and preserve that directory before repairing it.
+or custody mismatch. A verified pending bootstrap resumes after pre-container/startup failure, even
+with the switch unset. Incomplete or corrupt custody evidence still fails closed;
+preserve it for recovery. A committed store never recreates a missing bucket.
 Existing local services need explicit recovery before adopting this release.
 
 ## Recover a retained Docker volume
@@ -111,3 +116,7 @@ No storage credential is required for the offline copy. The normal Runtime
 continues generating new MinIO credentials and gateway tokens; consumers must
 use the secret-marked token supplied by the current run. Never use anonymous
 gateway mode, print container environments, or paste keys into recovery logs.
+
+Rolling code back to the original unmounted Runtime is not storage recovery:
+that code can select fresh anonymous storage. Preserve custody and verify an
+isolated candidate before any separately approved rollout or rollback.
