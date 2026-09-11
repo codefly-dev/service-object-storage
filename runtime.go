@@ -92,6 +92,7 @@ type Runtime struct {
 
 	// minioPassword is the MinIO root password generated for this run.
 	minioPassword string
+	minioNewStore bool
 
 	// gcsCredentialsHostFile is the projected copy of the configured GCS
 	// service-account key that the gateway container mounts.
@@ -162,6 +163,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	if s.runsLocalMinIO() {
 		if err = s.startLocalMinIO(ctx); err != nil {
+			if errors.Is(err, errMinIOCustody) {
+				return s.Runtime.InitError(err)
+			}
 			s.rollbackInit(ctx)
 			return s.Runtime.InitError(err)
 		}
@@ -208,9 +212,16 @@ func (s *Runtime) resolveGatewayToken() (string, error) {
 	return randomSecret()
 }
 
-// startLocalMinIO brings up a MinIO container, maps it to a free host port, and
-// creates the bucket the gateway will address.
+var errMinIOCustody = errors.New("MinIO custody preflight failed")
+
+// startLocalMinIO validates durable custody before core can replace a container.
+// Only an explicit first bootstrap may create the bucket.
 func (s *Runtime) startLocalMinIO(ctx context.Context) error {
+	data, release, err := s.prepareMinIOData(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errMinIOCustody, err)
+	}
+	defer release()
 	port, err := freeHostPort()
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot allocate minio port")
@@ -240,6 +251,7 @@ func (s *Runtime) startLocalMinIO(ctx context.Context) error {
 		resources.Env("MINIO_ROOT_USER", localMinioUser),
 		resources.Env("MINIO_ROOT_PASSWORD", s.minioPassword),
 	)
+	runner.WithMount(data, "/data")
 	runner.WithCommand("server", "/data")
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start minio")
@@ -278,6 +290,9 @@ func (s *Runtime) ensureBucket(ctx context.Context) error {
 			case exists:
 				return nil
 			default:
+				if !s.minioNewStore {
+					return s.Wool.NewError("MinIO custody: previously provisioned bucket %q is missing; refusing to create an empty replacement", s.conf.bucket)
+				}
 				if mkErr := cl.MakeBucket(ctx, s.conf.bucket, miniogo.MakeBucketOptions{}); mkErr == nil {
 					return nil
 				} else {
