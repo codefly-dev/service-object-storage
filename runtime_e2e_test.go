@@ -81,9 +81,16 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, init)
+	// Init reports a lifecycle failure in its status, not as a returned error —
+	// the agent contract hands the CLI a diagnostic rather than a transport
+	// fault. Asserting only NoError walks on with a nil gatewayEnv and dies in a
+	// nil dereference below that says nothing about the actual cause (an image
+	// that cannot be pulled, say); this surfaces the message instead.
+	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 
-	_, err = rt.Start(ctx, &runtimev0.StartRequest{})
+	start, err := rt.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, start.GetStatus().GetState(), start.GetStatus().GetMessage())
 
 	// A consumer running in its own container reaches these through
 	// host.docker.internal, which resolves to the bridge gateway on Linux — a
@@ -376,7 +383,7 @@ func TestGCSCredentialProjection(t *testing.T) {
 	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
 	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
 
-	_, err = rt.Init(ctx, &runtimev0.InitRequest{
+	init, err := rt.Init(ctx, &runtimev0.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
 		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
@@ -388,6 +395,7 @@ func TestGCSCredentialProjection(t *testing.T) {
 		}}},
 	})
 	require.NoError(t, err)
+	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 	require.Nil(t, rt.minioEnv, "a gcs run must not stand up the local MinIO fixture")
 
 	projected := rt.gcsCredentialsHostFile
