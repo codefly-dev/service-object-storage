@@ -37,15 +37,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # quay.io, not Docker Hub: the Docker Hub `minio/minio` repository no longer
+      # serves anonymous pulls. Same release tag the agent runs (main.go), so this
+      # job and the e2e job exercise one MinIO version.
       - name: start minio
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:9000/minio/health/live && break
             sleep 1
           done
+          curl -sf http://127.0.0.1:9000/minio/health/live
       - name: integration test
         env:
           MINIO_ENDPOINT: 127.0.0.1:9000
