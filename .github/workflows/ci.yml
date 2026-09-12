@@ -14,7 +14,7 @@ jobs:
     # Pinned to an immutable core commit SHA, not @main: a mutable ref lets an
     # upstream change alter this repo's gate — which runs with this repo's token
     # — with no commit here. Bump deliberately alongside the go.mod core version.
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@50cfbcfbec296afcb8110c64b9e0878d0ba302b7
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@80611aedc191d6fd5ec2f7b78709a1fad4db7de2
 
   # The shared go-service-ci runs `go test` without the race detector; this
   # repo's cache, events hub, and Watch streams are concurrent, so keep race
@@ -22,8 +22,8 @@ jobs:
   race:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -32,8 +32,8 @@ jobs:
   integration-minio:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -61,8 +61,8 @@ jobs:
   agent-runtime-e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
