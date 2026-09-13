@@ -223,6 +223,9 @@ func TestMinIOMissingBucketFailsClosed(t *testing.T) {
 	t.Setenv("SOS_LOCAL_MINIO_INITIALIZE", "false")
 	err = rt.startLocalMinIO(ctx)
 	require.ErrorContains(t, err, "refusing to create an empty replacement")
+	// Init keys off this sentinel to skip rollbackInit; without it the refusal
+	// tears down the very containers it exists to protect.
+	require.ErrorIs(t, err, errMinIOCustody)
 	cl, err = miniogo.New(fmt.Sprintf("localhost:%d", rt.minioHostPort), &miniogo.Options{Creds: miniocreds.NewStaticV4(localMinioUser, rt.minioPassword, "")})
 	require.NoError(t, err)
 	exists, err := cl.BucketExists(ctx, rt.conf.bucket)

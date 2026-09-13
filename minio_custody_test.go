@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/gofrs/flock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,6 +78,36 @@ func TestMinIOCustodyRequiresExplicitNewStore(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "partial")
 	require.NoError(t, os.Mkdir(root, 0o700))
 	require.Error(t, ensureMinIOCustody(root, "owner", "documents", true, false))
+}
+
+// A renamed bucket is a configuration edit. Reporting it as a generic custody
+// mismatch sent operators to hand-edit the record the docs forbid touching.
+func TestMinIOCustodyNamesBucketChange(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "store")
+	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", true, false))
+	err := ensureMinIOCustody(root, "owner", "documents-v2", true, false)
+	require.ErrorContains(t, err, "configured bucket changed")
+	require.ErrorContains(t, err, "documents-v2")
+	require.NotContains(t, err.Error(), "owner, version or phase mismatch")
+}
+
+// A concurrent run of the same service is provisioning the same store. The wait
+// is bounded, so a stuck peer still surfaces instead of hanging the agent.
+func TestMinIOCustodyLockWaits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.lock")
+	held := flock.New(path)
+	locked, err := held.TryLock()
+	require.NoError(t, err)
+	require.True(t, locked)
+	defer func() { _ = held.Unlock() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	got, err := flock.New(path).TryLockContext(ctx, minioCustodyLockRetry)
+	require.False(t, got, "a held lock must not be acquired")
+	require.Error(t, err)
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond, "it must wait, not fail instantly")
 }
 
 func TestMinIORejectsUnownedMount(t *testing.T) {

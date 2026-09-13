@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
@@ -28,6 +29,11 @@ type minioCustody struct {
 	ID      string `json:"id"`
 	Phase   string `json:"phase,omitempty"`
 }
+
+const (
+	minioCustodyLockWait  = 30 * time.Second
+	minioCustodyLockRetry = 200 * time.Millisecond
+)
 
 func minioCustodyDir(owner string) string {
 	digest := sha256.Sum256([]byte(owner))
@@ -52,6 +58,11 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 		return "", nil, err
 	}
 	defer func() { _ = cli.Close() }()
+	// The socket scheme is a heuristic, not a proof: a unix socket can front a
+	// daemon that shares no filesystem with this host. It rejects the reachable
+	// misconfigurations (tcp://, ssh://), and a daemon that slips through binds
+	// a daemon-side directory that persists across containers, so it surfaces at
+	// the missing-bucket guard rather than as lost data.
 	if host := cli.DaemonHost(); !strings.HasPrefix(host, "unix://") && !strings.HasPrefix(host, "npipe://") {
 		return "", nil, fmt.Errorf("local MinIO custody requires a Docker daemon sharing the agent host filesystem")
 	}
@@ -65,14 +76,32 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 	if err = os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return "", nil, err
 	}
-	// Serialize even identities whose legacy Docker display names collide.
-	lock := flock.New(minioCustodyDir(displayName) + ".lock")
-	locked, err := lock.TryLock()
+	// Docker reports mount sources resolved, so the location custody compares
+	// against must be resolved too: a symlink anywhere above the custody
+	// directory — a Codefly home relocated onto another disk, a symlinked /home,
+	// macOS temp dirs under /var — otherwise makes every run after the first
+	// refuse its own bind mount at validateMinIOMount. Only the parent is
+	// resolved; root itself stays unresolved so the symlink check in
+	// ensureMinIOCustody still catches a substituted store.
+	parent, err := filepath.EvalSymlinks(filepath.Dir(root))
 	if err != nil {
 		return "", nil, err
 	}
+	root = filepath.Join(parent, filepath.Base(root))
+	// Serialize even identities whose legacy Docker display names collide.
+	lock := flock.New(minioCustodyDir(displayName) + ".lock")
+	// A concurrent run of the same service is provisioning the same store, not
+	// competing for it: wait for it rather than turning an ordinary race into a
+	// startup failure. The wait is bounded, so a lock still held after it means
+	// a run that is not making progress, which the operator has to see.
+	lockCtx, cancel := context.WithTimeout(ctx, minioCustodyLockWait)
+	defer cancel()
+	locked, err := lock.TryLockContext(lockCtx, minioCustodyLockRetry)
+	if err != nil && lockCtx.Err() == nil {
+		return "", nil, err
+	}
 	if !locked {
-		return "", nil, fmt.Errorf("MinIO custody for %s is in use", owner)
+		return "", nil, fmt.Errorf("MinIO custody for %s is still held by another run after %s", owner, minioCustodyLockWait)
 	}
 	release := func() { _ = lock.Unlock() }
 	fail := func(err error) (string, func(), error) {
@@ -171,8 +200,14 @@ func ensureMinIOCustody(root, owner, bucket string, initialize, present bool) er
 	if err = json.Unmarshal(record, &custody); err != nil {
 		return fmt.Errorf("invalid custody record: %w", err)
 	}
-	if custody.Version != 2 || custody.Owner != owner || custody.Bucket != bucket || custody.ID == "" || (custody.Phase != "pending" && custody.Phase != "committed") {
-		return fmt.Errorf("custody record owner, bucket, or version mismatch at %s", recordPath)
+	// A renamed bucket is a configuration edit, not custody corruption, and
+	// saying so is the difference between an operator fixing their config and an
+	// operator hand-editing the custody record the docs tell them never to touch.
+	if custody.Bucket != bucket {
+		return fmt.Errorf("configured bucket changed from %q to %q: the store at %s holds %q and this agent has no supported rename; restore the configured bucket name or provision a new store", custody.Bucket, bucket, root, custody.Bucket)
+	}
+	if custody.Version != 2 || custody.Owner != owner || custody.ID == "" || (custody.Phase != "pending" && custody.Phase != "committed") {
+		return fmt.Errorf("custody record owner, version or phase mismatch at %s", recordPath)
 	}
 	// Refuse symlink substitutions and missing data; Docker must not create an
 	// empty directory as a side effect of mounting a lost location.

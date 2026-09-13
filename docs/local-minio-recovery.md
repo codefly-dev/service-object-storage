@@ -35,9 +35,14 @@ The record binds the owner, bucket and format version to a random custody ID;
 and the complete MinIO/gateway initialization. Core teardown uses the acquired
 container ID, so an old Runtime cannot remove its successor. Before Core can recreate a container, the agent checks
 its actual `/data` mount against the declared location. Missing records, missing
-or mismatched markers, symlinks, changed buckets and legacy volume mounts fail
+or mismatched markers, symlinks and legacy volume mounts fail
 visibly. An established store whose bucket is absent also fails rather than
-creating a new empty bucket. The record is not an object inventory or a backup;
+creating a new empty bucket. Changing the configured bucket name for an existing
+store is reported as the configuration edit it is and starts nothing: restore the
+configured name, or provision a new store under a new naming scope. Never
+hand-edit `custody.json` to make a rename pass. A concurrent run of the same
+service waits for the provisioning lock rather than failing immediately.
+The record is not an object inventory or a backup;
 external deletion of individual objects remains an operator recovery concern.
 
 ## Provisioning a genuinely new store

@@ -318,7 +318,7 @@ func (s *Runtime) ensureBucket(ctx context.Context) error {
 				return nil
 			default:
 				if !s.minioNewStore {
-					return s.Wool.NewError("MinIO custody: previously provisioned bucket %q is missing; refusing to create an empty replacement", s.conf.bucket)
+					return fmt.Errorf("%w: previously provisioned bucket %q is missing; refusing to create an empty replacement", errMinIOCustody, s.conf.bucket)
 				}
 				if mkErr := cl.MakeBucket(ctx, s.conf.bucket, miniogo.MakeBucketOptions{}); mkErr == nil {
 					return nil

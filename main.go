@@ -50,6 +50,12 @@ var gatewayImage = &resources.DockerImage{
 
 // minioImage backs the gateway for local and test runs. Deployed environments
 // name a cloud backend instead and never start MinIO.
+//
+// The tag is pinned and custody depends on it: the agent keeps its ownership
+// marker at .codefly-custody.json in the drive root MinIO serves, and this
+// release leaves entries it does not recognize alone. A bump has to re-verify
+// that — a MinIO that prunes or rejects unknown entries at the drive root would
+// turn a healthy store into a missing-marker refusal.
 var minioImage = &resources.DockerImage{
 	Name: "minio/minio",
 	Tag:  "RELEASE.2025-04-22T22-12-26Z",
