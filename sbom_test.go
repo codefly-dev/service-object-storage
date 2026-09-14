@@ -30,6 +30,9 @@ func newSBOMBuilder(t *testing.T) *Builder {
 }
 
 func TestImageSubjectsCoverEveryPublishedPlatform(t *testing.T) {
+	// The published image is what this asserts, so the override an e2e run
+	// exports for the whole job must not decide the subjects instead.
+	t.Setenv(gatewayImageOverrideEnv, "")
 	builder := newSBOMBuilder(t)
 
 	subjects, source := builder.imageSubjects()
@@ -61,6 +64,9 @@ func TestImageSubjectsCoverEveryPublishedPlatform(t *testing.T) {
 }
 
 func TestImageEvidenceSatisfiesTheCoverageContract(t *testing.T) {
+	// Several platforms are what make the omitted-platform case meaningful, so
+	// pin to the published image rather than whatever the environment names.
+	t.Setenv(gatewayImageOverrideEnv, "")
 	builder := newSBOMBuilder(t)
 	subjects, _ := builder.imageSubjects()
 
@@ -121,6 +127,7 @@ func TestImageScopeReportsFailureRatherThanCoverage(t *testing.T) {
 }
 
 func TestSourceScopeKeepsTheExistingInventory(t *testing.T) {
+	t.Setenv(gatewayImageOverrideEnv, "")
 	builder := newSBOMBuilder(t)
 	subjects, _ := builder.imageSubjects()
 
