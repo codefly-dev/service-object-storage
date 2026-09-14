@@ -56,9 +56,14 @@ var gatewayImage = &resources.DockerImage{
 // release leaves entries it does not recognize alone. A bump has to re-verify
 // that — a MinIO that prunes or rejects unknown entries at the drive root would
 // turn a healthy store into a missing-marker refusal.
+// Pulled from quay.io, MinIO's own registry, not Docker Hub: the Docker Hub
+// `minio/minio` repository stopped serving anonymous pulls ("pull access denied
+// ... repository does not exist"), which broke every run that starts MinIO. The
+// quay.io repository carries the identical RELEASE tags.
 var minioImage = &resources.DockerImage{
-	Name: "minio/minio",
-	Tag:  "RELEASE.2025-04-22T22-12-26Z",
+	Repository: "quay.io/minio",
+	Name:       "minio",
+	Tag:        "RELEASE.2025-04-22T22-12-26Z",
 }
 
 // Settings are the service.codefly.yaml knobs. Local runs need none — the
