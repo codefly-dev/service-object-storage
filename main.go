@@ -51,6 +51,11 @@ var gatewayImage = &resources.DockerImage{
 // minioImage backs the gateway for local and test runs. Deployed environments
 // name a cloud backend instead and never start MinIO.
 //
+// The tag is pinned and custody depends on it: the agent keeps its ownership
+// marker at .codefly-custody.json in the drive root MinIO serves, and this
+// release leaves entries it does not recognize alone. A bump has to re-verify
+// that — a MinIO that prunes or rejects unknown entries at the drive root would
+// turn a healthy store into a missing-marker refusal.
 // Pulled from quay.io, MinIO's own registry, not Docker Hub: the Docker Hub
 // `minio/minio` repository stopped serving anonymous pulls ("pull access denied
 // ... repository does not exist"), which broke every run that starts MinIO. The

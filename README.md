@@ -147,6 +147,15 @@ Cloud backends are qualified per provider: MinIO permissions do not imply S3,
 GCS, or Azure parity, so the grant each strategy needs must be verified against
 the real backend before a deployment relies on it.
 
+## Durable local MinIO
+
+Local MinIO uses an explicitly owned data directory that survives container
+replacement, with custody checks before recreation. A new service requires
+`SOS_LOCAL_MINIO_INITIALIZE=true` on the agent for its first run; unset it
+afterward. Existing anonymous-volume stores fail closed and require recovery.
+See [local custody and retained-volume recovery](docs/local-minio-recovery.md)
+for ownership, paths, lifecycle behavior and recovery instructions.
+
 ## Authentication
 
 The gateway holds the backend credentials and exposes bucket-wide read, write,
@@ -207,8 +216,8 @@ gateway runs as a first-class codefly service — the way `codefly.dev/postgres`
 `codefly.dev/redis` do. A consumer declares it as a `service-dependency` and dials
 the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
 
-- **Local / test**: the agent's Runtime starts a **MinIO** container, creates the
-  bucket, and runs the gateway container (`SOS_BACKEND=minio`) pointed at it —
+- **Local / test**: the agent's Runtime starts a **MinIO** container with persistent
+  custody (explicit bootstrap creates the initial bucket), and runs the gateway container (`SOS_BACKEND=minio`) pointed at it —
   "test on MinIO, ship on S3", decided by config. Both containers publish on all
   interfaces so a consumer container reaches them over the Docker host bridge on
   Linux; each is protected by a per-run credential rather than by the binding —

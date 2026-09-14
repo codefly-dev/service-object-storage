@@ -1,3 +1,8 @@
 # object-storage
 
 The object-storage gateway: a codefly/storage/v0 gRPC service backed by MinIO locally and a cloud object store when deployed.
+
+Local data survives container replacement in the agent's Codefly home. For a
+new store only, set `SOS_LOCAL_MINIO_INITIALIZE=true` on the agent for its first
+run, then unset it. Existing anonymous-volume stores require explicit recovery;
+see https://github.com/codefly-dev/service-object-storage/blob/main/docs/local-minio-recovery.md.

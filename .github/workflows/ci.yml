@@ -14,7 +14,7 @@ jobs:
     # Pinned to an immutable core commit SHA, not @main: a mutable ref lets an
     # upstream change alter this repo's gate — which runs with this repo's token
     # — with no commit here. Bump deliberately alongside the go.mod core version.
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@50cfbcfbec296afcb8110c64b9e0878d0ba302b7
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@29bc3dbdda86cc5b3432f17c249bc49301a2edad
 
   # The shared go-service-ci runs `go test` without the race detector; this
   # repo's cache, events hub, and Watch streams are concurrent, so keep race
@@ -44,7 +44,7 @@ jobs:
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:9000/minio/health/live && break
             sleep 1
@@ -68,6 +68,12 @@ jobs:
           cache: true
       - name: build gateway image
         run: docker build -t service-object-storage:e2e .
+      # Docker Hub denies this historical image. The publisher's Quay mirror
+      # has the identical multi-platform digest already used by the Runtime.
+      - name: fetch the exact runtime MinIO image
+        run: |
+          docker pull quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+          docker tag quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
       - name: end-to-end put/get through the agent runtime
         env:
           SOS_GATEWAY_IMAGE: service-object-storage:e2e
