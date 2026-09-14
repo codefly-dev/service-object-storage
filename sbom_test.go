@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -251,6 +252,113 @@ func releaseWorkflow(t *testing.T) string {
 		t.Fatalf("read release workflow: %v", err)
 	}
 	return string(data)
+}
+
+// releaseStep is one step of the release workflow, kept in file order so a test
+// can assert what happens before what.
+type releaseStep struct {
+	Name string `yaml:"name"`
+	Uses string `yaml:"uses"`
+	Run  string `yaml:"run"`
+	With struct {
+		Platforms string `yaml:"platforms"`
+		Tags      string `yaml:"tags"`
+		Outputs   string `yaml:"outputs"`
+	} `yaml:"with"`
+}
+
+func releaseSteps(t *testing.T) []releaseStep {
+	t.Helper()
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []releaseStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(releaseWorkflow(t)), &workflow); err != nil {
+		t.Fatalf("parse release workflow: %v", err)
+	}
+	var steps []releaseStep
+	for _, job := range workflow.Jobs {
+		steps = append(steps, job.Steps...)
+	}
+	if len(steps) == 0 {
+		t.Fatal("the release workflow has no steps")
+	}
+	return steps
+}
+
+// The release used to push the tags consumers resolve and inventory the image
+// afterwards. A failure anywhere in the evidence step then turned the run red
+// with a pullable, uninventoried image already published — and a red run reads
+// as "nothing shipped", so nobody goes looking for it. The build now pushes by
+// digest, and the tags are created only once evidence exists.
+func TestReleasePublishesTagsOnlyAfterEvidence(t *testing.T) {
+	steps := releaseSteps(t)
+
+	build, evidence, publish := -1, -1, -1
+	for i, step := range steps {
+		if strings.Contains(step.Uses, "docker/build-push-action") {
+			build = i
+		}
+		if strings.Contains(step.Run, "cmd/image-sbom") {
+			evidence = i
+		}
+		if strings.Contains(step.Run, "imagetools create") {
+			publish = i
+		}
+	}
+
+	if build < 0 {
+		t.Fatal("the release workflow does not build the gateway image")
+	}
+	if evidence < 0 {
+		t.Fatal("the release workflow does not generate image evidence")
+	}
+	if publish < 0 {
+		t.Fatal("the release workflow never creates the tags consumers resolve")
+	}
+	if publish < evidence {
+		t.Errorf("release tags are created at step %d, before evidence at step %d: a failed scan would leave a pullable image with no evidence",
+			publish, evidence)
+	}
+	if tags := strings.TrimSpace(steps[build].With.Tags); tags != "" {
+		t.Errorf("the build step publishes tags %q; it must push by digest so no tag resolves until evidence succeeds", tags)
+	}
+	if !strings.Contains(steps[build].With.Outputs, "push-by-digest=true") {
+		t.Error("the build step does not push by digest, so its image is resolvable by tag before evidence exists")
+	}
+}
+
+// The published image tag is derived from the git tag while the agent resolves
+// its gateway from the embedded agent.codefly.yaml. Nothing reconciles them at
+// run time, and a tag one release ahead of the file makes the agent pull the
+// previous release's image — which exists, so the mismatch is silent. This runs
+// the workflow's own guard against the real file rather than trusting that it
+// is present.
+func TestReleaseGuardRejectsTagThatDisagreesWithAgentVersion(t *testing.T) {
+	var guard releaseStep
+	for _, step := range releaseSteps(t) {
+		if strings.Contains(step.Run, "agent.codefly.yaml") {
+			guard = step
+			break
+		}
+	}
+	if guard.Run == "" {
+		t.Fatal("no release step reconciles the pushed tag with agent.codefly.yaml")
+	}
+
+	run := func(version string) error {
+		command := exec.Command("bash", "-c", guard.Run)
+		command.Env = append(os.Environ(), "VERSION="+version)
+		return command.Run()
+	}
+
+	if err := run(agent.Version); err != nil {
+		t.Errorf("guard rejected %s, the version this repo actually carries: %v", agent.Version, err)
+	}
+	if err := run(agent.Version + "9"); err == nil {
+		t.Error("guard accepted a tag that disagrees with agent.codefly.yaml; such a tag ships an agent that silently pulls the previous release's image")
+	}
 }
 
 // imageResponse wraps evidence in the complete image-scope response an agent

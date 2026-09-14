@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -691,10 +692,39 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 	}
 }
 
+// This covers the wiring only. Whether the pushed git tag agrees with the
+// embedded version is a release-time question, guarded in release-image.yml and
+// asserted by TestReleaseGuardRejectsTagThatDisagreesWithAgentVersion.
 func TestGatewayImageTracksAgentVersion(t *testing.T) {
 	if !strings.HasSuffix(gatewayImage.FullName(), agent.Version) {
 		t.Fatalf("gateway image %q should be tagged with agent version %q", gatewayImage.FullName(), agent.Version)
 	}
+}
+
+// core's DownloadURL builds the release asset name from runtime.GOARCH, so a
+// host architecture the release does not build is a 404 at install time rather
+// than a fallback to another build. The gateway ships linux/arm64, so an arm64
+// Linux host is a supported place to run this agent.
+func TestReleaseBuildsLinuxArm64(t *testing.T) {
+	data, err := os.ReadFile(".goreleaser.yaml")
+	if err != nil {
+		t.Fatalf("read goreleaser config: %v", err)
+	}
+	var config struct {
+		Builds []struct {
+			Goos   []string `yaml:"goos"`
+			Goarch []string `yaml:"goarch"`
+		} `yaml:"builds"`
+	}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		t.Fatalf("parse goreleaser config: %v", err)
+	}
+	for _, build := range config.Builds {
+		if slices.Contains(build.Goos, "linux") && slices.Contains(build.Goarch, "arm64") {
+			return
+		}
+	}
+	t.Error("the release builds no linux/arm64 agent binary, so an arm64 Linux host cannot install this agent")
 }
 
 // newProjectionRuntime returns a Runtime configured for a local gcs run whose
