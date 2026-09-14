@@ -78,3 +78,32 @@ jobs:
         env:
           SOS_GATEWAY_IMAGE: service-object-storage:e2e
         run: go test -tags e2e -count=1 -timeout 300s .
+
+  # Inventories a real gateway image through the agent's own image-SBOM path and
+  # checks it against the shared coverage contract, so a change that would ship
+  # an uninventoried image fails here rather than at release.
+  image-sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: build gateway image
+        run: docker build -t service-object-storage:e2e .
+      # The daemon holds this image and no registry serves it, so the scan needs
+      # syft on PATH: the managed containerized scanner has no Docker access.
+      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - name: inventory the gateway image through the agent
+        env:
+          SOS_GATEWAY_IMAGE: service-object-storage:e2e
+          SOS_SBOM_OUTPUT: sbom/gateway.cdx.json
+        run: go test -tags e2e -count=1 -timeout 300s -run TestImageSBOM .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gateway-image-sbom
+          path: sbom/
+          # A skipped scan writes nothing; failing here keeps a green job from
+          # standing in for evidence that was never produced.
+          if-no-files-found: error

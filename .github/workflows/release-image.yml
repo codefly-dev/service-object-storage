@@ -33,3 +33,31 @@ jobs:
           tags: |
             ghcr.io/codefly-dev/service-object-storage:${{ steps.version.outputs.version }}
             ghcr.io/codefly-dev/service-object-storage:latest
+      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      # Evidence for every platform the push just shipped, each bound to the
+      # child manifest digest rather than the tag, so an inventory cannot drift
+      # to a different image. A platform that resolves to no manifest fails the
+      # release: publishing an image whose contents were never inventoried is
+      # what the coverage contract exists to prevent.
+      - name: image SBOM evidence
+        env:
+          IMAGE: ghcr.io/codefly-dev/service-object-storage
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' > sbom/manifest.json
+          for platform in linux/amd64 linux/arm64; do
+            digest=$(jq -r --arg p "$platform" \
+              '.manifests[] | select((.platform.os + "/" + .platform.architecture) == $p) | .digest' \
+              sbom/manifest.json)
+            if [ -z "$digest" ]; then
+              echo "no manifest for $platform in ${IMAGE}:${VERSION}" >&2
+              exit 1
+            fi
+            document="sbom/object-storage-${VERSION}-$(echo "$platform" | tr / -).cdx.json"
+            syft "registry:${IMAGE}@${digest}" -o cyclonedx-json@1.5 > "$document"
+            echo "${platform} ${IMAGE}@${digest} ${document}" >> sbom/images.txt
+            sha256sum "$document" >> sbom/checksums.txt
+          done
+          cat sbom/images.txt

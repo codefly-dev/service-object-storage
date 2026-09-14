@@ -453,10 +453,7 @@ func (s *Runtime) rollbackInit(ctx context.Context) {
 // startGateway runs the gateway container, mapping the assigned host port onto
 // the gateway's listen port and pointing it at the resolved backend.
 func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
-	image := gatewayImage
-	if override := os.Getenv("SOS_GATEWAY_IMAGE"); override != "" {
-		image = &resources.DockerImage{Name: override}
-	}
+	image, _ := effectiveGatewayImage()
 
 	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace()+"-gateway")
 	if err != nil {

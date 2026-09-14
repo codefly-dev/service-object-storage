@@ -7,6 +7,7 @@ import (
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/agents/services/sbom"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
@@ -73,10 +74,50 @@ func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*buil
 	return s.Builder.AuditContainer(ctx, req, gatewayImage.FullName())
 }
 
-func (s *Builder) SBOM(ctx context.Context, _ *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
+// SBOM answers a source-scope request with the package inventory this agent has
+// always produced, and an image-scope request with evidence bound to the digest
+// and platform of every image the service ships. A caller that resolved the
+// images itself passes them as subjects; an empty subject list asks the agent to
+// enumerate its own.
+func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	return s.Builder.SBOMContainer(ctx, gatewayImage.FullName())
+	if req.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+		return s.Builder.SBOMContainer(ctx, gatewayImage.FullName())
+	}
+	if subjects := req.GetSubjects(); len(subjects) > 0 {
+		return s.Builder.SBOMImages(ctx, subjects, sbom.SourceRegistry)
+	}
+	subjects, source := s.imageSubjects()
+	return s.Builder.SBOMImages(ctx, subjects, source)
+}
+
+// imageSubjects enumerates the images this service ships, and the way to reach
+// them. The gateway is the only one: MinIO backs local runs and never reaches a
+// deployment manifest, so inventorying it would report coverage of something the
+// deployed service does not run. The published gateway is multi-architecture and
+// contributes one subject per shipped platform; an override is a local build the
+// daemon holds on a single platform.
+func (s *Builder) imageSubjects() ([]*builderv0.ImageSubject, sbom.ImageSource) {
+	image, overridden := effectiveGatewayImage()
+	service := s.Base.Unique()
+	if overridden {
+		return []*builderv0.ImageSubject{{
+			Reference: image.FullName(),
+			Role:      gatewayImageRole,
+			Service:   service,
+		}}, sbom.SourceDockerDaemon
+	}
+	subjects := make([]*builderv0.ImageSubject, 0, len(gatewayPlatforms))
+	for _, platform := range gatewayPlatforms {
+		subjects = append(subjects, &builderv0.ImageSubject{
+			Reference: image.FullName(),
+			Platform:  platform,
+			Role:      gatewayImageRole,
+			Service:   service,
+		})
+	}
+	return subjects, sbom.SourceRegistry
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {

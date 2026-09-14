@@ -291,6 +291,41 @@ still builds from `cmd/service-object-storage` (see `Dockerfile`). The agent
 binary is the release asset that makes `codefly.dev/object-storage` resolvable;
 the gateway ships as the `ghcr.io/codefly-dev/service-object-storage` image.
 
+## Supply chain evidence
+
+`Builder.SBOM` answers both scopes of the shared Codefly SBOM contract.
+
+- **Source scope** — the default, and what an unspecified scope means — returns
+  the package inventory this agent has always produced.
+- **Image scope** returns CycloneDX evidence bound to the immutable digest and
+  platform of each image the service ships. A caller that already resolved the
+  images passes them as subjects; an empty subject list asks the agent to
+  enumerate its own.
+
+The gateway is the only image this service ships, and it is published for
+`linux/amd64` and `linux/arm64`. Each platform is its own subject, so evidence
+for one never stands in for the other. MinIO backs local runs and never reaches
+a deployment manifest, so it is deliberately not inventoried: reporting it would
+claim coverage of something the deployed service does not run.
+
+`SOS_GATEWAY_IMAGE` is honored. An override is a local build no registry serves,
+so it is inventoried through the Docker daemon — which needs `syft` on PATH —
+and covers the single platform the daemon holds.
+
+A failed scan, an unresolvable image, or a digest other than the one requested is
+reported as an error, never as partial or complete coverage.
+
+```bash
+# inventory a locally built gateway image exactly as CI does
+docker build -t service-object-storage:e2e .
+SOS_GATEWAY_IMAGE=service-object-storage:e2e SOS_SBOM_OUTPUT=sbom/gateway.cdx.json \
+  go test -tags e2e -run TestImageSBOM .
+```
+
+Each release publishes a CycloneDX document and checksum per shipped platform,
+each bound to that platform's child manifest digest, as build artifacts of
+`.github/workflows/release-image.yml`.
+
 ## Develop
 
 ```bash
