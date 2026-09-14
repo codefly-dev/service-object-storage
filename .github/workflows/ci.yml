@@ -105,8 +105,16 @@ jobs:
       # image a release publishes is neither: it is multi-architecture and
       # resolved through the registry. Without this step the two-platform path
       # the release depends on would never execute in CI.
+      # Inventoried by digest, which is the form the release uses: it scans the
+      # digest its own build produced rather than a tag, so the reference shape
+      # the release depends on is exercised here rather than first at release
+      # time.
       - name: inventory the published multi-architecture image
-        run: go run ./cmd/image-sbom -image ghcr.io/codefly-dev/service-object-storage:latest -out sbom-published
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect ghcr.io/codefly-dev/service-object-storage:latest \
+            --format '{{json .Manifest}}' | jq -r .digest)
+          go run ./cmd/image-sbom -image "ghcr.io/codefly-dev/service-object-storage@${digest}" -out sbom-published
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gateway-image-sbom
