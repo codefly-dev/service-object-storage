@@ -13,6 +13,8 @@ import (
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
+
+	"github.com/codefly-dev/service-object-storage/internal/imageevidence"
 )
 
 type Builder struct {
@@ -95,29 +97,14 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 // imageSubjects enumerates the images this service ships, and the way to reach
 // them. The gateway is the only one: MinIO backs local runs and never reaches a
 // deployment manifest, so inventorying it would report coverage of something the
-// deployed service does not run. The published gateway is multi-architecture and
-// contributes one subject per shipped platform; an override is a local build the
-// daemon holds on a single platform.
+// deployed service does not run.
+//
+// The subjects themselves come from imageevidence, which the release command
+// reads too, so the evidence a release publishes describes the same images the
+// agent reports.
 func (s *Builder) imageSubjects() ([]*builderv0.ImageSubject, sbom.ImageSource) {
 	image, overridden := effectiveGatewayImage()
-	service := s.Base.Unique()
-	if overridden {
-		return []*builderv0.ImageSubject{{
-			Reference: image.FullName(),
-			Role:      gatewayImageRole,
-			Service:   service,
-		}}, sbom.SourceDockerDaemon
-	}
-	subjects := make([]*builderv0.ImageSubject, 0, len(gatewayPlatforms))
-	for _, platform := range gatewayPlatforms {
-		subjects = append(subjects, &builderv0.ImageSubject{
-			Reference: image.FullName(),
-			Platform:  platform,
-			Role:      gatewayImageRole,
-			Service:   service,
-		})
-	}
-	return subjects, sbom.SourceRegistry
+	return imageevidence.Subjects(s.Base.Unique(), image.FullName(), overridden)
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {

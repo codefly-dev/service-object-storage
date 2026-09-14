@@ -10,8 +10,8 @@
 // is only reachable by a scanner with Docker access, which the managed
 // containerized scanner deliberately does not have.
 //
-// Setting SOS_SBOM_OUTPUT writes the CycloneDX document to that path, which is
-// how CI keeps the evidence retrievable alongside the image it describes.
+// Writing the evidence out is the release command's job (cmd/image-sbom), not
+// this test's.
 
 package main
 
@@ -19,11 +19,8 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/codefly-dev/core/agents/services/sbom"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
@@ -83,9 +80,8 @@ func TestImageSBOMInventoriesTheGatewayImage(t *testing.T) {
 		t.Error("inventory found no OS packages: an image inventory is not satisfied by application dependencies alone")
 	}
 
-	if output := os.Getenv("SOS_SBOM_OUTPUT"); output != "" {
-		writeEvidence(t, output, evidence)
-	}
+	t.Logf("inventoried %s on %s (%d Go modules, %d OS packages)",
+		evidence.GetDigest(), evidence.GetPlatform(), goModules, osPackages)
 }
 
 // osPackageTypes are the package-URL namespaces an OS inventory reports under.
@@ -101,21 +97,4 @@ func isOSPackage(purl string) bool {
 		}
 	}
 	return false
-}
-
-// writeEvidence exports the CycloneDX document so the scan a release gates on
-// is also the artifact it publishes.
-func writeEvidence(t *testing.T, path string, evidence *builderv0.ImageSBOM) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("create evidence directory: %v", err)
-	}
-	document, err := protojson.MarshalOptions{Multiline: true}.Marshal(evidence.GetBom())
-	if err != nil {
-		t.Fatalf("marshal inventory: %v", err)
-	}
-	if err := os.WriteFile(path, document, 0o644); err != nil {
-		t.Fatalf("write inventory: %v", err)
-	}
-	t.Logf("wrote %s for %s on %s (sha256 %s)", path, evidence.GetDigest(), evidence.GetPlatform(), evidence.GetSha256())
 }

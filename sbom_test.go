@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -13,7 +14,13 @@ import (
 	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"gopkg.in/yaml.v3"
+
+	"github.com/codefly-dev/service-object-storage/internal/imageevidence"
 )
+
+// testService is the identity newSBOMBuilder loads, and therefore the identity
+// every subject it produces carries.
+const testService = "module/object-storage"
 
 // newSBOMBuilder returns a Builder wired for a headless SBOM call.
 func newSBOMBuilder(t *testing.T) *Builder {
@@ -40,23 +47,23 @@ func TestImageSubjectsCoverEveryPublishedPlatform(t *testing.T) {
 	if source != sbom.SourceRegistry {
 		t.Errorf("published image source = %v, want the registry", source)
 	}
-	if len(subjects) != len(gatewayPlatforms) {
-		t.Fatalf("got %d subjects for %d shipped platforms", len(subjects), len(gatewayPlatforms))
+	if len(subjects) != len(imageevidence.Platforms) {
+		t.Fatalf("got %d subjects for %d shipped platforms", len(subjects), len(imageevidence.Platforms))
 	}
 	covered := map[string]bool{}
 	for _, subject := range subjects {
 		if got := subject.GetReference(); got != gatewayImage.FullName() {
 			t.Errorf("subject reference = %q, want the published gateway %q", got, gatewayImage.FullName())
 		}
-		if got := subject.GetRole(); got != gatewayImageRole {
-			t.Errorf("subject role = %q, want %q", got, gatewayImageRole)
+		if got := subject.GetRole(); got != imageevidence.Role {
+			t.Errorf("subject role = %q, want %q", got, imageevidence.Role)
 		}
-		if got := subject.GetService(); got != "module/object-storage" {
+		if got := subject.GetService(); got != testService {
 			t.Errorf("subject service = %q, want the loaded service identity", got)
 		}
 		covered[subject.GetPlatform()] = true
 	}
-	for _, platform := range gatewayPlatforms {
+	for _, platform := range imageevidence.Platforms {
 		if !covered[platform] {
 			t.Errorf("no subject covers shipped platform %s", platform)
 		}
@@ -64,20 +71,24 @@ func TestImageSubjectsCoverEveryPublishedPlatform(t *testing.T) {
 }
 
 func TestImageEvidenceSatisfiesTheCoverageContract(t *testing.T) {
-	// Several platforms are what make the omitted-platform case meaningful, so
-	// pin to the published image rather than whatever the environment names.
 	t.Setenv(gatewayImageOverrideEnv, "")
 	builder := newSBOMBuilder(t)
 	subjects, _ := builder.imageSubjects()
 
+	// The expectation is built from the platforms the release pipeline actually
+	// publishes, never from imageSubjects: deriving both sides from the code
+	// under test compares it against itself, and would validate however many
+	// platforms it dropped.
+	expected := expectedFromReleasePipeline(t, gatewayImage.FullName())
+
 	complete := imageResponse(evidenceFor(subjects))
-	if err := sbom.ValidateCoverage(subjects, complete); err != nil {
-		t.Fatalf("evidence for every subject must validate as coverage: %v", err)
+	if err := sbom.ValidateCoverage(expected, complete); err != nil {
+		t.Fatalf("evidence for every published platform must validate as coverage: %v", err)
 	}
 
 	partial := imageResponse(evidenceFor(subjects[:1]))
-	if err := sbom.ValidateCoverage(subjects, partial); err == nil {
-		t.Error("evidence omitting a shipped platform must not validate as coverage")
+	if err := sbom.ValidateCoverage(expected, partial); err == nil {
+		t.Error("evidence omitting a published platform must not validate as coverage")
 	}
 }
 
@@ -152,41 +163,94 @@ func TestSourceScopeKeepsTheExistingInventory(t *testing.T) {
 }
 
 func TestShippedPlatformsMatchTheReleasePipeline(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "release-image.yml"))
-	if err != nil {
-		t.Fatalf("read release workflow: %v", err)
+	published := append([]string(nil), publishedPlatforms(t)...)
+	declared := append([]string(nil), imageevidence.Platforms...)
+	// Compare as sets: the pipeline and the code have to name the same
+	// platforms, but neither owns the order the other writes them in.
+	sort.Strings(published)
+	sort.Strings(declared)
+
+	if strings.Join(published, ",") != strings.Join(declared, ",") {
+		t.Errorf("the pipeline publishes %v but evidence covers %v; a platform shipped without a subject ships uninventoried", published, declared)
 	}
+}
+
+// The release once looped over a platform list written into the workflow and
+// called the scanner itself, which is a second list to keep in sync and a
+// second scanner to drift from the contract. Evidence comes from the release
+// command, which reads the same platform list the agent does.
+func TestReleaseEvidenceComesFromTheSharedCommand(t *testing.T) {
+	body := releaseWorkflow(t)
+
+	if !strings.Contains(body, "cmd/image-sbom") {
+		t.Error("the release workflow does not generate evidence through cmd/image-sbom")
+	}
+	if strings.Contains(body, "for platform in") {
+		t.Error("the release workflow loops over its own platform list; it must read imageevidence.Platforms through cmd/image-sbom")
+	}
+}
+
+// expectedFromReleasePipeline builds the coverage expectation from the release
+// workflow, independently of the code that produces the evidence.
+func expectedFromReleasePipeline(t *testing.T, reference string) []*builderv0.ImageSubject {
+	t.Helper()
+	platforms := publishedPlatforms(t)
+	expected := make([]*builderv0.ImageSubject, 0, len(platforms))
+	for _, platform := range platforms {
+		expected = append(expected, &builderv0.ImageSubject{
+			Reference: reference,
+			Platform:  platform,
+			Role:      imageevidence.Role,
+			Service:   testService,
+		})
+	}
+	return expected
+}
+
+// publishedPlatforms reads the platforms the release actually builds, from the
+// step that pushes the image rather than from any step that happens to carry a
+// platform list.
+func publishedPlatforms(t *testing.T) []string {
+	t.Helper()
 	var workflow struct {
 		Jobs map[string]struct {
 			Steps []struct {
+				Uses string `yaml:"uses"`
 				With struct {
 					Platforms string `yaml:"platforms"`
 				} `yaml:"with"`
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(data, &workflow); err != nil {
+	if err := yaml.Unmarshal([]byte(releaseWorkflow(t)), &workflow); err != nil {
 		t.Fatalf("parse release workflow: %v", err)
 	}
-
 	var published []string
 	for _, job := range workflow.Jobs {
 		for _, step := range job.Steps {
-			if step.With.Platforms == "" {
+			if !strings.Contains(step.Uses, "docker/build-push-action") {
 				continue
 			}
 			for _, platform := range strings.Split(step.With.Platforms, ",") {
-				published = append(published, strings.TrimSpace(platform))
+				if platform = strings.TrimSpace(platform); platform != "" {
+					published = append(published, platform)
+				}
 			}
 		}
 	}
 	if len(published) == 0 {
-		t.Fatal("the release workflow publishes no platforms")
+		t.Fatal("the release workflow's build-push step publishes no platforms")
 	}
+	return published
+}
 
-	if strings.Join(published, ",") != strings.Join(gatewayPlatforms, ",") {
-		t.Errorf("the pipeline publishes %v but evidence covers %v; a platform shipped without a subject ships uninventoried", published, gatewayPlatforms)
+func releaseWorkflow(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(".github", "workflows", "release-image.yml"))
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
 	}
+	return string(data)
 }
 
 // imageResponse wraps evidence in the complete image-scope response an agent

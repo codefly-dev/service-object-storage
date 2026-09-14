@@ -95,15 +95,24 @@ jobs:
       # The daemon holds this image and no registry serves it, so the scan needs
       # syft on PATH: the managed containerized scanner has no Docker access.
       - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
-      - name: inventory the gateway image through the agent
+      - name: assert the image contract against a real image
         env:
           SOS_GATEWAY_IMAGE: service-object-storage:e2e
-          SOS_SBOM_OUTPUT: sbom/gateway.cdx.json
         run: go test -tags e2e -count=1 -timeout 300s -run TestImageSBOM .
+      - name: write evidence through the release command
+        run: go run ./cmd/image-sbom -image service-object-storage:e2e -local -out sbom
+      # The local image is single-platform and reached through the daemon. The
+      # image a release publishes is neither: it is multi-architecture and
+      # resolved through the registry. Without this step the two-platform path
+      # the release depends on would never execute in CI.
+      - name: inventory the published multi-architecture image
+        run: go run ./cmd/image-sbom -image ghcr.io/codefly-dev/service-object-storage:latest -out sbom-published
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gateway-image-sbom
-          path: sbom/
+          path: |
+            sbom/
+            sbom-published/
           # A skipped scan writes nothing; failing here keeps a green job from
           # standing in for evidence that was never produced.
           if-no-files-found: error

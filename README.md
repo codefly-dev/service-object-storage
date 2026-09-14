@@ -315,16 +315,25 @@ and covers the single platform the daemon holds.
 A failed scan, an unresolvable image, or a digest other than the one requested is
 reported as an error, never as partial or complete coverage.
 
+`cmd/image-sbom` writes that evidence to disk through the same scanner the agent
+uses, so a published document is the agent's own output rather than a second,
+drifting copy of it:
+
 ```bash
-# inventory a locally built gateway image exactly as CI does
+# the published multi-architecture image: one document per shipped platform
+go run ./cmd/image-sbom -image ghcr.io/codefly-dev/service-object-storage:latest -out sbom
+
+# a locally built image, which no registry serves (needs syft on PATH)
 docker build -t service-object-storage:e2e .
-SOS_GATEWAY_IMAGE=service-object-storage:e2e SOS_SBOM_OUTPUT=sbom/gateway.cdx.json \
-  go test -tags e2e -run TestImageSBOM .
+go run ./cmd/image-sbom -image service-object-storage:e2e -local -out sbom
 ```
 
-Each release publishes a CycloneDX document and checksum per shipped platform,
-each bound to that platform's child manifest digest, as build artifacts of
-`.github/workflows/release-image.yml`.
+Each document carries the digest it was scanned from in its own root component,
+so it still names the image it describes once separated from the directory it
+was written in. Every release runs the same command and publishes the documents
+and an `index.txt` naming each digest and platform, as build artifacts of
+`.github/workflows/release-image.yml`. The platform list lives only in
+`internal/imageevidence`, and a test asserts it against the release workflow.
 
 ## Develop
 

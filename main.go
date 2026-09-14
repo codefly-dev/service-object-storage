@@ -53,17 +53,6 @@ var gatewayImage = &resources.DockerImage{
 // the published one.
 const gatewayImageOverrideEnv = "SOS_GATEWAY_IMAGE"
 
-// gatewayImageRole is the gateway's purpose within the service, carried on its
-// image SBOM subjects.
-const gatewayImageRole = "runtime"
-
-// gatewayPlatforms are the platforms the release pipeline publishes the gateway
-// image for, and therefore the platforms image evidence has to cover: a
-// multi-architecture image is not inventoried by scanning one of its children.
-// It is asserted against .github/workflows/release-image.yml, so a platform
-// added to the pipeline alone cannot ship uninventoried.
-var gatewayPlatforms = []string{"linux/amd64", "linux/arm64"}
-
 // effectiveGatewayImage resolves the gateway image the agent actually runs, and
 // reports whether it came from the override. An override is built locally and
 // never pushed, so it is reachable through the Docker daemon rather than a
