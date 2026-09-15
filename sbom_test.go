@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -247,7 +248,7 @@ func publishedPlatforms(t *testing.T) []string {
 
 func releaseWorkflow(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "release-image.yml"))
+	data, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
 	if err != nil {
 		t.Fatalf("read release workflow: %v", err)
 	}
@@ -277,9 +278,17 @@ func releaseSteps(t *testing.T) []releaseStep {
 	if err := yaml.Unmarshal([]byte(releaseWorkflow(t)), &workflow); err != nil {
 		t.Fatalf("parse release workflow: %v", err)
 	}
+	names := make([]string, 0, len(workflow.Jobs))
+	for name := range workflow.Jobs {
+		names = append(names, name)
+	}
+	// The assertions below compare step indices, and Go randomises map
+	// iteration. Sort so that a step added to another job shifts those indices
+	// the same way on every run instead of flaking.
+	sort.Strings(names)
 	var steps []releaseStep
-	for _, job := range workflow.Jobs {
-		steps = append(steps, job.Steps...)
+	for _, name := range names {
+		steps = append(steps, workflow.Jobs[name].Steps...)
 	}
 	if len(steps) == 0 {
 		t.Fatal("the release workflow has no steps")
@@ -358,6 +367,198 @@ func TestReleaseGuardRejectsTagThatDisagreesWithAgentVersion(t *testing.T) {
 	}
 	if err := run(agent.Version + "9"); err == nil {
 		t.Error("guard accepted a tag that disagrees with agent.codefly.yaml; such a tag ships an agent that silently pulls the previous release's image")
+	}
+}
+
+// needsList is a job's `needs`, which GitHub accepts as either one job name or
+// a list of them.
+type needsList []string
+
+func (n *needsList) UnmarshalYAML(node *yaml.Node) error {
+	var one string
+	if err := node.Decode(&one); err == nil {
+		*n = needsList{one}
+		return nil
+	}
+	var many []string
+	if err := node.Decode(&many); err != nil {
+		return err
+	}
+	*n = many
+	return nil
+}
+
+type releaseJob struct {
+	Needs needsList     `yaml:"needs"`
+	Uses  string        `yaml:"uses"`
+	Steps []releaseStep `yaml:"steps"`
+}
+
+func releaseJobs(t *testing.T) map[string]releaseJob {
+	t.Helper()
+	var workflow struct {
+		Jobs map[string]releaseJob `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(releaseWorkflow(t)), &workflow); err != nil {
+		t.Fatalf("parse release workflow: %v", err)
+	}
+	return workflow.Jobs
+}
+
+// jobsThat returns every job matching want, sorted. The assertions below
+// quantify over the whole set rather than over one member: Go randomises map
+// iteration, so singling out a match would decide a release gate by coin flip
+// the moment a second job matched.
+func jobsThat(t *testing.T, jobs map[string]releaseJob, what string, want func(releaseJob) bool) []string {
+	t.Helper()
+	var matched []string
+	for name, job := range jobs {
+		if want(job) {
+			matched = append(matched, name)
+		}
+	}
+	if len(matched) == 0 {
+		t.Fatalf("the release workflow has no job that %s", what)
+	}
+	sort.Strings(matched)
+	return matched
+}
+
+// runsAfter reports whether job cannot start until earlier has succeeded.
+func runsAfter(jobs map[string]releaseJob, job, earlier string) bool {
+	seen := map[string]bool{}
+	queue := append([]string(nil), jobs[job].Needs...)
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		if next == earlier {
+			return true
+		}
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		queue = append(queue, jobs[next].Needs...)
+	}
+	return false
+}
+
+// firesOnTagPush reports whether a workflow's triggers include a tag push. A
+// push trigger covers branches and tags alike; naming only `branches` (or
+// `branches-ignore`) drops tags, while naming neither filter leaves both live.
+// Reading `on.push.tags` alone therefore misses a workflow that publishes on
+// every tag through a bare `on: push`, which is the shape this guards against.
+func firesOnTagPush(t *testing.T, name string, data []byte) bool {
+	t.Helper()
+	var workflow struct {
+		On yaml.Node `yaml:"on"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	decode := func(node yaml.Node, into any) {
+		if err := node.Decode(into); err != nil {
+			t.Fatalf("parse %s triggers: %v", name, err)
+		}
+	}
+	switch workflow.On.Kind {
+	case yaml.ScalarNode: // on: push
+		return workflow.On.Value == "push"
+	case yaml.SequenceNode: // on: [push, pull_request]
+		var events []string
+		decode(workflow.On, &events)
+		return slices.Contains(events, "push")
+	case yaml.MappingNode:
+		var triggers map[string]yaml.Node
+		decode(workflow.On, &triggers)
+		push, ok := triggers["push"]
+		if !ok {
+			return false
+		}
+		filters := map[string]yaml.Node{}
+		if push.Kind == yaml.MappingNode {
+			decode(push, &filters)
+		}
+		_, tags := filters["tags"]
+		_, tagsIgnore := filters["tags-ignore"]
+		_, branches := filters["branches"]
+		_, branchesIgnore := filters["branches-ignore"]
+		return tags || tagsIgnore || (!branches && !branchesIgnore)
+	}
+	return false
+}
+
+// A `v*` tag used to start two workflows that never learned of each other: this
+// one, and a GoReleaser call that published the GitHub release carrying the
+// agent binary. Either could fail while the other published. The harmful
+// direction was the release becoming `latest` while no registry served the
+// gateway tag its agent embeds, which breaks every consumer resolving this
+// service until someone deletes the release. Everything a tag publishes now
+// hangs off one chain, ordered by the dependency that actually exists.
+func TestATagPublishesThroughOneOrderedWorkflow(t *testing.T) {
+	dir := filepath.Join(".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read workflows: %v", err)
+	}
+	var onTag []string
+	for _, entry := range entries {
+		// Workflow files only. The directory also holds whatever else is put
+		// beside them, and a subdirectory or a README publishes nothing.
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		if ext := filepath.Ext(entry.Name()); ext != ".yml" && ext != ".yaml" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", entry.Name(), err)
+		}
+		if firesOnTagPush(t, entry.Name(), data) {
+			onTag = append(onTag, entry.Name())
+		}
+	}
+	sort.Strings(onTag)
+	if len(onTag) != 1 || onTag[0] != "release.yml" {
+		t.Fatalf("a tag push starts %v; it must start one workflow, because separate workflows cannot order or gate each other", onTag)
+	}
+
+	jobs := releaseJobs(t)
+	hasStep := func(match func(releaseStep) bool) func(releaseJob) bool {
+		return func(job releaseJob) bool {
+			for _, step := range job.Steps {
+				if match(step) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	releases := jobsThat(t, jobs, "publishes the GitHub release", func(job releaseJob) bool {
+		return strings.Contains(job.Uses, "go-service-release.yml")
+	})
+	if len(releases) != 1 {
+		t.Fatalf("jobs %v each publish a GitHub release; a tag ships one release", releases)
+	}
+	images := jobsThat(t, jobs, "builds the gateway image", hasStep(func(step releaseStep) bool {
+		return strings.Contains(step.Uses, "docker/build-push-action")
+	}))
+	gates := jobsThat(t, jobs, "runs the test suite", hasStep(func(step releaseStep) bool {
+		return strings.Contains(step.Run, "go test")
+	}))
+
+	// Every image the tag publishes has to exist before the release names it,
+	// and has to be gated on the suite. Quantifying over the sets keeps a job
+	// added later — a second image, a post-release smoke test — from changing
+	// which pair happens to be checked.
+	for _, image := range images {
+		if !runsAfter(jobs, releases[0], image) {
+			t.Errorf("job %q does not wait for %q: the release can ship an agent whose gatewayImage.Tag no registry serves", releases[0], image)
+		}
+		if !slices.ContainsFunc(gates, func(gate string) bool { return runsAfter(jobs, image, gate) }) {
+			t.Errorf("job %q waits for none of %v: a tag whose tests fail still publishes an image tagged :latest", image, gates)
+		}
 	}
 }
 

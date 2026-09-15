@@ -332,7 +332,7 @@ Each document carries the digest it was scanned from in its own root component,
 so it still names the image it describes once separated from the directory it
 was written in. Every release runs the same command and publishes the documents
 and an `index.txt` naming each digest and platform, as build artifacts of
-`.github/workflows/release-image.yml`. The platform list lives only in
+`.github/workflows/release.yml`. The platform list lives only in
 `internal/imageevidence`, and a test asserts it against the release workflow.
 
 ## Develop
