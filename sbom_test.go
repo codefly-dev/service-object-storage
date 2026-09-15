@@ -361,6 +361,138 @@ func TestReleaseGuardRejectsTagThatDisagreesWithAgentVersion(t *testing.T) {
 	}
 }
 
+// needsList is a job's `needs`, which GitHub accepts as either one job name or
+// a list of them.
+type needsList []string
+
+func (n *needsList) UnmarshalYAML(node *yaml.Node) error {
+	var one string
+	if err := node.Decode(&one); err == nil {
+		*n = needsList{one}
+		return nil
+	}
+	var many []string
+	if err := node.Decode(&many); err != nil {
+		return err
+	}
+	*n = many
+	return nil
+}
+
+type releaseJob struct {
+	Needs needsList     `yaml:"needs"`
+	Uses  string        `yaml:"uses"`
+	Steps []releaseStep `yaml:"steps"`
+}
+
+func releaseJobs(t *testing.T) map[string]releaseJob {
+	t.Helper()
+	var workflow struct {
+		Jobs map[string]releaseJob `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(releaseWorkflow(t)), &workflow); err != nil {
+		t.Fatalf("parse release workflow: %v", err)
+	}
+	return workflow.Jobs
+}
+
+// jobNamed returns the one job matching want, failing when the release workflow
+// has no such job.
+func jobNamed(t *testing.T, jobs map[string]releaseJob, what string, want func(releaseJob) bool) string {
+	t.Helper()
+	for name, job := range jobs {
+		if want(job) {
+			return name
+		}
+	}
+	t.Fatalf("the release workflow has no job that %s", what)
+	return ""
+}
+
+// runsAfter reports whether job cannot start until earlier has succeeded.
+func runsAfter(jobs map[string]releaseJob, job, earlier string) bool {
+	seen := map[string]bool{}
+	queue := append([]string(nil), jobs[job].Needs...)
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		if next == earlier {
+			return true
+		}
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		queue = append(queue, jobs[next].Needs...)
+	}
+	return false
+}
+
+// A `v*` tag used to start two workflows that never learned of each other: this
+// one, and a GoReleaser call that published the GitHub release carrying the
+// agent binary. Either could fail while the other published. The harmful
+// direction was the release becoming `latest` while no registry served the
+// gateway tag its agent embeds, which breaks every consumer resolving this
+// service until someone deletes the release. Everything a tag publishes now
+// hangs off one chain, ordered by the dependency that actually exists.
+func TestATagPublishesThroughOneOrderedWorkflow(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(".github", "workflows"))
+	if err != nil {
+		t.Fatalf("read workflows: %v", err)
+	}
+	var onTag []string
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(".github", "workflows", entry.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", entry.Name(), err)
+		}
+		var workflow struct {
+			On struct {
+				Push struct {
+					Tags []string `yaml:"tags"`
+				} `yaml:"push"`
+			} `yaml:"on"`
+		}
+		if err := yaml.Unmarshal(data, &workflow); err != nil {
+			t.Fatalf("parse %s: %v", entry.Name(), err)
+		}
+		if len(workflow.On.Push.Tags) > 0 {
+			onTag = append(onTag, entry.Name())
+		}
+	}
+	if len(onTag) != 1 || onTag[0] != "release-image.yml" {
+		t.Fatalf("a tag push starts %v; it must start one workflow, because separate workflows cannot order or gate each other", onTag)
+	}
+
+	jobs := releaseJobs(t)
+	hasStep := func(match func(releaseStep) bool) func(releaseJob) bool {
+		return func(job releaseJob) bool {
+			for _, step := range job.Steps {
+				if match(step) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	release := jobNamed(t, jobs, "publishes the GitHub release", func(job releaseJob) bool {
+		return strings.Contains(job.Uses, "go-service-release.yml")
+	})
+	image := jobNamed(t, jobs, "builds the gateway image", hasStep(func(step releaseStep) bool {
+		return strings.Contains(step.Uses, "docker/build-push-action")
+	}))
+	tested := jobNamed(t, jobs, "runs the test suite", hasStep(func(step releaseStep) bool {
+		return strings.Contains(step.Run, "go test")
+	}))
+
+	if !runsAfter(jobs, release, image) {
+		t.Errorf("job %q does not wait for %q: the release can ship an agent whose gatewayImage.Tag no registry serves", release, image)
+	}
+	if !runsAfter(jobs, image, tested) {
+		t.Errorf("job %q does not wait for %q: a tag whose tests fail still publishes an image tagged :latest", image, tested)
+	}
+}
+
 // imageResponse wraps evidence in the complete image-scope response an agent
 // returns.
 func imageResponse(images []*builderv0.ImageSBOM) *builderv0.SBOMResponse {
