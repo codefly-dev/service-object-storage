@@ -18,6 +18,9 @@ jobs:
   # binary on its own test job, but a caller cannot depend on a job inside the
   # workflow it calls, so the image needs this gate of its own — otherwise a
   # failing test still leaves an untested image tagged :latest.
+  # Its own job rather than a step in gateway-image: that job holds packages:
+  # write and an authenticated ghcr session, and the whole test tree has no
+  # business running under a registry-write token.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -107,5 +110,9 @@ jobs:
   # inventoried is the GitHub release that carries the agent worth creating.
   release:
     needs: gateway-image
-    uses: codefly-dev/core/.github/workflows/go-service-release.yml@main
+    # Pinned to an immutable core commit SHA, not @main (see ci.yml). This call
+    # carries secrets: inherit, so a mutable ref would hand an upstream change
+    # this repo's GH_PAT with no commit here — the risk ci.yml pins against,
+    # on the one call that actually inherits the token. Bump deliberately.
+    uses: codefly-dev/core/.github/workflows/go-service-release.yml@bcd5a65a0ee2e696e4a15e90e8cb09434d787437
     secrets: inherit

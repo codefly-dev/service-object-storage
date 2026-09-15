@@ -693,7 +693,7 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 }
 
 // This covers the wiring only. Whether the pushed git tag agrees with the
-// embedded version is a release-time question, guarded in release-image.yml and
+// embedded version is a release-time question, guarded in release.yml and
 // asserted by TestReleaseGuardRejectsTagThatDisagreesWithAgentVersion.
 func TestGatewayImageTracksAgentVersion(t *testing.T) {
 	if !strings.HasSuffix(gatewayImage.FullName(), agent.Version) {
