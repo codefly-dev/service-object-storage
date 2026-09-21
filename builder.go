@@ -7,7 +7,6 @@ import (
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/agents/services/sbom"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
@@ -88,10 +87,13 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 		return s.Builder.SBOMContainer(ctx, gatewayImage.FullName())
 	}
 	if subjects := req.GetSubjects(); len(subjects) > 0 {
-		return s.Builder.SBOMImages(ctx, subjects, sbom.SourceRegistry)
+		return s.Builder.SBOMImages(ctx, subjects)
 	}
-	subjects, source := s.imageSubjects()
-	return s.Builder.SBOMImages(ctx, subjects, source)
+	subjects, err := s.imageSubjects(ctx)
+	if err != nil {
+		return s.Builder.SBOMImageError(err)
+	}
+	return s.Builder.SBOMImages(ctx, subjects)
 }
 
 // imageSubjects enumerates the images this service ships, and the way to reach
@@ -102,9 +104,9 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 // The subjects themselves come from imageevidence, which the release command
 // reads too, so the evidence a release publishes describes the same images the
 // agent reports.
-func (s *Builder) imageSubjects() ([]*builderv0.ImageSubject, sbom.ImageSource) {
+func (s *Builder) imageSubjects(ctx context.Context) ([]*builderv0.ImageSubject, error) {
 	image, overridden := effectiveGatewayImage()
-	return imageevidence.Subjects(s.Base.Unique(), image.FullName(), overridden)
+	return imageevidence.Subjects(ctx, s.Base.Unique(), image.FullName(), overridden)
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {

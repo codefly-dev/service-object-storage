@@ -44,16 +44,22 @@ func TestImageSubjectsCoverEveryPublishedPlatform(t *testing.T) {
 	t.Setenv(gatewayImageOverrideEnv, "")
 	builder := newSBOMBuilder(t)
 
-	subjects, source := builder.imageSubjects()
-
-	if source != sbom.SourceRegistry {
-		t.Errorf("published image source = %v, want the registry", source)
+	subjects, err := builder.imageSubjects(context.Background())
+	if err != nil {
+		t.Fatalf("imageSubjects: %v", err)
 	}
+
 	if len(subjects) != len(imageevidence.Platforms) {
 		t.Fatalf("got %d subjects for %d shipped platforms", len(subjects), len(imageevidence.Platforms))
 	}
 	covered := map[string]bool{}
 	for _, subject := range subjects {
+		if source := sbom.SourceOf(subject); source != sbom.SourceRegistry {
+			t.Errorf("published image source = %v, want the registry", source)
+		}
+		if err := sbom.RequirePinned(subject); err != nil {
+			t.Errorf("published subject is not pinned: %v", err)
+		}
 		if got := subject.GetReference(); got != gatewayImage.FullName() {
 			t.Errorf("subject reference = %q, want the published gateway %q", got, gatewayImage.FullName())
 		}
@@ -75,7 +81,10 @@ func TestImageSubjectsCoverEveryPublishedPlatform(t *testing.T) {
 func TestImageEvidenceSatisfiesTheCoverageContract(t *testing.T) {
 	t.Setenv(gatewayImageOverrideEnv, "")
 	builder := newSBOMBuilder(t)
-	subjects, _ := builder.imageSubjects()
+	subjects, err := builder.imageSubjects(context.Background())
+	if err != nil {
+		t.Fatalf("imageSubjects: %v", err)
+	}
 
 	// The expectation is built from the platforms the release pipeline actually
 	// publishes, never from imageSubjects: deriving both sides from the code
@@ -84,41 +93,40 @@ func TestImageEvidenceSatisfiesTheCoverageContract(t *testing.T) {
 	expected := expectedFromReleasePipeline(t, gatewayImage.FullName())
 
 	complete := imageResponse(evidenceFor(subjects))
-	if err := sbom.ValidateCoverage(expected, complete); err != nil {
+	if err := sbom.ValidateCoverage(testService, expected, complete); err != nil {
 		t.Fatalf("evidence for every published platform must validate as coverage: %v", err)
 	}
 
 	partial := imageResponse(evidenceFor(subjects[:1]))
-	if err := sbom.ValidateCoverage(expected, partial); err == nil {
+	if err := sbom.ValidateCoverage(testService, expected, partial); err == nil {
 		t.Error("evidence omitting a published platform must not validate as coverage")
 	}
 }
 
-func TestGatewayOverrideIsInventoriedThroughTheDaemon(t *testing.T) {
-	const override = "service-object-storage:e2e"
-	t.Setenv(gatewayImageOverrideEnv, override)
+// The daemon resolves whatever reference it is handed to its own image ID, so a
+// subject for a local image has to carry that ID: evidence bound to an identity
+// the subject never named is not coverage of it. Resolving it can fail — the
+// override may name an image the daemon does not hold — and reporting that is
+// the only alternative to producing a subject pinned to nothing.
+//
+// The resolved case needs a real image and is asserted by the e2e inventory.
+func TestGatewayOverrideMustBeHeldByTheDaemon(t *testing.T) {
+	const absent = "sos-gateway-unit-test-absent:none"
+	t.Setenv(gatewayImageOverrideEnv, absent)
 	builder := newSBOMBuilder(t)
 
-	subjects, source := builder.imageSubjects()
-
-	if source != sbom.SourceDockerDaemon {
-		t.Errorf("override source = %v, want the Docker daemon", source)
+	subjects, err := builder.imageSubjects(context.Background())
+	if err == nil {
+		t.Fatalf("got %d subjects for an image the daemon does not hold, want a refusal", len(subjects))
 	}
-	if len(subjects) != 1 {
-		t.Fatalf("got %d subjects, want the single platform the daemon holds", len(subjects))
-	}
-	if got := subjects[0].GetReference(); got != override {
-		t.Errorf("subject reference = %q, want the override %q", got, override)
-	}
-	if got := subjects[0].GetPlatform(); got != "" {
-		t.Errorf("subject platform = %q, want it read from the image rather than assumed", got)
+	if !strings.Contains(err.Error(), absent) {
+		t.Errorf("error %q does not name the override that could not be resolved", err)
 	}
 }
 
 func TestImageScopeReportsFailureRatherThanCoverage(t *testing.T) {
 	t.Setenv(gatewayImageOverrideEnv, "not a valid image reference")
 	builder := newSBOMBuilder(t)
-	subjects, _ := builder.imageSubjects()
 
 	resp, err := builder.SBOM(context.Background(), &builderv0.SBOMRequest{Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE})
 	if err != nil {
@@ -134,7 +142,7 @@ func TestImageScopeReportsFailureRatherThanCoverage(t *testing.T) {
 	if len(resp.GetImages()) != 0 {
 		t.Errorf("a failed scan carried %d inventories", len(resp.GetImages()))
 	}
-	if err := sbom.ValidateCoverage(subjects, resp); err == nil {
+	if err := sbom.ValidateCoverage(testService, nil, resp); err == nil {
 		t.Error("a failed scan must not validate as coverage")
 	}
 }
@@ -142,7 +150,10 @@ func TestImageScopeReportsFailureRatherThanCoverage(t *testing.T) {
 func TestSourceScopeKeepsTheExistingInventory(t *testing.T) {
 	t.Setenv(gatewayImageOverrideEnv, "")
 	builder := newSBOMBuilder(t)
-	subjects, _ := builder.imageSubjects()
+	subjects, err := builder.imageSubjects(context.Background())
+	if err != nil {
+		t.Fatalf("imageSubjects: %v", err)
+	}
 
 	// A cancelled context stops the scan before it reaches the network, which is
 	// enough to tell the two paths apart: the image path attributes even its
@@ -159,7 +170,7 @@ func TestSourceScopeKeepsTheExistingInventory(t *testing.T) {
 	if scope := resp.GetScope(); scope == builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Error("an unspecified scope must not be answered with image evidence")
 	}
-	if err := sbom.ValidateCoverage(subjects, resp); err == nil {
+	if err := sbom.ValidateCoverage(testService, subjects, resp); err == nil {
 		t.Error("a source inventory must not validate as image coverage")
 	}
 }
@@ -190,6 +201,9 @@ func TestReleaseEvidenceComesFromTheSharedCommand(t *testing.T) {
 	if strings.Contains(body, "for platform in") {
 		t.Error("the release workflow loops over its own platform list; it must read imageevidence.Platforms through cmd/image-sbom")
 	}
+	if strings.Contains(workflowBody(t, "publish-gateway-image.yml"), "for platform in") {
+		t.Error("the publish workflow loops over its own platform list; the platforms it builds are read from its build-push step")
+	}
 }
 
 // expectedFromReleasePipeline builds the coverage expectation from the release
@@ -209,7 +223,7 @@ func expectedFromReleasePipeline(t *testing.T, reference string) []*builderv0.Im
 	return expected
 }
 
-// publishedPlatforms reads the platforms the release actually builds, from the
+// publishedPlatforms reads the platforms the pipeline actually builds, from the
 // step that pushes the image rather than from any step that happens to carry a
 // platform list.
 func publishedPlatforms(t *testing.T) []string {
@@ -224,8 +238,8 @@ func publishedPlatforms(t *testing.T) []string {
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal([]byte(releaseWorkflow(t)), &workflow); err != nil {
-		t.Fatalf("parse release workflow: %v", err)
+	if err := yaml.Unmarshal([]byte(workflowBody(t, "publish-gateway-image.yml")), &workflow); err != nil {
+		t.Fatalf("parse publish workflow: %v", err)
 	}
 	var published []string
 	for _, job := range workflow.Jobs {
@@ -241,16 +255,21 @@ func publishedPlatforms(t *testing.T) []string {
 		}
 	}
 	if len(published) == 0 {
-		t.Fatal("the release workflow's build-push step publishes no platforms")
+		t.Fatal("the publish workflow's build-push step publishes no platforms")
 	}
 	return published
 }
 
 func releaseWorkflow(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	return workflowBody(t, "release.yml")
+}
+
+func workflowBody(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(".github", "workflows", name))
 	if err != nil {
-		t.Fatalf("read release workflow: %v", err)
+		t.Fatalf("read %s: %v", name, err)
 	}
 	return string(data)
 }
@@ -299,15 +318,16 @@ func releaseSteps(t *testing.T) []releaseStep {
 // The release used to push the tags consumers resolve and inventory the image
 // afterwards. A failure anywhere in the evidence step then turned the run red
 // with a pullable, uninventoried image already published — and a red run reads
-// as "nothing shipped", so nobody goes looking for it. The build now pushes by
-// digest, and the tags are created only once evidence exists.
+// as "nothing shipped", so nobody goes looking for it. The image is now pushed
+// by digest before the tag exists, and the tags are created only once evidence
+// for that digest exists.
 func TestReleasePublishesTagsOnlyAfterEvidence(t *testing.T) {
 	steps := releaseSteps(t)
 
-	build, evidence, publish := -1, -1, -1
+	evidence, publish := -1, -1
 	for i, step := range steps {
 		if strings.Contains(step.Uses, "docker/build-push-action") {
-			build = i
+			t.Errorf("release step %d builds the gateway image; the digest the agent pins cannot come from the tag that ships it, so the image is published before the tag", i)
 		}
 		if strings.Contains(step.Run, "cmd/image-sbom") {
 			evidence = i
@@ -317,9 +337,6 @@ func TestReleasePublishesTagsOnlyAfterEvidence(t *testing.T) {
 		}
 	}
 
-	if build < 0 {
-		t.Fatal("the release workflow does not build the gateway image")
-	}
 	if evidence < 0 {
 		t.Fatal("the release workflow does not generate image evidence")
 	}
@@ -330,11 +347,39 @@ func TestReleasePublishesTagsOnlyAfterEvidence(t *testing.T) {
 		t.Errorf("release tags are created at step %d, before evidence at step %d: a failed scan would leave a pullable image with no evidence",
 			publish, evidence)
 	}
-	if tags := strings.TrimSpace(steps[build].With.Tags); tags != "" {
-		t.Errorf("the build step publishes tags %q; it must push by digest so no tag resolves until evidence succeeds", tags)
+}
+
+// The gateway image the release tags is the one gateway-image.json records, and
+// the agent runs that digest rather than a tag. Reading it from anywhere else —
+// resolving :latest, or rebuilding — publishes tags for bytes the released
+// agent never names.
+func TestReleaseTagsTheRecordedDigest(t *testing.T) {
+	var publish releaseStep
+	for _, step := range releaseSteps(t) {
+		if strings.Contains(step.Run, "imagetools create") {
+			publish = step
+			break
+		}
 	}
-	if !strings.Contains(steps[build].With.Outputs, "push-by-digest=true") {
-		t.Error("the build step does not push by digest, so its image is resolvable by tag before evidence exists")
+	if publish.Run == "" {
+		t.Fatal("the release workflow never creates the tags consumers resolve")
+	}
+	if !strings.Contains(publish.Run, "$DIGEST") {
+		t.Error("the tag-publishing step does not create its tags from a recorded digest")
+	}
+
+	var locked releaseStep
+	for _, step := range releaseSteps(t) {
+		if strings.Contains(step.Run, "gateway-image.json") {
+			locked = step
+			break
+		}
+	}
+	if locked.Run == "" {
+		t.Fatal("no release step reads the digest from gateway-image.json")
+	}
+	if !strings.Contains(locked.Run, "org.opencontainers.image.version") {
+		t.Error("the release accepts the recorded digest without checking it was built for this version; a lock left unrefreshed publishes the previous release's image under the new tag")
 	}
 }
 
@@ -541,8 +586,8 @@ func TestATagPublishesThroughOneOrderedWorkflow(t *testing.T) {
 	if len(releases) != 1 {
 		t.Fatalf("jobs %v each publish a GitHub release; a tag ships one release", releases)
 	}
-	images := jobsThat(t, jobs, "builds the gateway image", hasStep(func(step releaseStep) bool {
-		return strings.Contains(step.Uses, "docker/build-push-action")
+	images := jobsThat(t, jobs, "publishes the gateway image tags", hasStep(func(step releaseStep) bool {
+		return strings.Contains(step.Run, "imagetools create")
 	}))
 	gates := jobsThat(t, jobs, "runs the test suite", hasStep(func(step releaseStep) bool {
 		return strings.Contains(step.Run, "go test")
@@ -554,7 +599,7 @@ func TestATagPublishesThroughOneOrderedWorkflow(t *testing.T) {
 	// which pair happens to be checked.
 	for _, image := range images {
 		if !runsAfter(jobs, releases[0], image) {
-			t.Errorf("job %q does not wait for %q: the release can ship an agent whose gatewayImage.Tag no registry serves", releases[0], image)
+			t.Errorf("job %q does not wait for %q: the release can ship an agent whose gateway image no registry resolves", releases[0], image)
 		}
 		if !slices.ContainsFunc(gates, func(gate string) bool { return runsAfter(jobs, image, gate) }) {
 			t.Errorf("job %q waits for none of %v: a tag whose tests fail still publishes an image tagged :latest", image, gates)

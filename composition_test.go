@@ -692,12 +692,16 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 	}
 }
 
-// This covers the wiring only. Whether the pushed git tag agrees with the
-// embedded version is a release-time question, guarded in release.yml and
-// asserted by TestReleaseGuardRejectsTagThatDisagreesWithAgentVersion.
-func TestGatewayImageTracksAgentVersion(t *testing.T) {
-	if !strings.HasSuffix(gatewayImage.FullName(), agent.Version) {
-		t.Fatalf("gateway image %q should be tagged with agent version %q", gatewayImage.FullName(), agent.Version)
+// This covers the wiring only. Whether the recorded digest is the image
+// published for the embedded version is a release-time question, guarded in
+// release.yml and asserted by TestReleaseTagsTheRecordedDigest.
+func TestGatewayImageIsPinnedToItsDigest(t *testing.T) {
+	name, digest, found := strings.Cut(gatewayImage.FullName(), "@")
+	if !found || !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("gateway image %q is not pinned to a digest; a tag serves whatever was pushed to it last", gatewayImage.FullName())
+	}
+	if strings.Contains(name, ":") {
+		t.Errorf("gateway image %q carries a tag beside its digest", gatewayImage.FullName())
 	}
 }
 
