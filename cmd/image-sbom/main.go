@@ -28,8 +28,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	subjects, source := imageevidence.Subjects(*service, *image, *local)
-	documents, err := imageevidence.Collect(context.Background(), *out, subjects, source)
+	ctx := context.Background()
+	subjects, err := imageevidence.Subjects(ctx, *service, *image, *local)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "image-sbom: %v\n", err)
+		os.Exit(1)
+	}
+	documents, err := imageevidence.Collect(ctx, *out, subjects)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "image-sbom: %v\n", err)
 		os.Exit(1)

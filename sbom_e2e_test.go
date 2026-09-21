@@ -34,7 +34,28 @@ func TestImageSBOMInventoriesTheGatewayImage(t *testing.T) {
 		t.Skip("syft is required to inventory an image held only by the local daemon")
 	}
 	builder := newSBOMBuilder(t)
-	subjects, _ := builder.imageSubjects()
+	subjects, err := builder.imageSubjects(context.Background())
+	if err != nil {
+		t.Fatalf("imageSubjects: %v", err)
+	}
+
+	// The daemon resolves the override to its own image ID, so that ID is what a
+	// scan of it binds evidence to and what the subject has to name.
+	if len(subjects) != 1 {
+		t.Fatalf("got %d subjects, want the single platform the daemon holds", len(subjects))
+	}
+	if source := sbom.SourceOf(subjects[0]); source != sbom.SourceDockerDaemon {
+		t.Errorf("override source = %v, want the Docker daemon", source)
+	}
+	if got := subjects[0].GetReference(); got != os.Getenv(gatewayImageOverrideEnv) {
+		t.Errorf("subject reference = %q, want the override", got)
+	}
+	if got := subjects[0].GetPlatform(); got != "" {
+		t.Errorf("subject platform = %q, want it read from the image rather than assumed", got)
+	}
+	if err := sbom.RequirePinned(subjects[0]); err != nil {
+		t.Errorf("override subject is not pinned: %v", err)
+	}
 
 	resp, err := builder.SBOM(context.Background(), &builderv0.SBOMRequest{Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE})
 	if err != nil {
@@ -43,7 +64,7 @@ func TestImageSBOMInventoriesTheGatewayImage(t *testing.T) {
 	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_COMPLETE {
 		t.Fatalf("state = %v: %s", state, resp.GetState().GetMessage())
 	}
-	if err := sbom.ValidateCoverage(subjects, resp); err != nil {
+	if err := sbom.ValidateCoverage(testService, subjects, resp); err != nil {
 		t.Fatalf("ValidateCoverage: %v", err)
 	}
 
@@ -51,6 +72,12 @@ func TestImageSBOMInventoriesTheGatewayImage(t *testing.T) {
 		t.Fatalf("got %d inventories for one image", len(resp.GetImages()))
 	}
 	evidence := resp.GetImages()[0]
+
+	// The subject named the local image ID before the scan ran; evidence that
+	// resolved to any other identity describes an image nobody asked for.
+	if got, want := evidence.GetDigest(), subjects[0].GetDigest(); got != want {
+		t.Errorf("evidence is bound to %s, but the subject named %s", got, want)
+	}
 
 	// The digest and platform are read from the image, not echoed from the
 	// request: evidence that names neither cannot be matched to what ships.

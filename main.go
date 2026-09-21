@@ -14,6 +14,8 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -40,13 +42,39 @@ var requirements = builders.NewDependencies(agent.Name,
 	builders.NewDependency("service.codefly.yaml"),
 )
 
-// gatewayImage is the object-storage gateway container the agent runs. It is
-// built and published by this repo's release pipeline; the tag tracks the agent
-// version. SOS_GATEWAY_IMAGE overrides it (tests use a locally-built image).
-var gatewayImage = &resources.DockerImage{
-	Repository: "ghcr.io/codefly-dev",
-	Name:       "service-object-storage",
-	Tag:        agent.Version,
+// gatewayImage is the object-storage gateway container the agent runs, pinned
+// to the digest gateway-image.json records. A tag serves whatever was pushed to
+// it last, so an agent naming one runs — and reports evidence for — an image
+// nobody checked was the one built for this version.
+//
+// The digest is recorded by publishing the image before the release tag exists;
+// release.yml then creates the consumer-resolvable tags from it and refuses a
+// digest that was not built for the version being released.
+// SOS_GATEWAY_IMAGE overrides it (tests use a locally-built image).
+var gatewayImage = shared.Must(parseGatewayImageLock(gatewayImageLockJSON))
+
+// gatewayImageLock is the recorded identity of the published gateway image. It
+// carries no tag: the tag is the agent version, and a second copy of it is one
+// more thing to disagree with agent.codefly.yaml.
+type gatewayImageLock struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
+}
+
+func parseGatewayImageLock(content []byte) (*resources.DockerImage, error) {
+	var lock gatewayImageLock
+	if err := json.Unmarshal(content, &lock); err != nil {
+		return nil, fmt.Errorf("parse gateway image lock: %w", err)
+	}
+	if lock.Name == "" {
+		return nil, fmt.Errorf("gateway image name is required")
+	}
+	algorithm, encoded, found := strings.Cut(lock.Digest, ":")
+	decoded, err := hex.DecodeString(encoded)
+	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
+		return nil, fmt.Errorf("gateway image digest %q must be a sha256 digest", lock.Digest)
+	}
+	return &resources.DockerImage{Name: lock.Name, Digest: lock.Digest}, nil
 }
 
 // gatewayImageOverrideEnv names a locally built gateway image to run instead of
@@ -256,6 +284,9 @@ func main() {
 
 //go:embed agent.codefly.yaml
 var infoFS embed.FS
+
+//go:embed gateway-image.json
+var gatewayImageLockJSON []byte
 
 //go:embed templates/agent
 var readmeFS embed.FS

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -28,17 +29,28 @@ var Platforms = []string{"linux/amd64", "linux/arm64"}
 const Role = "runtime"
 
 // Subjects describes the images the service ships. A published image is
-// multi-architecture and contributes one subject per shipped platform. A local
-// image was built and never pushed, so the daemon holds exactly one platform of
-// it and the subject names none: the platform is read back from the image
-// rather than asserted by the caller.
-func Subjects(service, reference string, local bool) ([]*builderv0.ImageSubject, sbom.ImageSource) {
+// multi-architecture and contributes one subject per shipped platform, and the
+// digest-pinned reference it is named by is what binds each scan to the image
+// that was built. A local image was built and never pushed, so the daemon holds
+// exactly one platform of it and the subject names none: the platform is read
+// back from the image rather than asserted by the caller.
+//
+// A local subject carries the image ID instead, because the daemon resolves
+// whatever reference it is handed to that ID: a pin sitting only in the
+// reference is not the identity such a scan binds evidence to.
+func Subjects(ctx context.Context, service, reference string, local bool) ([]*builderv0.ImageSubject, error) {
 	if local {
+		id, err := localImageID(ctx, reference)
+		if err != nil {
+			return nil, err
+		}
 		return []*builderv0.ImageSubject{{
 			Reference: reference,
+			Digest:    id,
 			Role:      Role,
 			Service:   service,
-		}}, sbom.SourceDockerDaemon
+			Source:    builderv0.ImageSourceKind_IMAGE_SOURCE_KIND_DOCKER_DAEMON,
+		}}, nil
 	}
 	subjects := make([]*builderv0.ImageSubject, 0, len(Platforms))
 	for _, platform := range Platforms {
@@ -47,9 +59,28 @@ func Subjects(service, reference string, local bool) ([]*builderv0.ImageSubject,
 			Platform:  platform,
 			Role:      Role,
 			Service:   service,
+			Source:    builderv0.ImageSourceKind_IMAGE_SOURCE_KIND_REGISTRY,
 		})
 	}
-	return subjects, sbom.SourceRegistry
+	return subjects, nil
+}
+
+// localImageID reports the identity the Docker daemon holds an image under.
+func localImageID(ctx context.Context, reference string) (string, error) {
+	command := exec.CommandContext(ctx, "docker", "image", "inspect", reference, "--format", "{{.Id}}")
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	out, err := command.Output()
+	if err != nil {
+		// An absent image, an absent daemon and an absent docker are different
+		// things to go fix, and only docker's own message tells them apart.
+		return "", fmt.Errorf("resolve local image %s: %w: %s", reference, err, strings.TrimSpace(stderr.String()))
+	}
+	id := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(id, "sha256:") {
+		return "", fmt.Errorf("local image %s reports id %q, which is not a sha256 digest", reference, id)
+	}
+	return id, nil
 }
 
 // Document is one platform's inventory, written to disk and named by the digest
@@ -70,7 +101,7 @@ type Document struct {
 // A single failed scan fails the whole call: publishing evidence for some
 // platforms while silently omitting others is the false coverage claim this
 // evidence exists to prevent.
-func Collect(ctx context.Context, dir string, subjects []*builderv0.ImageSubject, source sbom.ImageSource) ([]Document, error) {
+func Collect(ctx context.Context, dir string, subjects []*builderv0.ImageSubject) ([]Document, error) {
 	if len(subjects) == 0 {
 		return nil, fmt.Errorf("no image subjects to inventory")
 	}
@@ -82,7 +113,7 @@ func Collect(ctx context.Context, dir string, subjects []*builderv0.ImageSubject
 		result, err := sbom.Image(ctx, sbom.ImageRequest{
 			Reference: subject.GetReference(),
 			Platform:  subject.GetPlatform(),
-			Source:    source,
+			Source:    sbom.SourceOf(subject),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("inventory %s: %w", describe(subject), err)
