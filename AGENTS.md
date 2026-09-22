@@ -90,6 +90,13 @@ time and the evidence describes an image the agent never runs. The shipped
 platform list lives in `internal/imageevidence` and a test asserts it against
 the release workflow.
 
+Prepare the gateway before publishing the agent: use `codefly publish --dry-run`
+to determine the next version, then dispatch `publish-gateway-image.yml` with
+that explicit `version` (without `v`). Adopt its `gateway-image-lock-<version>`
+artifact as `gateway-image.json` in a reviewed PR. Only then run normal
+`codefly publish`; the tag gate still checks the image label against the bumped
+agent version and refuses a stale lock.
+
 ## How to behave when something does not work
 
 1. **Never hack. Give the best fix, even when it spans repos.** A fix that
