@@ -1,5 +1,12 @@
 version: 2
 
+sboms:
+  - id: archives
+    artifacts: archive
+    documents:
+      - "${artifact}.sbom.json"
+    disable: false
+
 project_name: service-object-storage
 
 # The release asset is the codefly agent binary (repo root main), which makes

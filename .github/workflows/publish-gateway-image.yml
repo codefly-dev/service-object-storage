@@ -11,6 +11,11 @@ name: publish-gateway-image
 # image that was actually built for its version.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Upcoming stable agent version reported by codefly publish --dry-run (without v)
+        required: true
+        type: string
 
 env:
   IMAGE: ghcr.io/codefly-dev/service-object-storage
@@ -29,11 +34,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Read the agent version
+      - name: Validate the upcoming agent version
         id: version
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          echo "version=$(awk '$1 == "version:" {print $2}' agent.codefly.yaml)" >> "$GITHUB_OUTPUT"
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "version must be a stable semantic version without a v prefix" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       # The version label is how the release tells this image apart from the one
       # published for an earlier version: both are digests in the same
       # repository, and a lock left unrefreshed would otherwise publish the
@@ -50,10 +61,17 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
+          mkdir -p release-evidence
+          jq -n --arg name "$IMAGE" --arg digest "$DIGEST" '{name: $name, digest: $digest}' > release-evidence/gateway-image.json
           {
             echo 'Commit this as `gateway-image.json`, then tag the release:'
             echo
             echo '```json'
-            jq -n --arg name "$IMAGE" --arg digest "$DIGEST" '{name: $name, digest: $digest}'
+            cat release-evidence/gateway-image.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gateway-image-lock-${{ steps.version.outputs.version }}
+          path: release-evidence/gateway-image.json
+          if-no-files-found: error
