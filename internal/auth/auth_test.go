@@ -2,6 +2,8 @@ package auth_test
 
 import (
 	"context"
+	grpchealth "google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"io"
 	"net"
 	"testing"
@@ -108,6 +110,7 @@ func startGateway(t *testing.T) string {
 		grpc.ChainStreamInterceptor(auth.StreamInterceptor(serverToken)),
 	)
 	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
+	healthv1.RegisterHealthServer(s, grpchealth.NewServer())
 	go func() { _ = s.Serve(lis) }()
 	t.Cleanup(func() { s.Stop(); hub.Close(); _ = be.Close() })
 	return lis.Addr().String()
@@ -195,4 +198,29 @@ func withMetadata(key, value string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		return invoker(metadata.AppendToOutgoingContext(ctx, key, value), method, req, reply, cc, opts...)
 	}
+}
+
+// TestHealthNeedsNoToken pins the one exemption: the standard gRPC health
+// service answers a peer that presents no token. A readiness probe — the
+// Codefly CLI's, a load balancer's, a mesh's — carries none, and a guarded
+// health service made the gateway look permanently unready to all of them
+// (document-store's integration graph never came up under Codefly 0.1.161,
+// which probes grpc-health before it routes). Every data RPC stays refused;
+// TestUnauthenticatedPeerIsRefused holds that side.
+func TestHealthNeedsNoToken(t *testing.T) {
+	conn, err := grpc.NewClient(startGateway(t), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := healthv1.NewHealthClient(conn).Check(ctx, &healthv1.HealthCheckRequest{})
+	require.NoError(t, err)
+	require.Equal(t, healthv1.HealthCheckResponse_SERVING, resp.GetStatus())
+
+	stream, err := healthv1.NewHealthClient(conn).Watch(ctx, &healthv1.HealthCheckRequest{})
+	require.NoError(t, err)
+	first, err := stream.Recv()
+	require.NoError(t, err)
+	require.Equal(t, healthv1.HealthCheckResponse_SERVING, first.GetStatus())
 }

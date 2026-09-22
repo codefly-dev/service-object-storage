@@ -9,6 +9,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -23,21 +24,37 @@ const MetadataKey = "x-codefly-token"
 
 // UnaryInterceptor rejects every unary call that does not present token.
 func UnaryInterceptor(token string) grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		if err := verify(ctx, token); err != nil {
-			return nil, err
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if !IsHealthMethod(info.FullMethod) {
+			if err := verify(ctx, token); err != nil {
+				return nil, err
+			}
 		}
 		return handler(ctx, req)
 	}
+}
+
+// HealthServicePrefix is the standard gRPC health service. Its Check and Watch
+// carry no data and no authority: a readiness probe — the Codefly CLI's, a
+// load balancer's, a mesh's — presents no token, so a guarded health service
+// makes the gateway look permanently unready to everything that would route to
+// it. Every other method stays behind the token.
+const HealthServicePrefix = "/grpc.health.v1.Health/"
+
+// IsHealthMethod reports whether fullMethod belongs to the gRPC health service.
+func IsHealthMethod(fullMethod string) bool {
+	return strings.HasPrefix(fullMethod, HealthServicePrefix)
 }
 
 // StreamInterceptor rejects every streaming call that does not present token.
 // gRPC runs it before the handler observes a single frame, so an unauthorized
 // Put is refused at stream open rather than after its header is accepted.
 func StreamInterceptor(token string) grpc.StreamServerInterceptor {
-	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		if err := verify(ss.Context(), token); err != nil {
-			return err
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if !IsHealthMethod(info.FullMethod) {
+			if err := verify(ss.Context(), token); err != nil {
+				return err
+			}
 		}
 		return handler(srv, ss)
 	}
