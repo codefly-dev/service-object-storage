@@ -2,6 +2,9 @@ publisher: codefly.dev
 kind: codefly:service
 name: object-storage
 version: 0.0.5
+source:
+  directory: .
+  agent: codefly.dev/go:0.0.56
 release:
   owner: workflow
   workflow: release.yml
