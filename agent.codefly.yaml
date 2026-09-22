@@ -1,7 +1,7 @@
 publisher: codefly.dev
 kind: codefly:service
 name: object-storage
-version: 0.0.4
+version: 0.0.5
 release:
   owner: workflow
   workflow: release.yml
