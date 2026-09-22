@@ -1,7 +1,7 @@
 publisher: codefly.dev
 kind: codefly:service
 name: object-storage
-version: 0.0.6
+version: 0.0.7
 source:
   directory: .
   agent: codefly.dev/go:0.0.56
