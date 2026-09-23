@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
+	"github.com/codefly-dev/core/standards"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
@@ -347,15 +349,15 @@ func TestDeploymentTemplates(t *testing.T) {
 		params           deploymentTemplateParameters
 		wantAzureAccount string
 	}{
-		{"s3", deploymentTemplateParameters{Backend: "s3", Bucket: "documents", Region: "us-east-1"}, ""},
+		{"s3", deploymentTemplateParameters{Backend: "s3", Bucket: "documents", Region: "us-east-1", ServicePort: gatewayContainerPort}, ""},
 		// Azure with no account name emits no SOS_AZURE_ACCOUNT env.
-		{"azure", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1"}, ""},
+		{"azure", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1", ServicePort: gatewayContainerPort}, ""},
 		// Azure with an account name emits the non-sensitive SOS_AZURE_ACCOUNT.
-		{"azure-account", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1", AzureAccount: "acmestorage"}, "acmestorage"},
+		{"azure-account", deploymentTemplateParameters{Backend: "azure", Bucket: "documents", Region: "us-east-1", AzureAccount: "acmestorage", ServicePort: gatewayContainerPort}, "acmestorage"},
 		// GCS authenticates via Workload Identity — no credentials-file env, and
 		// crucially no required secret mount that would wedge the pod when the
 		// operator runs keyless.
-		{"gcs", deploymentTemplateParameters{Backend: "gcs", Bucket: "documents", Region: "us-east-1"}, ""},
+		{"gcs", deploymentTemplateParameters{Backend: "gcs", Bucket: "documents", Region: "us-east-1", ServicePort: gatewayContainerPort}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -978,4 +980,242 @@ func TestRollbackInitReleasesWhatInitOwns(t *testing.T) {
 	require.Nil(t, rt.minioEnv)
 	_, statErr := os.Stat(projected)
 	require.True(t, os.IsNotExist(statErr))
+}
+
+// restrictedDeployRequest is deployRequest for the restricted (GitOps) output
+// profile a hosted cell renders with.
+func restrictedDeployRequest(destination, namespace string, values map[string]string) *builderv0.DeploymentRequest {
+	req := deployRequest(destination, values)
+	k := req.GetDeployment().GetKubernetes()
+	k.Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1
+	k.Namespace = namespace
+	return req
+}
+
+// TestDeployRestrictedKeylessGCS renders the configuration a hosted GCP cell
+// supplies — SOS_BACKEND=gcs, the provisioned bucket, a prefix — in the
+// restricted profile, and pins what infra has to grant against: the pod runs
+// under its own ServiceAccount, named after the service, in the target
+// namespace, so a bucket IAM member
+// serviceAccount:<project>.svc.id.goog[<namespace>/object-storage] authorizes
+// exactly this workload and nothing else.
+func TestDeployRestrictedKeylessGCS(t *testing.T) {
+	ctx := context.Background()
+	builder := newDeployBuilder(t, ctx)
+	destination := t.TempDir()
+
+	resp, err := builder.Deploy(ctx, restrictedDeployRequest(destination, "documents", map[string]string{
+		"SOS_BACKEND": "gcs",
+		"SOS_BUCKET":  "example-cell-platform",
+		"SOS_PREFIX":  "documents",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+
+	files := map[string]string{}
+	require.NoError(t, filepath.WalkDir(destination, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(destination, path)
+		files[rel] = string(data)
+		return nil
+	}))
+
+	// No Namespace and no Secret in a restricted tree; nothing secret-shaped.
+	for rel, body := range files {
+		require.NotContains(t, body, "kind: Namespace", rel)
+		require.NotContains(t, body, "kind: Secret", rel)
+		require.NotContains(t, body, "SOS_GCS_CREDENTIALS_FILE", rel)
+		require.NotContains(t, body, "SOS_ACCESS_KEY", rel)
+		require.NotContains(t, body, "SOS_SECRET_KEY", rel)
+		require.NotContains(t, body, "envFrom", rel)
+	}
+
+	// The ServiceAccount the store grants on.
+	saBody, ok := files[filepath.Join("base", "serviceaccount.yaml")]
+	require.True(t, ok, "restricted render must carry the workload's ServiceAccount; files: %v", slices.Sorted(maps.Keys(files)))
+	var sa struct {
+		APIVersion string `yaml:"apiVersion"`
+		Kind       string `yaml:"kind"`
+		Metadata   struct {
+			Name        string            `yaml:"name"`
+			Namespace   string            `yaml:"namespace"`
+			Annotations map[string]string `yaml:"annotations"`
+		} `yaml:"metadata"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(saBody), &sa))
+	require.Equal(t, "v1", sa.APIVersion)
+	require.Equal(t, "ServiceAccount", sa.Kind)
+	require.Equal(t, "object-storage", sa.Metadata.Name)
+	require.Equal(t, "documents", sa.Metadata.Namespace)
+	require.Empty(t, sa.Metadata.Annotations, "a direct Workload Identity grant needs no GSA annotation")
+	require.Contains(t, files[filepath.Join("base", "kustomization.yaml")], "serviceaccount.yaml")
+
+	// The Deployment binds it, runs as a numeric non-root uid, and names the
+	// cell's store through configuration only.
+	var deployment struct {
+		Metadata struct {
+			Namespace string `yaml:"namespace"`
+		} `yaml:"metadata"`
+		Spec struct {
+			Template struct {
+				Spec struct {
+					ServiceAccountName string `yaml:"serviceAccountName"`
+					SecurityContext    struct {
+						RunAsNonRoot bool  `yaml:"runAsNonRoot"`
+						RunAsUser    int64 `yaml:"runAsUser"`
+					} `yaml:"securityContext"`
+					Containers []struct {
+						Env []struct {
+							Name  string `yaml:"name"`
+							Value string `yaml:"value"`
+						} `yaml:"env"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	body := files[filepath.Join("base", "deployment.yaml")]
+	require.NoError(t, yaml.Unmarshal([]byte(body), &deployment))
+	require.Equal(t, "documents", deployment.Metadata.Namespace)
+	pod := deployment.Spec.Template.Spec
+	require.Equal(t, "object-storage", pod.ServiceAccountName)
+	require.True(t, pod.SecurityContext.RunAsNonRoot)
+	require.Positive(t, pod.SecurityContext.RunAsUser)
+	env := map[string]string{}
+	for _, e := range pod.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	require.Equal(t, "gcs", env["SOS_BACKEND"])
+	require.Equal(t, "example-cell-platform", env["SOS_BUCKET"])
+	require.Equal(t, "documents", env["SOS_PREFIX"])
+	require.NotContains(t, env, "SOS_ENDPOINT")
+	require.Equal(t, "object-storage", env["CODEFLY__SERVICE"], "the CLI binds environment configuration onto the container declaring this")
+	requireProbeSemantics(t, body)
+}
+
+// TestDeployRendersSpecDefaultMinIOForBinding pins why a spec left on the
+// local default (backend: minio) with no endpoint is NOT refused at render: the
+// environment's service configuration is bound onto the container after the
+// render, replacing the SOS_* literals by name on the container that declares
+// CODEFLY__SERVICE. Refusing here would make that binding unreachable; the
+// gateway's own startup check is what refuses an incomplete backend.
+func TestDeployRendersSpecDefaultMinIOForBinding(t *testing.T) {
+	ctx := context.Background()
+	builder := newDeployBuilder(t, ctx)
+	builder.Settings.Backend = "minio" // the composed service spec
+	destination := t.TempDir()
+	resp, err := builder.Deploy(ctx, restrictedDeployRequest(destination, "documents", map[string]string{}))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	env := containerEnv(t, destination)
+	require.Equal(t, "object-storage", env["CODEFLY__SERVICE"])
+	require.Equal(t, "minio", env["SOS_BACKEND"])
+}
+
+// containerEnv reads the gateway container's literal environment from a render.
+func containerEnv(t *testing.T, destination string) map[string]string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(destination, "base", "deployment.yaml"))
+	require.NoError(t, err)
+	var deployment struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Env []struct {
+							Name  string `yaml:"name"`
+							Value string `yaml:"value"`
+						} `yaml:"env"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	require.NoError(t, yaml.Unmarshal(body, &deployment))
+	require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
+	env := map[string]string{}
+	for _, e := range deployment.Spec.Template.Spec.Containers[0].Env {
+		_, repeated := env[e.Name]
+		require.False(t, repeated, "env %s rendered twice; the CLI binding refuses a repeated key", e.Name)
+		env[e.Name] = e.Value
+	}
+	return env
+}
+
+// TestDeployServicePublishesAllocatedPort: core allocates the gRPC endpoint an
+// in-cluster port and hands consumers that port, so the Service must publish it
+// and forward it to the container's listener.
+func TestDeployServicePublishesAllocatedPort(t *testing.T) {
+	ctx := context.Background()
+	builder := newDeployBuilder(t, ctx)
+	builder.GrpcEndpoint = &basev0.Endpoint{Name: "grpc", Module: "module", Service: "object-storage", Api: standards.GRPC}
+	destination := t.TempDir()
+	req := restrictedDeployRequest(destination, "documents", map[string]string{"SOS_BACKEND": "gcs", "SOS_BUCKET": "b"})
+	instance := resources.NewNetworkInstance("object-storage.documents.svc.cluster.local", 9090)
+	instance.Access = resources.NewContainerNetworkAccess()
+	req.NetworkMappings = []*basev0.NetworkMapping{
+		{Endpoint: builder.GrpcEndpoint, Instances: []*basev0.NetworkInstance{instance}},
+		// Another service's endpoint is never published by this Service.
+		{
+			Endpoint:  &basev0.Endpoint{Name: "grpc", Module: "module", Service: "other", Api: standards.GRPC},
+			Instances: []*basev0.NetworkInstance{instance},
+		},
+	}
+	resp, err := builder.Deploy(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	service, err := os.ReadFile(filepath.Join(destination, "base", "service.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(service), "    - name: grpc\n      port: 9090\n      targetPort: 9464\n")
+}
+
+// Without a mapping for the endpoint the Service keeps publishing the container
+// port, exactly as it rendered before the port was derived.
+func TestDeployServiceFallsBackToContainerPort(t *testing.T) {
+	ctx := context.Background()
+	builder := newDeployBuilder(t, ctx)
+	destination := t.TempDir()
+	resp, err := builder.Deploy(ctx, deployRequest(destination, map[string]string{"SOS_BACKEND": "s3"}))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	service, err := os.ReadFile(filepath.Join(destination, "base", "service.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(service), "    - name: grpc\n      port: 9464\n      targetPort: 9464\n")
+}
+
+// TestDeployMinIOWithEndpointRendersIt covers "minio against an external
+// endpoint", which the builder always claimed to honor but never rendered the
+// address for.
+func TestDeployMinIOWithEndpointRendersIt(t *testing.T) {
+	ctx := context.Background()
+	builder := newDeployBuilder(t, ctx)
+	destination := t.TempDir()
+	resp, err := builder.Deploy(ctx, deployRequest(destination, map[string]string{
+		"SOS_BACKEND":  "minio",
+		"SOS_ENDPOINT": "http://minio.storage.svc:9000",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	body, err := os.ReadFile(filepath.Join(destination, "base", "deployment.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "name: SOS_ENDPOINT")
+	require.Contains(t, string(body), `value: "http://minio.storage.svc:9000"`)
+	require.NotContains(t, string(body), "SOS_PREFIX")
+}
+
+func TestDeployRejectsUnusablePrefix(t *testing.T) {
+	ctx := context.Background()
+	builder := newDeployBuilder(t, ctx)
+	resp, err := builder.Deploy(ctx, deployRequest(t.TempDir(), map[string]string{
+		"SOS_BACKEND": "gcs", "SOS_BUCKET": "b", "SOS_PREFIX": "a/../b",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_ERROR, resp.GetState().GetState())
+	require.Contains(t, resp.GetState().GetMessage(), "SOS_PREFIX")
 }

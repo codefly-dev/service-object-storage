@@ -13,6 +13,7 @@ import (
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 
+	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/imageevidence"
 )
 
@@ -27,6 +28,16 @@ type deploymentTemplateParameters struct {
 	Backend string
 	Bucket  string
 	Region  string
+	// Prefix confines the gateway to one key prefix inside Bucket. Empty
+	// renders no SOS_PREFIX: the gateway then serves the whole bucket.
+	Prefix string
+	// Endpoint is the store's address for minio (required) and S3-compatible
+	// stores (optional). It is an address, not a credential.
+	Endpoint string
+	// ServicePort is the port the Kubernetes Service publishes: the in-cluster
+	// port core allocated to the gRPC endpoint, the one every consumer is told
+	// to dial. It forwards to the container's gatewayContainerPort.
+	ServicePort uint32
 	// AzureAccount is the Azure Blob storage account name. It is non-sensitive
 	// (it forms the public blob endpoint host); the shared key that pairs with
 	// it is sensitive and travels via the Secret, not the manifest.
@@ -125,8 +136,15 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		Backend:      s.conf.backend,
 		Bucket:       s.conf.bucket, // LoadConfiguration already defaults bucket/region.
 		Region:       s.conf.region,
+		Prefix:       s.conf.prefix,
+		Endpoint:     s.conf.endpoint,
 		AzureAccount: s.conf.azureAccount,
 	}
+	servicePort, err := s.servicePort(ctx, req.GetNetworkMappings())
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+	parameters.ServicePort = servicePort
 	// Local runs default to MinIO; a deployment that names no backend targets
 	// S3. An explicit backend (including minio-against-an-endpoint) is honored.
 	if parameters.Backend == "" {
@@ -143,6 +161,22 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 	if parameters.Backend == "azure" && parameters.AzureAccount == "" {
 		return s.Builder.DeployError(fmt.Errorf("backend azure requires SOS_AZURE_ACCOUNT (the storage account name)"))
+	}
+	// A deployment never starts MinIO — only the local Runtime does — so minio
+	// here means "a MinIO someone else runs", and the gateway needs its address.
+	// This is NOT rejected at render time: the environment's service
+	// configuration is bound onto the rendered container after this render (the
+	// CLI replaces SOS_* literals by name on the container that declares
+	// CODEFLY__SERVICE), so a spec still on the local default (backend: minio) is
+	// the normal input for a cell that selects its store that way. What this
+	// render cannot see, the gateway refuses at startup with the remedy (see
+	// internal/config checkBackendIsComplete) instead of the MinIO SDK's
+	// "Endpoint:  does not follow ip address or domain name standards".
+	if parameters.Backend == "minio" && parameters.Endpoint == "" {
+		s.Wool.Warn("rendering backend minio with no SOS_ENDPOINT: the gateway will refuse to start unless the environment's service configuration selects a store (e.g. SOS_BACKEND=gcs, SOS_BUCKET)")
+	}
+	if _, err := backend.NormalizePrefix(parameters.Prefix); err != nil {
+		return s.Builder.DeployError(err)
 	}
 	// A key-file path cannot be honored by this deployment: nothing projects the
 	// key into the pod. The configuration channel carries the path, never the
@@ -179,7 +213,55 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
 		Parameters:           parameters,
+		PodOverlay:           workloadPodOverlay(),
 	})
+}
+
+// servicePort is the port the rendered Service publishes for the gRPC endpoint:
+// the in-cluster port core allocated to it, which is what every consumer is
+// given to dial. With no container mapping for this endpoint in the request (a
+// render with no network input) it keeps the container port, so that render is
+// unchanged.
+func (s *Builder) servicePort(ctx context.Context, mappings []*v0.NetworkMapping) (uint32, error) {
+	if s.GrpcEndpoint != nil {
+		for _, mapping := range mappings {
+			endpoint := mapping.GetEndpoint()
+			if endpoint.GetApi() != standards.GRPC ||
+				endpoint.GetModule() != s.GrpcEndpoint.GetModule() ||
+				endpoint.GetService() != s.GrpcEndpoint.GetService() ||
+				endpoint.GetName() != s.GrpcEndpoint.GetName() {
+				continue
+			}
+			// An external endpoint is reached through its DNS entry, never this
+			// Service, and core gives it no container view.
+			if resources.IsExternalEndpoint(endpoint) {
+				continue
+			}
+			instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, mappings, endpoint, resources.NewContainerNetworkAccess())
+			if err != nil {
+				return 0, err
+			}
+			return instance.GetPort(), nil
+		}
+	}
+	return gatewayContainerPort, nil
+}
+
+// workloadPodOverlay gives the gateway its own Kubernetes ServiceAccount, named
+// after the service (core defaults an unnamed account to the service's DNS
+// name) and rendered in the namespace the deployment targets. Running under the
+// namespace default would make the gateway's cloud identity the one every other
+// workload in that namespace shares: keyless stores (GKE Workload Identity, and
+// the AKS/EKS equivalents) grant on the Kubernetes principal, so a grant to
+// `default` is a grant to all of them. With a dedicated account the store's IAM
+// can name exactly this workload — on GKE the member
+// serviceAccount:<project>.svc.id.goog[<namespace>/<service name>].
+//
+// The account carries no annotations: a direct Workload Identity grant needs
+// none. An environment that declares a runtime identity for this service has
+// the CLI project it onto this same account (same name), merging annotations.
+func workloadPodOverlay() *services.PodTemplateOverlay {
+	return &services.PodTemplateOverlay{ServiceAccount: &services.WorkloadServiceAccount{}}
 }
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {

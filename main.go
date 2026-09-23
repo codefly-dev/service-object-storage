@@ -121,6 +121,10 @@ type Settings struct {
 	Bucket string `yaml:"bucket"`
 	// Region is the backend region (S3/GCS). Defaults to us-east-1.
 	Region string `yaml:"region"`
+	// Prefix confines the gateway to one key prefix inside Bucket, so a
+	// consumer can be handed a shared, provisioned bucket. Empty is the whole
+	// bucket.
+	Prefix string `yaml:"prefix"`
 }
 
 // resolved holds the effective configuration after defaults and runtime
@@ -129,6 +133,7 @@ type resolved struct {
 	backend   string
 	bucket    string
 	region    string
+	prefix    string
 	endpoint  string
 	accessKey string
 	secretKey string
@@ -204,6 +209,7 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 		backend: s.Backend,
 		bucket:  s.Bucket,
 		region:  s.Region,
+		prefix:  s.Prefix,
 	}
 	if r.bucket == "" {
 		r.bucket = "documents"
@@ -216,6 +222,7 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 			"SOS_BACKEND":              &r.backend,
 			"SOS_BUCKET":               &r.bucket,
 			"SOS_REGION":               &r.region,
+			"SOS_PREFIX":               &r.prefix,
 			"SOS_ENDPOINT":             &r.endpoint,
 			"SOS_ACCESS_KEY":           &r.accessKey,
 			"SOS_SECRET_KEY":           &r.secretKey,
@@ -239,6 +246,8 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 	// the Builder's rejection message; a whitespace-only value would read as a
 	// configured path while naming nothing.
 	r.gcsCredentialsFile = strings.TrimSpace(r.gcsCredentialsFile)
+	r.endpoint = strings.TrimSpace(r.endpoint)
+	r.prefix = strings.TrimSpace(r.prefix)
 	s.conf = r
 	return nil
 }

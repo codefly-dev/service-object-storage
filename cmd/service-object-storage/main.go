@@ -108,8 +108,8 @@ func run() error {
 		gracefulStop(grpcServer, shutdownGrace)
 	}()
 
-	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s auth=%s)",
-		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, authMode)
+	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s prefix=%q auth=%s)",
+		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, cfg.Backend.Prefix, authMode)
 	return grpcServer.Serve(lis)
 }
 
