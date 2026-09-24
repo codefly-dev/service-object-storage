@@ -151,9 +151,12 @@ the real backend before a deployment relies on it.
 ## Durable local MinIO
 
 Local MinIO uses an explicitly owned data directory that survives container
-replacement, with custody checks before recreation. A new service requires
-`SOS_LOCAL_MINIO_INITIALIZE=true` on the agent for its first run; unset it
-afterward. Existing anonymous-volume stores fail closed and require recovery.
+replacement, with custody checks before recreation. A new store initializes
+on its first run with no opt-in when its custody directory is absent or empty —
+there is nothing on disk to lose, which is also what a CI run in a throwaway
+Codefly home sees. A directory that holds anything but has no custody record, a
+live MinIO container without one, and existing anonymous-volume stores fail
+closed and require recovery. `SOS_LOCAL_MINIO_INITIALIZE` is no longer read.
 See [local custody and retained-volume recovery](docs/local-minio-recovery.md)
 for ownership, paths, lifecycle behavior and recovery instructions.
 

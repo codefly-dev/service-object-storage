@@ -47,12 +47,17 @@ external deletion of individual objects remains an operator recovery concern.
 
 ## Provisioning a genuinely new store
 
-Only after confirming that this is a new service/scope with no data to recover,
-set `SOS_LOCAL_MINIO_INITIALIZE=true` **on the agent process** for its first run.
-Unset it afterward. This is a bootstrap switch, not a gateway configuration or
-an adoption switch. It cannot override an existing directory, legacy container,
-or custody mismatch. A verified pending bootstrap resumes after pre-container/startup failure, even
-with the switch unset. Incomplete or corrupt custody evidence still fails closed;
+A store bootstraps on its own when its custody directory is absent or an empty,
+non-symlinked directory: nothing is on disk, so there is nothing to lose. That
+covers a developer's first run and an agent CI run in a freshly created Codefly
+home alike, and needs no switch (`SOS_LOCAL_MINIO_INITIALIZE` is no longer read).
+Bootstrap never adopts anything: a custody directory holding any entry without a
+`custody.json`, a symlinked custody path, a live MinIO container with no record,
+a legacy location, or a custody mismatch all fail closed. A verified pending
+bootstrap resumes after pre-container/startup failure. If you moved
+`CODEFLY_HOME` or changed the naming scope, a first run under the new location
+creates a new empty store rather than finding the old one: point the agent back
+at the original location instead. Incomplete or corrupt custody evidence still fails closed;
 preserve it for recovery. A committed store never recreates a missing bucket.
 Existing local services need explicit recovery before adopting this release.
 
@@ -73,9 +78,9 @@ No recovery of the Wiki's retained objects is claimed by this PR.
    recovered from a consistent backup. Do not stop a shared container as a
    debugging shortcut. Retain the original volume and all keys and backups.
 2. Create a **separate recovery naming scope** and provision a disposable empty
-   candidate with the same bucket and compatible MinIO image using the bootstrap
-   switch. Record the candidate custody directory from its `/data` mount. Unset
-   the switch, then Destroy **only the candidate** so no process writes it. Keep
+   candidate with the same bucket and compatible MinIO image (a new scope
+   bootstraps automatically). Record the candidate custody directory from its
+   `/data` mount, then Destroy **only the candidate** so no process writes it. Keep
    its `custody.json` and matching data marker. Do not change document records,
    document versions, grants, tokens or Vault keys to make storage pass.
 3. Create an empty staging directory alongside the candidate's `data` directory.
@@ -105,7 +110,7 @@ No recovery of the Wiki's retained objects is claimed by this PR.
    rename staging to `data` while the candidate remains stopped. Keep the
    `custody.json` and marker pair from the candidate together; do not hand-edit
    IDs or copy another service's custody record to suppress an error.
-4. Start only the recovered candidate, with bootstrap disabled. Through its
+4. Start only the recovered candidate (its custody record exists, so no bootstrap runs). Through its
    authenticated storage API, compare exact object keys, bytes, metadata and
    available version IDs with the source inventory and expected SQL references.
    Repeat after Stop/Start and configuration recreation. Preserve the previous

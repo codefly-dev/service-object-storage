@@ -128,7 +128,6 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	rt = NewRuntime()
 	_, err = rt.Load(ctx, &runtimev0.LoadRequest{Identity: shared.Must(previous.Identity.Proto()), Environment: previous.Environment, DisableCatch: true})
 	require.NoError(t, err)
-	t.Setenv("SOS_LOCAL_MINIO_INITIALIZE", "false")
 	init()
 	secondID, err := rt.minioEnv.ContainerID()
 	require.NoError(t, err)
@@ -220,7 +219,6 @@ func TestMinIOMissingBucketFailsClosed(t *testing.T) {
 	require.NoError(t, cl.RemoveBucket(ctx, rt.conf.bucket))
 	previous := rt.minioEnv
 	defer func() { require.NoError(t, previous.Shutdown(context.Background())) }()
-	t.Setenv("SOS_LOCAL_MINIO_INITIALIZE", "false")
 	err = rt.startLocalMinIO(ctx)
 	require.ErrorContains(t, err, "refusing to create an empty replacement")
 	// Init keys off this sentinel to skip rollbackInit; without it the refusal
@@ -334,6 +332,11 @@ func TestMinIORejectsCollidingContainerIdentity(t *testing.T) {
 	require.NoError(t, first.ensureBucket(ctx), "incumbent must still be usable")
 	require.NoError(t, exec.Command("docker", "inspect", firstID).Run())
 	require.NoError(t, first.teardown(ctx))
-	t.Setenv("SOS_LOCAL_MINIO_INITIALIZE", "false")
-	require.ErrorContains(t, second.startLocalMinIO(ctx), "missing custody record")
+	// With the incumbent gone, the second identity provisions its own store
+	// under its own custody directory; it never touches the first one's data.
+	defer func() { require.NoError(t, second.teardown(context.Background())) }()
+	require.NoError(t, second.startLocalMinIO(ctx))
+	require.NotEqual(t, minioCustodyDir(first.minioOwner()), second.minioCustodyRoot)
+	_, err = os.Stat(filepath.Join(minioCustodyDir(first.minioOwner()), "custody.json"))
+	require.NoError(t, err, "the incumbent's custody must survive")
 }
