@@ -376,7 +376,7 @@ go vet ./...
 go test ./...            # unit tests (mem backend + miniredis)
 
 # integration against real MinIO
-docker run -d --name m -p 9000:9000 quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+docker run -d --name m -p 9000:9000 ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
 MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
   go test -tags integration ./internal/integration/...

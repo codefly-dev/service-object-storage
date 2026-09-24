@@ -20,7 +20,7 @@ tiers exist, and only the tier you actually ran is evidence:
 ```bash
 docker run -d --name minio -p 9000:9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
+  ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
 docker run -d --name fake-gcs -p 4443:4443 \
   fsouza/fake-gcs-server@sha256:d47b4cf8b87006cab8fbbecfa5f06a2a3c5722e464abddc0d107729663d40ec4 \
   -scheme http -public-host 127.0.0.1:4443
@@ -34,9 +34,10 @@ STORAGE_EMULATOR_HOST=127.0.0.1:4443 GCS_BUCKET=sos-test \
 docker rm -f minio fake-gcs
 ```
 
-Pull from quay.io by digest. Docker Hub's `minio/minio` repository no longer
-serves anonymous pulls, and this digest is the image the agent's Runtime pins,
-so the suite and the Runtime exercise one MinIO version.
+Pull the digest `minio-image.json` records: MinIO built from source by this
+repo, because Docker Hub and quay.io no longer serve MinIO anonymously. It is
+the image the agent's Runtime pins, so the suite and the Runtime exercise one
+MinIO version.
 
 Six tests run: `TestMinIOFullStack`, `TestMinIOConditionalDelete`,
 `TestProbeAgainstLiveMinIO` (whose subtests cover granted access, a missing
@@ -81,14 +82,12 @@ MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
 ## End-to-end
 
 Needs a gateway image built from this tree, and `syft` on PATH for the SBOM
-test. The MinIO tag is aliased because the Runtime resolves it by tag while
-Docker Hub will not serve it:
+test. The Runtime pulls the MinIO digest itself; pulling it first only moves a
+registry failure out of the test:
 
 ```bash
 docker build -t service-object-storage:e2e .
-docker pull quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
-docker tag quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e \
-  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+docker pull ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5
 
 SOS_GATEWAY_IMAGE=service-object-storage:e2e \
   go test -tags e2e -count=1 -timeout 300s .

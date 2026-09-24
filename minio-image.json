@@ -1,0 +1,7 @@
+{
+  "name": "ghcr.io/codefly-dev/minio",
+  "digest": "sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5",
+  "source": "https://github.com/minio/minio",
+  "release": "RELEASE.2025-04-22T22-12-26Z",
+  "revision": "0d7408fc9969caf07de6a8c3a84f9fbb10a6739e"
+}
