@@ -1,0 +1,118 @@
+name: publish-minio-image
+
+# Builds MinIO from its public AGPL-3.0 source (images/minio/Dockerfile) and
+# publishes it to ghcr.io/codefly-dev/minio for linux/amd64 and linux/arm64.
+#
+# The agent starts MinIO for local and test stores, and CI starts it for the
+# integration and runtime e2e jobs. Every registry MinIO publishes to stopped
+# serving anonymous pulls (Docker Hub `minio/minio`, then quay.io/minio/minio
+# and quay.io/minio/mc, 401 from 2026-09-24), so this repository builds the
+# release it pins instead of mirroring it.
+#
+# The build is reproducible: every input is pinned in the Dockerfile and the
+# timestamps are the upstream commit's, so the same pins give the same index
+# digest. The run prints that digest; commit it as minio-image.json. A rebuild
+# of unchanged pins pushes the same digest again and the summary says whether it
+# matches the committed lock.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - images/minio/**
+      - minio-image.json
+      - .github/workflows/publish-minio-image.yml
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/codefly-dev/minio
+  # Must match the Dockerfile's MINIO_RELEASE_TAG / MINIO_COMMIT; the build
+  # refuses any other tree, and these feed the labels that point at the source.
+  MINIO_RELEASE_TAG: RELEASE.2025-04-22T22-12-26Z
+  MINIO_COMMIT: 0d7408fc9969caf07de6a8c3a84f9fbb10a6739e
+  # The upstream commit time (2025-04-22T22:12:26Z).
+  SOURCE_DATE_EPOCH: "1745359946"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: The workflow and the Dockerfile name one source
+        run: |
+          set -euo pipefail
+          grep -qx "ARG MINIO_RELEASE_TAG=${MINIO_RELEASE_TAG}" images/minio/Dockerfile
+          grep -qx "ARG MINIO_COMMIT=${MINIO_COMMIT}" images/minio/Dockerfile
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # No QEMU: the Dockerfile cross-compiles on the build platform and its
+      # runtime stage runs nothing.
+      # Provenance and SBOM attestations are off: they carry build times and
+      # runner details, so the index digest would differ on every run.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: build
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+        with:
+          context: images/minio
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          sbom: false
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          labels: |
+            org.opencontainers.image.title=MinIO
+            org.opencontainers.image.description=MinIO ${{ env.MINIO_RELEASE_TAG }} built unmodified from source by codefly-dev/service-object-storage (images/minio/Dockerfile)
+            org.opencontainers.image.source=https://github.com/minio/minio
+            org.opencontainers.image.url=https://github.com/minio/minio/tree/${{ env.MINIO_RELEASE_TAG }}
+            org.opencontainers.image.revision=${{ env.MINIO_COMMIT }}
+            org.opencontainers.image.version=${{ env.MINIO_RELEASE_TAG }}
+            org.opencontainers.image.licenses=AGPL-3.0
+          annotations: |
+            index:org.opencontainers.image.title=MinIO
+            index:org.opencontainers.image.description=MinIO ${{ env.MINIO_RELEASE_TAG }} built unmodified from source by codefly-dev/service-object-storage (images/minio/Dockerfile)
+            index:org.opencontainers.image.source=https://github.com/minio/minio
+            index:org.opencontainers.image.url=https://github.com/minio/minio/tree/${{ env.MINIO_RELEASE_TAG }}
+            index:org.opencontainers.image.revision=${{ env.MINIO_COMMIT }}
+            index:org.opencontainers.image.version=${{ env.MINIO_RELEASE_TAG }}
+            index:org.opencontainers.image.licenses=AGPL-3.0
+          outputs: type=image,name=${{ env.IMAGE }}:${{ env.MINIO_RELEASE_TAG }},push=true,rewrite-timestamp=true
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-evidence
+          jq -n --arg name "$IMAGE" --arg digest "$DIGEST" \
+            --arg release "$MINIO_RELEASE_TAG" --arg revision "$MINIO_COMMIT" \
+            '{name: $name, digest: $digest, source: "https://github.com/minio/minio", release: $release, revision: $revision}' \
+            > release-evidence/minio-image.json
+          docker buildx imagetools inspect "$IMAGE@$DIGEST"
+          echo "::notice title=MinIO image::$IMAGE@$DIGEST"
+          if [ -f minio-image.json ] && [ "$(jq -er '.digest' minio-image.json)" = "$DIGEST" ]; then
+            verdict='Reproduced the digest `minio-image.json` records.'
+          else
+            verdict='This digest differs from `minio-image.json`; commit the lock below to adopt it.'
+          fi
+          {
+            echo "$verdict"
+            echo
+            echo '```json'
+            cat release-evidence/minio-image.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: minio-image-lock
+          path: release-evidence/minio-image.json
+          if-no-files-found: error
