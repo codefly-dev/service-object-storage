@@ -289,7 +289,6 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 	codeflyHome, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	t.Setenv(resources.CodeflyHomeEnv, codeflyHome)
-	t.Setenv("SOS_LOCAL_MINIO_INITIALIZE", "true")
 	workspace := &resources.Workspace{Name: "test"}
 	tmpDir := t.TempDir()
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())

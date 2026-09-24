@@ -24,7 +24,7 @@ func TestMinIOCustody(t *testing.T) {
 	for _, scenario := range []string{"reuse", "missing record", "missing data", "missing marker", "mismatched marker", "owner", "bucket", "symlink", "corrupt record"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "store")
-			require.NoError(t, ensureMinIOCustody(root, "owner", "documents", true, false))
+			require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false))
 			record := filepath.Join(root, "custody.json")
 			marker := filepath.Join(root, "data", ".codefly-custody.json")
 			object := filepath.Join(root, "data", "retained-object")
@@ -49,7 +49,7 @@ func TestMinIOCustody(t *testing.T) {
 			case "corrupt record":
 				require.NoError(t, os.WriteFile(record, []byte("bad"), 0o600))
 			}
-			err := ensureMinIOCustody(root, owner, bucket, true, false)
+			err := ensureMinIOCustody(root, owner, bucket, false)
 			if scenario == "reuse" {
 				require.NoError(t, err)
 			} else {
@@ -65,27 +65,85 @@ func TestMinIOCustody(t *testing.T) {
 	}
 }
 
-func TestMinIOCustodyRequiresExplicitNewStore(t *testing.T) {
-	for _, present := range []bool{false, true} {
+// An absent or empty custody directory holds nothing to lose, so it is
+// initialized without an opt-in: that is every first run, including agent CI in
+// a throwaway Codefly home.
+func TestMinIOCustodyInitializesNewStore(t *testing.T) {
+	for name, prepare := range map[string]func(root string){
+		"absent": func(string) {},
+		"empty":  func(root string) { require.NoError(t, os.Mkdir(root, 0o700)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "store")
+			prepare(root)
+			require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false))
+			record, err := os.ReadFile(filepath.Join(root, "custody.json"))
+			require.NoError(t, err)
+			require.Contains(t, string(record), `"phase":"pending"`)
+			marker, err := os.ReadFile(filepath.Join(root, "data", ".codefly-custody.json"))
+			require.NoError(t, err)
+			require.Equal(t, string(record), string(marker))
+		})
+	}
+}
+
+// A directory holding anything without a custody record is existing data: the
+// guard refuses and leaves it exactly as it found it.
+func TestMinIOCustodyRefusesUnrecordedData(t *testing.T) {
+	for name, prepare := range map[string]func(root string){
+		"retained file": func(root string) {
+			require.NoError(t, os.WriteFile(filepath.Join(root, "retained-object"), []byte("retain me"), 0o600))
+		},
+		"retained data dir": func(root string) {
+			require.NoError(t, os.Mkdir(filepath.Join(root, "data"), 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "data", "retained-object"), []byte("retain me"), 0o600))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "store")
+			require.NoError(t, os.Mkdir(root, 0o700))
+			prepare(root)
+			require.ErrorContains(t, ensureMinIOCustody(root, "owner", "documents", false), "existing data")
+			_, err := os.Stat(filepath.Join(root, "custody.json"))
+			require.True(t, os.IsNotExist(err), "no custody may be written over unrecorded data")
+		})
+	}
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "elsewhere")
+		require.NoError(t, os.Mkdir(target, 0o700))
+		root := filepath.Join(dir, "store")
+		require.NoError(t, os.Symlink(target, root))
+		require.Error(t, ensureMinIOCustody(root, "owner", "documents", false))
+		_, err := os.Stat(filepath.Join(target, "custody.json"))
+		require.True(t, os.IsNotExist(err))
+	})
+	t.Run("live container", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "store")
-		require.Error(t, ensureMinIOCustody(root, "owner", "documents", false, present))
+		require.Error(t, ensureMinIOCustody(root, "owner", "documents", true))
 		_, err := os.Stat(root)
 		require.True(t, os.IsNotExist(err))
-		if present {
-			require.Error(t, ensureMinIOCustody(root, "owner", "documents", true, present))
-		}
-	}
-	root := filepath.Join(t.TempDir(), "partial")
-	require.NoError(t, os.Mkdir(root, 0o700))
-	require.Error(t, ensureMinIOCustody(root, "owner", "documents", true, false))
+	})
+}
+
+// An established store is reused as-is: a second pass keeps its custody ID.
+func TestMinIOCustodyReusesExistingRecord(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "store")
+	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false))
+	first, err := os.ReadFile(filepath.Join(root, "custody.json"))
+	require.NoError(t, err)
+	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false))
+	second, err := os.ReadFile(filepath.Join(root, "custody.json"))
+	require.NoError(t, err)
+	require.Equal(t, string(first), string(second))
 }
 
 // A renamed bucket is a configuration edit. Reporting it as a generic custody
 // mismatch sent operators to hand-edit the record the docs forbid touching.
 func TestMinIOCustodyNamesBucketChange(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "store")
-	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", true, false))
-	err := ensureMinIOCustody(root, "owner", "documents-v2", true, false)
+	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false))
+	err := ensureMinIOCustody(root, "owner", "documents-v2", false)
 	require.ErrorContains(t, err, "configured bucket changed")
 	require.ErrorContains(t, err, "documents-v2")
 	require.NotContains(t, err.Error(), "owner, version or phase mismatch")
@@ -133,9 +191,9 @@ func TestStructuredMinIOIdentity(t *testing.T) {
 	require.NotEqual(t, first.minioOwner(), second.minioOwner())
 	root := minioCustodyDir(first.minioOwner())
 	require.NoError(t, os.MkdirAll(filepath.Dir(root), 0o700))
-	require.NoError(t, ensureMinIOCustody(root, first.minioOwner(), "documents", true, false))
-	require.Error(t, ensureMinIOCustody(root, second.minioOwner(), "documents", false, false))
-	require.Error(t, ensureMinIOCustody(minioCustodyDir(second.minioOwner()), second.minioOwner(), "documents", false, false))
+	require.NoError(t, ensureMinIOCustody(root, first.minioOwner(), "documents", false))
+	require.Error(t, ensureMinIOCustody(root, second.minioOwner(), "documents", false))
+	require.NoError(t, ensureMinIOCustody(minioCustodyDir(second.minioOwner()), second.minioOwner(), "documents", false), "a distinct owner gets its own store")
 	second.Identity = first.Identity
 	second.Environment.NamingScope = "isolated"
 	require.NotEqual(t, first.minioOwner(), second.minioOwner())
@@ -150,17 +208,17 @@ func TestMinIODaemonUserMapping(t *testing.T) {
 
 func TestMinIOProvisioningCommit(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "store")
-	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", true, false))
-	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false, false), "verified pending bootstrap can resume")
+	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false))
+	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false), "verified pending bootstrap can resume")
 	rt := &Runtime{minioCustodyRoot: root, minioNewStore: true}
 	require.NoError(t, rt.commitMinIOProvisioning())
 	require.False(t, rt.minioNewStore)
-	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false, false))
+	require.NoError(t, ensureMinIOCustody(root, "owner", "documents", false))
 	record, err := os.ReadFile(filepath.Join(root, "custody.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(record), `"phase":"committed"`)
 	require.NoError(t, os.Remove(filepath.Join(root, "custody.json")))
-	require.Error(t, ensureMinIOCustody(root, "owner", "documents", true, false), "loss of commit evidence cannot reopen bootstrap")
+	require.Error(t, ensureMinIOCustody(root, "owner", "documents", false), "loss of commit evidence cannot reopen bootstrap")
 }
 
 func TestMinIORejectsUserMappingBeforeCustodyMutation(t *testing.T) {

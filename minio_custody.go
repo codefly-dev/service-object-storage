@@ -19,6 +19,33 @@ import (
 	"github.com/gofrs/flock"
 )
 
+// claimEmptyCustodyRoot creates root, or accepts it when it already exists as
+// an empty real directory. It never adopts a directory holding any entry.
+func claimEmptyCustodyRoot(root string) error {
+	err := os.Mkdir(root, 0o700)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("refusing to initialize inaccessible custody directory %s: %w", root, err)
+	}
+	info, statErr := os.Lstat(root)
+	if statErr != nil {
+		return fmt.Errorf("refusing to initialize inaccessible custody directory %s: %w", root, statErr)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to initialize custody path %s: not a plain directory", root)
+	}
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		return fmt.Errorf("refusing to initialize inaccessible custody directory %s: %w", root, readErr)
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("missing custody record at %s but the directory holds existing data; refusing to initialize over it", filepath.Join(root, "custody.json"))
+	}
+	return nil
+}
+
 // Custody lives outside source checkouts and runtime caches. Destroy removes
 // containers only. The independent record and in-data marker must agree before
 // Docker gets an opportunity to replace any container.
@@ -125,7 +152,7 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 			return fail(err)
 		}
 	}
-	if err = ensureMinIOCustody(root, owner, s.conf.bucket, os.Getenv("SOS_LOCAL_MINIO_INITIALIZE") == "true", present); err != nil {
+	if err = ensureMinIOCustody(root, owner, s.conf.bucket, present); err != nil {
 		return fail(err)
 	}
 	record, err := os.ReadFile(filepath.Join(root, "custody.json"))
@@ -153,19 +180,23 @@ func validateMinIOMount(existing container.InspectResponse, data string) error {
 	return fmt.Errorf("existing container %s has no owned /data mount; refusing replacement", existing.ID)
 }
 
-func ensureMinIOCustody(root, owner, bucket string, initialize, present bool) error {
+// A store without a custody record is initialized only when there is nothing
+// on disk to lose: the custody directory is absent (this run creates it) or an
+// empty, non-symlinked directory. That is every first run, including a CI run
+// in a throwaway Codefly home. Anything else without a record — retained files,
+// partial state, a symlink, or a live container — is existing data and fails
+// closed for explicit recovery.
+func ensureMinIOCustody(root, owner, bucket string, present bool) error {
 	recordPath := filepath.Join(root, "custody.json")
 	data := filepath.Join(root, "data")
 	markerPath := filepath.Join(data, ".codefly-custody.json")
 	record, err := os.ReadFile(recordPath)
 	if errors.Is(err, os.ErrNotExist) {
-		if !initialize || present {
-			return fmt.Errorf("missing custody record at %s (new stores require explicit SOS_LOCAL_MINIO_INITIALIZE=true)", recordPath)
+		if present {
+			return fmt.Errorf("missing custody record at %s while a MinIO container for this service exists; refusing to initialize over it", recordPath)
 		}
-		// Mkdir, not MkdirAll: partial state or retained data must never be adopted
-		// automatically, even with initialization enabled.
-		if err = os.Mkdir(root, 0o700); err != nil {
-			return fmt.Errorf("refusing to initialize existing or inaccessible custody directory %s: %w", root, err)
+		if err = claimEmptyCustodyRoot(root); err != nil {
+			return err
 		}
 		id, genErr := randomSecret()
 		if genErr != nil {
