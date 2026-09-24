@@ -50,7 +50,7 @@ Integration against a real MinIO, behind the `integration` build tag:
 ```bash
 docker run -d --name minio -p 9000:9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e server /data
+  ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
 MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
   go test -tags integration -count=1 ./internal/integration/...
@@ -62,9 +62,24 @@ fake-gcs-server when `STORAGE_EMULATOR_HOST` (e.g. `127.0.0.1:4443`) and
 emulator accepts any caller, so it proves the keyless client path and
 `SOS_PREFIX`, never Workload Identity or a bucket IAM grant.
 
-quay.io by digest is not incidental: the Docker Hub `minio/minio` repository no
-longer serves anonymous pulls, and this digest is the image the agent's Runtime
-itself pins.
+The MinIO image is built here, from source, not pulled from MinIO. Docker Hub
+`minio/minio` stopped serving anonymous pulls first; on 2026-09-24
+`quay.io/minio/minio` and `quay.io/minio/mc` followed (401 even for a manifest
+read), which stopped every run that starts MinIO. `images/minio/Dockerfile`
+builds the pinned upstream release (RELEASE.2025-04-22T22-12-26Z, commit
+`0d7408fc`) unmodified from MinIO's public AGPL-3.0 source, reproducibly, and
+`publish-minio-image.yml` pushes it for linux/amd64 and linux/arm64 to the
+public `ghcr.io/codefly-dev/minio`, labelled with the exact upstream source.
+`minio-image.json` records the digest; the agent embeds it (`minioImage`), and
+CI, this file, README.md and the local-test-suites skill restate it —
+`TestMinioImageIsTheOneTheLockRecords` fails when any of them disagree or name
+quay.io again.
+
+To move MinIO: change `MINIO_RELEASE_TAG`/`MINIO_COMMIT` in the Dockerfile and
+the workflow together, merge, take the digest the workflow run prints (its
+`minio-image-lock` artifact) into `minio-image.json` and every restatement, and
+re-verify custody: the agent keeps `.codefly-custody.json` in the drive root
+MinIO serves, so a release that prunes unknown root entries breaks it.
 
 End-to-end through the agent Runtime and the image-SBOM path (`e2e` tag) needs a
 locally built gateway image; the SBOM test additionally needs `syft` on PATH:

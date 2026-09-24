@@ -69,12 +69,17 @@ func parseGatewayImageLock(content []byte) (*resources.DockerImage, error) {
 	if lock.Name == "" {
 		return nil, fmt.Errorf("gateway image name is required")
 	}
-	algorithm, encoded, found := strings.Cut(lock.Digest, ":")
-	decoded, err := hex.DecodeString(encoded)
-	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
+	if !isSHA256Digest(lock.Digest) {
 		return nil, fmt.Errorf("gateway image digest %q must be a sha256 digest", lock.Digest)
 	}
 	return &resources.DockerImage{Name: lock.Name, Digest: lock.Digest}, nil
+}
+
+// isSHA256Digest reports whether digest is a complete sha256 image digest.
+func isSHA256Digest(digest string) bool {
+	algorithm, encoded, found := strings.Cut(digest, ":")
+	decoded, err := hex.DecodeString(encoded)
+	return found && algorithm == "sha256" && err == nil && len(decoded) == 32
 }
 
 // gatewayImageOverrideEnv names a locally built gateway image to run instead of
@@ -95,19 +100,45 @@ func effectiveGatewayImage() (*resources.DockerImage, bool) {
 // minioImage backs the gateway for local and test runs. Deployed environments
 // name a cloud backend instead and never start MinIO.
 //
-// The tag is pinned and custody depends on it: the agent keeps its ownership
+// The release is pinned and custody depends on it: the agent keeps its ownership
 // marker at .codefly-custody.json in the drive root MinIO serves, and this
 // release leaves entries it does not recognize alone. A bump has to re-verify
 // that — a MinIO that prunes or rejects unknown entries at the drive root would
 // turn a healthy store into a missing-marker refusal.
-// Pulled from quay.io, MinIO's own registry, not Docker Hub: the Docker Hub
-// `minio/minio` repository stopped serving anonymous pulls ("pull access denied
-// ... repository does not exist"), which broke every run that starts MinIO. The
-// quay.io repository carries the identical RELEASE tags.
-var minioImage = &resources.DockerImage{
-	Repository: "quay.io/minio",
-	Name:       "minio",
-	Tag:        "RELEASE.2025-04-22T22-12-26Z",
+//
+// The image is MinIO built unmodified from its public AGPL-3.0 source by this
+// repository (images/minio/Dockerfile, published by publish-minio-image.yml) and
+// pinned to the digest minio-image.json records. MinIO's own registries closed
+// anonymous pulls — Docker Hub `minio/minio` first, then quay.io/minio/minio on
+// 2026-09-24 — so a pin on any of them stops every run that starts MinIO.
+var minioImage = shared.Must(parseMinioImageLock(minioImageLockJSON))
+
+// minioImageLock is the recorded identity of the MinIO image: where it is
+// published, its digest, and the upstream release and commit it was built from.
+type minioImageLock struct {
+	Name     string `json:"name"`
+	Digest   string `json:"digest"`
+	Source   string `json:"source"`
+	Release  string `json:"release"`
+	Revision string `json:"revision"`
+}
+
+func parseMinioImageLock(content []byte) (*resources.DockerImage, error) {
+	var lock minioImageLock
+	if err := json.Unmarshal(content, &lock); err != nil {
+		return nil, fmt.Errorf("parse minio image lock: %w", err)
+	}
+	if lock.Name == "" {
+		return nil, fmt.Errorf("minio image name is required")
+	}
+	if !isSHA256Digest(lock.Digest) {
+		return nil, fmt.Errorf("minio image digest %q must be a sha256 digest", lock.Digest)
+	}
+	if !strings.HasPrefix(lock.Release, "RELEASE.") {
+		return nil, fmt.Errorf("minio image release %q must name an upstream RELEASE tag", lock.Release)
+	}
+	// The digest decides what runs; the tag only carries the release label.
+	return &resources.DockerImage{Name: lock.Name, Tag: lock.Release, Digest: lock.Digest}, nil
 }
 
 // Settings are the service.codefly.yaml knobs. Local runs need none — the
@@ -296,6 +327,9 @@ var infoFS embed.FS
 
 //go:embed gateway-image.json
 var gatewayImageLockJSON []byte
+
+//go:embed minio-image.json
+var minioImageLockJSON []byte
 
 //go:embed templates/agent
 var readmeFS embed.FS
