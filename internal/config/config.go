@@ -58,6 +58,7 @@ func FromEnv() (Config, error) {
 		Backend: backend.Config{
 			Kind:               env("SOS_BACKEND", "minio"),
 			Bucket:             os.Getenv("SOS_BUCKET"),
+			Prefix:             os.Getenv("SOS_PREFIX"),
 			Region:             env("SOS_REGION", "us-east-1"),
 			Endpoint:           os.Getenv("SOS_ENDPOINT"),
 			UsePathStyle:       envBool("SOS_USE_PATH_STYLE", false),
@@ -116,11 +117,40 @@ func FromEnv() (Config, error) {
 	if cfg.Health.Timeout <= 0 {
 		return Config{}, fmt.Errorf("SOS_PROBE_TIMEOUT must be positive, got %s", cfg.Health.Timeout)
 	}
+	if err := checkBackendIsComplete(cfg.Backend); err != nil {
+		return Config{}, err
+	}
+	prefix, err := backend.NormalizePrefix(cfg.Backend.Prefix)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Backend.Prefix = prefix
 	// MinIO addresses buckets path-style by default.
 	if cfg.Backend.Kind == "minio" && os.Getenv("SOS_USE_PATH_STYLE") == "" {
 		cfg.Backend.UsePathStyle = true
 	}
 	return cfg, nil
+}
+
+// checkBackendIsComplete refuses a backend selection that cannot open a store,
+// naming the variable that is missing. Without it the failure surfaces from
+// inside the backend's SDK — MinIO with no endpoint reports "Endpoint:  does
+// not follow ip address or domain name standards", which names neither the
+// variable nor the fact that nothing was configured.
+func checkBackendIsComplete(b backend.Config) error {
+	switch b.Kind {
+	case "minio":
+		if strings.TrimSpace(b.Endpoint) == "" {
+			return fmt.Errorf("SOS_BACKEND=minio requires SOS_ENDPOINT (the host:port of a MinIO server), and none is set. " +
+				"minio is the default backend when SOS_BACKEND is unset, so a gateway deployed without a MinIO to talk to lands here: " +
+				"select the store the environment actually provides instead, e.g. SOS_BACKEND=gcs with SOS_BUCKET (and optionally SOS_PREFIX)")
+		}
+	case "azure":
+		if strings.TrimSpace(b.AzureAccount) == "" && strings.TrimSpace(b.Endpoint) == "" {
+			return fmt.Errorf("SOS_BACKEND=azure requires SOS_AZURE_ACCOUNT (the storage account name) or SOS_ENDPOINT, and neither is set")
+		}
+	}
+	return nil
 }
 
 // checkListenerIsAuthenticated refuses to resolve a configuration that would

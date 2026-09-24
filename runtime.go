@@ -482,6 +482,9 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	if s.conf.endpoint != "" {
 		envs = append(envs, resources.Env("SOS_ENDPOINT", s.conf.endpoint))
 	}
+	if s.conf.prefix != "" {
+		envs = append(envs, resources.Env("SOS_PREFIX", s.conf.prefix))
+	}
 	if s.conf.accessKey != "" {
 		envs = append(envs,
 			resources.Env("SOS_ACCESS_KEY", s.conf.accessKey),

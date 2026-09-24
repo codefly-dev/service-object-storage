@@ -65,8 +65,9 @@ without it the cache is L1-only.
 | `SOS_ALLOW_ANONYMOUS` | `false` | accept unauthenticated callers; required when `SOS_AUTH_TOKEN` is unset |
 | `SOS_BACKEND` | `minio` | `minio` \| `s3` \| `gcs` \| `azure` \| `mem` |
 | `SOS_BUCKET` | — | required (container for Azure) |
+| `SOS_PREFIX` | — | confine the gateway to one key prefix inside the bucket; keys are relative to it |
 | `SOS_REGION` | `us-east-1` | |
-| `SOS_ENDPOINT` | — | MinIO / S3-compatible / Azurite endpoint |
+| `SOS_ENDPOINT` | — | MinIO / S3-compatible / Azurite endpoint; **required** for `minio` |
 | `SOS_ACCESS_KEY` / `SOS_SECRET_KEY` | — | S3 / MinIO credentials |
 | `SOS_GCS_CREDENTIALS_FILE` | — | path **inside the container** to a GCS service-account JSON (else ADC) |
 | `SOS_AZURE_ACCOUNT` / `SOS_AZURE_KEY` | — | Azure account + shared key |
@@ -230,7 +231,20 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
 - **Deployed**: the Builder emits a Kubernetes Deployment running the gateway
   image against the configured cloud backend (`SOS_BACKEND` = `s3` | `gcs` |
   `azure`, defaulting to `s3` when the environment names none). `SOS_BUCKET`,
-  `SOS_REGION`, and the backend are read from the deployment configuration. GCS
+  `SOS_PREFIX`, `SOS_REGION`, `SOS_ENDPOINT` and the backend are read from the
+  deployment configuration (the `object-storage` group), overriding the service
+  spec. The container also declares `CODEFLY__SERVICE=<service name>`, so an
+  environment's service configuration bound by the CLI after the render replaces
+  those `SOS_*` literals by name — the usual way a cell selects its store over a
+  spec still on the local default (`backend: minio`). A deployment never starts
+  MinIO, so a gateway left on `minio` without `SOS_ENDPOINT` **refuses to start**
+  naming the missing variable and the remedy (the render cannot refuse it: the
+  binding it would need to see happens afterwards). The Service publishes the
+  in-cluster port core allocated to the gRPC endpoint (falling back to 9464) and
+  forwards it to the container's 9464. The pod runs under its own Kubernetes ServiceAccount, named after the service
+  and rendered in the target namespace (never the namespace `default`), so a
+  keyless store can grant exactly this workload — on GKE the bucket IAM member
+  `serviceAccount:<project>.svc.id.goog[<namespace>/<service name>]`. GCS
   defaults to keyless auth (Application Default Credentials / Workload Identity);
   a `SOS_GCS_CREDENTIALS_FILE` configured for a deployment is **rejected by the
   Builder**, not rendered: nothing here mounts a service-account key, so emitting

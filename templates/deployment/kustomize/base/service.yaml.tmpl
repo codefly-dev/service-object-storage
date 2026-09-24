@@ -8,5 +8,5 @@ spec:
     app: {{.Name}}
   ports:
     - name: grpc
-      port: 9464
+      port: {{ .Deployment.Parameters.ServicePort }}
       targetPort: 9464

@@ -18,6 +18,11 @@ type Config struct {
 	Kind string
 	// Bucket (S3/GCS) or container (Azure) the server is bound to.
 	Bucket string
+	// Prefix confines the server to one key prefix inside Bucket, so several
+	// consumers can share one provisioned bucket without seeing each other's
+	// keys. Empty means the whole bucket. Open applies it uniformly to every
+	// backend kind (see prefixed); a backend implementation never reads it.
+	Prefix string
 	Region string
 	// Endpoint overrides the service endpoint (MinIO / S3-compatible).
 	Endpoint string

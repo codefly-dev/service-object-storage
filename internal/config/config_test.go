@@ -12,13 +12,14 @@ import (
 )
 
 // probeEnv sets what every FromEnv call needs before a probe setting is even
-// reachable: a bucket, and an auth posture. Resolution refuses an
+// reachable: a bucket, a complete default (minio) backend, and an auth posture. Resolution refuses an
 // unauthenticated listener, and that check runs before the probe checks, so
 // without a token these tests would assert against the auth error instead of
 // the probe one they are about.
 func probeEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_AUTH_TOKEN", "a-per-run-secret")
 }
 
@@ -27,6 +28,7 @@ func probeEnv(t *testing.T) {
 // its port, and the refusal has to tell an existing user how to move forward.
 func TestFromEnv_RefusesUnauthenticatedListener(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 
 	_, err := config.FromEnv()
 	require.Error(t, err)
@@ -40,6 +42,7 @@ func TestFromEnv_RefusesUnauthenticatedListener(t *testing.T) {
 // read as "configured" while protecting nothing.
 func TestFromEnv_RefusesBlankToken(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_AUTH_TOKEN", "   ")
 
 	_, err := config.FromEnv()
@@ -54,6 +57,7 @@ func TestFromEnv_RefusesBlankToken(t *testing.T) {
 // looks healthy.
 func TestFromEnv_TokenIsWhitespaceNormalized(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_AUTH_TOKEN", "s3cr3t\n")
 
 	cfg, err := config.FromEnv()
@@ -67,6 +71,7 @@ func TestFromEnv_TokenIsWhitespaceNormalized(t *testing.T) {
 // the other is in force.
 func TestFromEnv_RejectsContradictoryAuthSettings(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_AUTH_TOKEN", "a-per-run-secret")
 	t.Setenv("SOS_ALLOW_ANONYMOUS", "true")
 
@@ -77,6 +82,7 @@ func TestFromEnv_RejectsContradictoryAuthSettings(t *testing.T) {
 
 func TestFromEnv_TokenEnablesEnforcement(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_AUTH_TOKEN", "a-per-run-secret")
 
 	cfg, err := config.FromEnv()
@@ -88,6 +94,7 @@ func TestFromEnv_TokenEnablesEnforcement(t *testing.T) {
 // profile uses, where caller identity is enforced by the cluster instead.
 func TestFromEnv_ExplicitOptOut(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
+	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_ALLOW_ANONYMOUS", "true")
 
 	cfg, err := config.FromEnv()
@@ -167,6 +174,106 @@ func TestFromEnvRejectsUnusablePacing(t *testing.T) {
 
 			_, err := config.FromEnv()
 			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+// TestFromEnv_RefusesIncompleteBackend is the guard for the crash-loop a
+// deployment with no MinIO produced: SOS_BACKEND defaults to minio, and with no
+// SOS_ENDPOINT the MinIO SDK reported "Endpoint:  does not follow ip address or
+// domain name standards" — naming neither the variable nor the remedy.
+func TestFromEnv_RefusesIncompleteBackend(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   map[string]string
+		wants []string
+	}{
+		{
+			name:  "default-minio-without-endpoint",
+			env:   map[string]string{},
+			wants: []string{"SOS_BACKEND=minio requires SOS_ENDPOINT", "SOS_BACKEND=gcs"},
+		},
+		{
+			name:  "explicit-minio-without-endpoint",
+			env:   map[string]string{"SOS_BACKEND": "minio", "SOS_ENDPOINT": "  "},
+			wants: []string{"SOS_BACKEND=minio requires SOS_ENDPOINT"},
+		},
+		{
+			name:  "azure-without-account",
+			env:   map[string]string{"SOS_BACKEND": "azure"},
+			wants: []string{"SOS_BACKEND=azure requires SOS_AZURE_ACCOUNT"},
+		},
+		{
+			name:  "unusable-prefix",
+			env:   map[string]string{"SOS_BACKEND": "gcs", "SOS_PREFIX": "a/../b"},
+			wants: []string{"SOS_PREFIX", "not a usable key prefix"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SOS_BUCKET", "documents")
+			t.Setenv("SOS_ALLOW_ANONYMOUS", "true")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_, err := config.FromEnv()
+			require.Error(t, err)
+			for _, want := range tc.wants {
+				require.Contains(t, err.Error(), want)
+			}
+		})
+	}
+}
+
+// TestFromEnv_SelectsBackend pins what each selection resolves to. GCS needs
+// nothing beyond a bucket: with no SOS_GCS_CREDENTIALS_FILE the client uses
+// Application Default Credentials (GKE Workload Identity in a cluster), so a
+// keyless deployment is complete with SOS_BACKEND, SOS_BUCKET and optionally
+// SOS_PREFIX.
+func TestFromEnv_SelectsBackend(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        map[string]string
+		wantKind   string
+		wantPrefix string
+		wantPath   bool
+	}{
+		{
+			name:     "minio-local",
+			env:      map[string]string{"SOS_ENDPOINT": "127.0.0.1:9000"},
+			wantKind: "minio",
+			wantPath: true,
+		},
+		{
+			name:     "gcs-keyless",
+			env:      map[string]string{"SOS_BACKEND": "gcs"},
+			wantKind: "gcs",
+		},
+		{
+			name:       "gcs-keyless-with-prefix",
+			env:        map[string]string{"SOS_BACKEND": "gcs", "SOS_PREFIX": "/documents/"},
+			wantKind:   "gcs",
+			wantPrefix: "documents/",
+		},
+		{
+			name:     "s3-needs-no-endpoint",
+			env:      map[string]string{"SOS_BACKEND": "s3"},
+			wantKind: "s3",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SOS_BUCKET", "documents")
+			t.Setenv("SOS_ALLOW_ANONYMOUS", "true")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := config.FromEnv()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantKind, cfg.Backend.Kind)
+			require.Equal(t, tc.wantPrefix, cfg.Backend.Prefix)
+			require.Equal(t, tc.wantPath, cfg.Backend.UsePathStyle)
+			require.Empty(t, cfg.Backend.GCSCredentialsFile)
 		})
 	}
 }

@@ -50,12 +50,27 @@ jobs:
             sleep 1
           done
           curl -sf http://127.0.0.1:9000/minio/health/live
+      # The gcs backend's integration tests run against fake-gcs-server, which the
+      # Go storage SDK reaches natively through STORAGE_EMULATOR_HOST. Without it
+      # those tests skip and the job still passes, so it is started here.
+      - name: start fake-gcs-server
+        run: |
+          docker run -d --name fake-gcs -p 4443:4443 \
+            fsouza/fake-gcs-server@sha256:d47b4cf8b87006cab8fbbecfa5f06a2a3c5722e464abddc0d107729663d40ec4 \
+            -scheme http -public-host 127.0.0.1:4443
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:4443/storage/v1/b && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:4443/storage/v1/b
       - name: integration test
         env:
           MINIO_ENDPOINT: 127.0.0.1:9000
           MINIO_ACCESS_KEY: minioadmin
           MINIO_SECRET_KEY: minioadmin
           MINIO_BUCKET: sos-test
+          STORAGE_EMULATOR_HOST: 127.0.0.1:4443
+          GCS_BUCKET: sos-test
         run: go test -tags integration ./internal/integration/...
 
   agent-runtime-e2e:

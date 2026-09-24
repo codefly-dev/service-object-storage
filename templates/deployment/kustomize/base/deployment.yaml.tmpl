@@ -38,6 +38,12 @@ spec:
             - name: grpc
               containerPort: 9464
           env:
+            # The service identity the CLI binds the environment's service
+            # configuration onto: per environment, after this render, it
+            # replaces the SOS_* literals below by name on the container that
+            # declares this (and adds the ones not rendered here).
+            - name: CODEFLY__SERVICE
+              value: "{{ .Name }}"
             - name: SOS_LISTEN
               value: ":9464"
             - name: SOS_BACKEND
@@ -46,6 +52,14 @@ spec:
               value: "{{ .Deployment.Parameters.Bucket }}"
             - name: SOS_REGION
               value: "{{ .Deployment.Parameters.Region }}"
+{{- if .Deployment.Parameters.Prefix }}
+            - name: SOS_PREFIX
+              value: "{{ .Deployment.Parameters.Prefix }}"
+{{- end }}
+{{- if .Deployment.Parameters.Endpoint }}
+            - name: SOS_ENDPOINT
+              value: "{{ .Deployment.Parameters.Endpoint }}"
+{{- end }}
             # The gateway refuses to start on an unauthenticated listener unless
             # this is set. In the deployed profile caller identity is enforced by
             # the cluster — NetworkPolicy plus service-mesh mTLS in front of this
