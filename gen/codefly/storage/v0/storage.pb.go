@@ -28,8 +28,11 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// CacheStatus reports how the gateway served a read, for observability. A
-// presigned large-object read never reaches the cache (BYPASS_PRESIGN).
+// CacheStatus is deprecated and kept only so existing generated clients keep
+// compiling: the gateway no longer caches and never sets it, so every
+// GetHeader carries CACHE_STATUS_UNSPECIFIED. Do not reuse its numbers.
+//
+// Deprecated: Marked as deprecated in codefly/storage/v0/storage.proto.
 type CacheStatus int32
 
 const (
@@ -190,11 +193,11 @@ func (WriteOp) EnumDescriptor() ([]byte, []int) {
 	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{2}
 }
 
-// ObjectInfo is the object's metadata — and every field a caching layer needs.
-// ETag is an OPAQUE strong validator, never a content hash (multipart/SSE ETags
-// are not MD5). weak_etag marks a validator the cache must not use to stitch
-// ranges. version_id (S3/Azure) and generation (GCS) make version-pinned reads
-// immutable and cacheable forever.
+// ObjectInfo is the object's metadata, including the validators a consumer
+// needs for conditional reads. ETag is an OPAQUE strong validator, never a
+// content hash (multipart/SSE ETags are not MD5). weak_etag marks a validator a
+// consumer must not use to stitch ranges. version_id (S3/Azure) and generation
+// (GCS) make version-pinned reads immutable.
 type ObjectInfo struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Key      string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -535,8 +538,8 @@ func (x *GetRequest) GetIfModifiedSinceUnixMs() int64 {
 	return 0
 }
 
-// GetResponse streams: the first message carries the header (info + not_modified
-// + cache_status), every following message carries a data chunk.
+// GetResponse streams: the first message carries the header (info +
+// not_modified), every following message carries a data chunk.
 type GetResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
@@ -623,7 +626,12 @@ type GetHeader struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Info  *ObjectInfo            `protobuf:"bytes,1,opt,name=info,proto3" json:"info,omitempty"`
 	// not_modified is true when a conditional read matched — no data follows.
-	NotModified   bool        `protobuf:"varint,2,opt,name=not_modified,json=notModified,proto3" json:"not_modified,omitempty"`
+	NotModified bool `protobuf:"varint,2,opt,name=not_modified,json=notModified,proto3" json:"not_modified,omitempty"`
+	// cache_status is kept only for wire and generated-client compatibility: the
+	// gateway no longer caches and always leaves it unset
+	// (CACHE_STATUS_UNSPECIFIED).
+	//
+	// Deprecated: Marked as deprecated in codefly/storage/v0/storage.proto.
 	CacheStatus   CacheStatus `protobuf:"varint,3,opt,name=cache_status,json=cacheStatus,proto3,enum=codefly.storage.v0.CacheStatus" json:"cache_status,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -673,6 +681,7 @@ func (x *GetHeader) GetNotModified() bool {
 	return false
 }
 
+// Deprecated: Marked as deprecated in codefly/storage/v0/storage.proto.
 func (x *GetHeader) GetCacheStatus() CacheStatus {
 	if x != nil {
 		return x.CacheStatus
@@ -1586,26 +1595,30 @@ func (x *WatchRequest) GetPrefix() string {
 }
 
 // WriteEvent is a single mutation observed at the gateway write choke point: a
-// change HINT a consumer keeping an index (cache, metadata DB) reacts to, not a
-// lossless log. etag/version_id are set on PUT when the backend returns them; a
-// DELETE carries only the key (and version_id when a specific version was
-// removed).
+// change HINT a consumer keeping an index (search index, metadata DB) reacts
+// to, not a lossless log. etag/version_id are set on PUT when the backend
+// returns them; a DELETE carries only the key (and version_id when a specific
+// version was removed).
+//
+// Delivery is per replica: a Watch stream carries the writes served by the
+// replica the client is connected to, never writes served by other replicas.
+// A consumer that needs every write to the bucket across replicas uses the
+// backing store's event notifications instead.
 //
 // Delivery is best-effort and at-least-once, so a consumer MUST periodically
 // reconcile against authoritative state (List / version enumeration) and never
 // treat the absence of an event as proof no write happened:
-//   - Events for writes served by OTHER replicas travel over the shared cache
-//     tier's pub/sub, which is fire-and-forget: a Redis outage or a subscriber
-//     reconnect drops those events with no per-event signal.
+//   - Writes served by other replicas, or made to the bucket directly, are
+//     never delivered on this stream.
 //   - A DELETE is emitted even when the key was already absent — backends do not
 //     report whether a delete removed anything — so deletes are not one-to-one
 //     with real state changes.
 //   - A consumer that receives RESOURCE_EXHAUSTED has fallen too far behind and
 //     was dropped; it must reconcile before re-watching.
 //
-// Writes served by the SAME replica the client is watching are delivered
-// in-order (or the slow client is dropped), so a single-replica gateway loses
-// events only via RESOURCE_EXHAUSTED.
+// Writes served by the replica the client is watching are delivered in-order
+// (or the slow client is dropped), so a single-replica gateway loses events
+// only via RESOURCE_EXHAUSTED.
 type WriteEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -2119,11 +2132,11 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\vGetResponse\x127\n" +
 	"\x06header\x18\x01 \x01(\v2\x1d.codefly.storage.v0.GetHeaderH\x00R\x06header\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x06\n" +
-	"\x04kind\"\xa6\x01\n" +
+	"\x04kind\"\xaa\x01\n" +
 	"\tGetHeader\x122\n" +
 	"\x04info\x18\x01 \x01(\v2\x1e.codefly.storage.v0.ObjectInfoR\x04info\x12!\n" +
-	"\fnot_modified\x18\x02 \x01(\bR\vnotModified\x12B\n" +
-	"\fcache_status\x18\x03 \x01(\x0e2\x1f.codefly.storage.v0.CacheStatusR\vcacheStatus\"c\n" +
+	"\fnot_modified\x18\x02 \x01(\bR\vnotModified\x12F\n" +
+	"\fcache_status\x18\x03 \x01(\x0e2\x1f.codefly.storage.v0.CacheStatusB\x02\x18\x01R\vcacheStatus\"c\n" +
 	"\n" +
 	"PutRequest\x127\n" +
 	"\x06header\x18\x01 \x01(\v2\x1d.codefly.storage.v0.PutHeaderH\x00R\x06header\x12\x14\n" +
@@ -2237,7 +2250,7 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\x06values\x18\x01 \x03(\v2,.codefly.storage.v0.NativeResult.ValuesEntryR\x06values\x1a9\n" +
 	"\vValuesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xc8\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\xcc\x01\n" +
 	"\vCacheStatus\x12\x1c\n" +
 	"\x18CACHE_STATUS_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11CACHE_STATUS_MISS\x10\x01\x12\x17\n" +
@@ -2245,7 +2258,7 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\x13CACHE_STATUS_HIT_L2\x10\x03\x12\x1c\n" +
 	"\x18CACHE_STATUS_REVALIDATED\x10\x04\x12\x19\n" +
 	"\x15CACHE_STATUS_NEGATIVE\x10\x05\x12\x19\n" +
-	"\x15CACHE_STATUS_NO_STORE\x10\x06*_\n" +
+	"\x15CACHE_STATUS_NO_STORE\x10\x06\x1a\x02\x18\x01*_\n" +
 	"\rPresignMethod\x12\x1e\n" +
 	"\x1aPRESIGN_METHOD_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12PRESIGN_METHOD_GET\x10\x01\x12\x16\n" +

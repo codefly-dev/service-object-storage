@@ -111,8 +111,8 @@ func TestPrefixConfinesKeys(t *testing.T) {
 	require.True(t, serr.Is(err, serr.NotFound), "%v", err)
 }
 
-// TestPrefixSeparatesIdentity keeps the cache honest: it keys on Identity plus
-// the RELATIVE key, so two prefixes on one bucket must not share an identity.
+// TestPrefixSeparatesIdentity: two prefixes on one bucket address different
+// objects under the same relative key, so they must not share an identity.
 func TestPrefixSeparatesIdentity(t *testing.T) {
 	store, err := mem.New(context.Background(), backend.Config{Bucket: "shared"})
 	require.NoError(t, err)

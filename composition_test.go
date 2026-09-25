@@ -221,7 +221,7 @@ func startAuthenticatedGateway(t *testing.T, token string) string {
 	if err != nil {
 		t.Fatalf("mem backend: %v", err)
 	}
-	hub := events.NewHub(be.Name(), be.Identity(), nil)
+	hub := events.NewHub()
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(token)),
 		grpc.ChainStreamInterceptor(auth.StreamInterceptor(token)),

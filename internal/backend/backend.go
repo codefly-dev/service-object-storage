@@ -77,8 +77,8 @@ func (c Config) Strategy() ProbeStrategy {
 	return c.ProbeStrategy
 }
 
-// ObjectInfo is object metadata — and every field the cache needs. ETag is an
-// OPAQUE strong validator, never a content hash. VersionID (S3/Azure) and
+// ObjectInfo is object metadata, including the validators conditional reads
+// need. ETag is an OPAQUE strong validator, never a content hash. VersionID (S3/Azure) and
 // Generation (GCS) make version-pinned reads immutable.
 type ObjectInfo struct {
 	Key             string
@@ -205,10 +205,9 @@ type Backend interface {
 	// Identity is a GLOBALLY UNIQUE identifier for the physical location this
 	// instance is bound to — the bucket/container plus whatever disambiguates
 	// it across deployments (the account for Azure, the endpoint for MinIO and
-	// S3-compatible services). The cache folds it into every key, so a bare
-	// bucket name is not enough: two containers named "data" in different Azure
-	// accounts, or two MinIO clusters with a bucket named "data", must not
-	// collide on a shared Redis tier.
+	// S3-compatible services). A bare bucket name is not enough: two containers
+	// named "data" in different Azure accounts, or two MinIO clusters with a
+	// bucket named "data", are different locations and must not compare equal.
 	Identity() string
 	// Capabilities reports what this backend honors. It is static feature
 	// introspection computed from the backend kind and its configuration: it

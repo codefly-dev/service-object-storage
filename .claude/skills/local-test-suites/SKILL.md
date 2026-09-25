@@ -1,17 +1,18 @@
 ---
 name: local-test-suites
-description: Run this repo's integration and end-to-end suites against real MinIO and a real gateway image, and prove they actually executed. Use when a change touches internal/backend, internal/cache, the readiness probe, the agent Runtime or Builder, or the image-SBOM path — anywhere `go test ./...` alone does not reach.
+description: Run this repo's integration and end-to-end suites against real MinIO and a real gateway image, and prove they actually executed. Use when a change touches internal/backend, internal/server, the readiness probe, the agent Runtime or Builder, or the image-SBOM path — anywhere `go test ./...` alone does not reach.
 ---
 
 # Running the real-container suites
 
-`go test ./...` covers the `mem` backend and a miniredis cache. It never opens a
-socket to MinIO, never starts a container, and never inventories an image. Three
+`go test ./...` covers the `mem` backend and the gRPC server over it. It never
+opens a socket to MinIO, never starts a container, and never inventories an
+image. Three
 tiers exist, and only the tier you actually ran is evidence:
 
 | Tier | Command shape | What it proves |
 |------|---------------|----------------|
-| unit | `go test ./...` | logic, `mem` backend, cache behaviour |
+| unit | `go test ./...` | logic, `mem` backend, server and Watch behaviour |
 | integration | `-tags integration` + live MinIO | the gRPC server against a real S3-compatible store |
 | e2e | `-tags e2e` + a built gateway image | the agent Runtime's container lifecycle, GCS key projection, MinIO custody, image SBOM |
 

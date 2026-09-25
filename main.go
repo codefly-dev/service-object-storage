@@ -5,7 +5,7 @@
 // and never link a cloud SDK — the gateway absorbs every backend difference.
 //
 // The agent mirrors the shape of the other codefly infrastructure agents
-// (redis, postgres): a Service advertises its configuration surface, a Runtime
+// (e.g. postgres): a Service advertises its configuration surface, a Runtime
 // brings the containers up for `codefly run` and tests, and a Builder emits the
 // Kubernetes deployment. Locally the Runtime also starts a MinIO container and
 // points the gateway at it — "test on MinIO, ship on S3", decided by config.

@@ -3,17 +3,13 @@
 // Hub, which delivers it to matching Watch subscribers — the journal seed a
 // consumer reconciles its own index against.
 //
-// The Hub mirrors the cache's cross-replica design: with a shared Redis tier it
-// republishes each event on a pub/sub channel and re-dispatches events from
-// other replicas, so a Watch client connected to one replica also sees writes
-// served by peers bound to the same backend location. That hop is best-effort —
-// Redis pub/sub is fire-and-forget, so an outage or reconnect drops the events
-// in flight; delivery is a change hint, not a log, and consumers reconcile
-// out of band (see the WriteEvent proto contract). Events are scoped by backend
-// name+identity (a replica bound elsewhere sharing the Redis keyspace must not
-// leak its writes here) and tagged with a per-process origin so a replica never
-// re-dispatches its own echo. The Redis publish runs on a background worker, so
-// a slow or unreachable tier never blocks the write that produced the event.
+// Delivery is per replica: the Hub is in-process, so a Watch subscriber sees
+// the writes served by the replica it is connected to, and only those. A
+// consumer that needs every write across replicas uses the backing store's own
+// event notifications (S3/MinIO bucket notifications, GCS Pub/Sub, Azure Event
+// Grid), which observe the bucket rather than one gateway process. Delivery is
+// a change hint, not a log: consumers reconcile out of band (see the
+// WriteEvent proto contract).
 //
 // A slow Watch subscriber is dropped rather than allowed to stall the fan-out:
 // its channel is closed once its buffer overflows, ending the RPC with a lag
@@ -21,15 +17,9 @@
 package events
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // Op is the mutating operation a write event reports.
@@ -51,60 +41,26 @@ type Event struct {
 	Time      time.Time
 }
 
-// eventChannel carries client-facing write events across replicas. It is kept
-// separate from the cache's internal "sos:invalidate" channel so eviction and
-// observation stay independent concerns.
-const eventChannel = "sos:events"
-
 // subBuffer bounds how many undelivered events a subscriber may queue before it
 // is dropped as too slow.
 const subBuffer = 256
 
-// outBuffer bounds the backlog of events awaiting cross-replica publish. It
-// absorbs write bursts (e.g. a large DeleteMany) so the request path never
-// blocks on Redis; a backlog past this drops the oldest-unpublished events,
-// consistent with the best-effort cross-replica contract.
-const outBuffer = 1024
-
-// Hub fans write events out to local Watch subscribers and, when a shared tier
-// is configured, across replicas.
+// Hub fans write events out to the Watch subscribers of this replica.
 type Hub struct {
-	name     string
-	identity string
-	origin   string
-	rdb      redis.UniversalClient // nil = single-replica, in-process only
-	nowFn    func() time.Time
-
-	// out carries events to the background publisher; nil when rdb is nil. It is
-	// never closed, so Publish can enqueue concurrently with Close without racing.
-	out chan Event
+	nowFn func() time.Time
 
 	mu     sync.Mutex
 	subs   map[uint64]*Subscription
 	nextID uint64
-	stop   chan struct{}
 	closed bool
 }
 
-// NewHub builds a Hub scoped to one backend location (name+identity). rdb may be
-// nil for a single-replica gateway; when set, the Hub bridges events across
-// every replica sharing that Redis tier and backend location.
-func NewHub(name, identity string, rdb redis.UniversalClient) *Hub {
-	h := &Hub{
-		name:     name,
-		identity: identity,
-		origin:   newOrigin(),
-		rdb:      rdb,
-		nowFn:    time.Now,
-		subs:     make(map[uint64]*Subscription),
-		stop:     make(chan struct{}),
+// NewHub builds an empty Hub.
+func NewHub() *Hub {
+	return &Hub{
+		nowFn: time.Now,
+		subs:  make(map[uint64]*Subscription),
 	}
-	if rdb != nil {
-		h.out = make(chan Event, outBuffer)
-		go h.subscribeRemote()
-		go h.publishRemote()
-	}
-	return h
 }
 
 // Subscription is a prefix-scoped view of the event stream. The server ranges
@@ -142,49 +98,13 @@ func (h *Hub) Subscribe(prefix string) *Subscription {
 	return s
 }
 
-// Publish delivers e to matching local subscribers and, when a shared tier is
-// configured, hands it to the background publisher for cross-replica mirroring.
-// It never blocks on Redis: local delivery is synchronous and ordered, while the
-// cross-replica hop is enqueued non-blocking (dropped if the backlog is full).
-// Time is stamped here if unset, so the local and mirrored copies agree.
+// Publish delivers e to matching subscribers, synchronously and in order. Time
+// is stamped here if unset.
 func (h *Hub) Publish(e Event) {
 	if e.Time.IsZero() {
 		e.Time = h.nowFn()
 	}
 	h.dispatch(e)
-	if h.out == nil {
-		return
-	}
-	select {
-	case h.out <- e:
-	default: // backlog full: drop, per the best-effort cross-replica contract
-	}
-}
-
-// publishRemote drains the outbound backlog and mirrors each event to peers over
-// Redis pub/sub. A single worker preserves publish order; Redis latency here is
-// off the request path, so a slow or unresponsive tier never stalls a write.
-func (h *Hub) publishRemote() {
-	for {
-		select {
-		case <-h.stop:
-			return
-		case e := <-h.out:
-			w := wireEvent{
-				Origin:    h.origin,
-				Name:      h.name,
-				Identity:  h.identity,
-				Key:       e.Key,
-				Op:        e.Op,
-				ETag:      e.ETag,
-				VersionID: e.VersionID,
-				TimeMS:    e.Time.UnixMilli(),
-			}
-			if raw, err := json.Marshal(w); err == nil {
-				_ = h.rdb.Publish(context.Background(), eventChannel, raw).Err()
-			}
-		}
-	}
 }
 
 // dispatch delivers e to every matching subscriber, dropping any whose buffer is
@@ -205,7 +125,7 @@ func (h *Hub) dispatch(e Event) {
 	}
 }
 
-// Close stops the remote subscriber and drops every subscription.
+// Close drops every subscription.
 func (h *Hub) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -213,64 +133,8 @@ func (h *Hub) Close() {
 		return
 	}
 	h.closed = true
-	close(h.stop)
 	for id, s := range h.subs {
 		delete(h.subs, id)
 		close(s.ch)
 	}
-}
-
-// wireEvent is the cross-replica encoding of an Event, tagged with the emitting
-// replica's origin and backend location for receiver-side filtering.
-type wireEvent struct {
-	Origin    string `json:"o"`
-	Name      string `json:"n"`
-	Identity  string `json:"i"`
-	Key       string `json:"k"`
-	Op        Op     `json:"op"`
-	ETag      string `json:"e,omitempty"`
-	VersionID string `json:"v,omitempty"`
-	TimeMS    int64  `json:"t"`
-}
-
-func (h *Hub) subscribeRemote() {
-	sub := h.rdb.Subscribe(context.Background(), eventChannel)
-	defer sub.Close()
-	ch := sub.Channel()
-	for {
-		select {
-		case <-h.stop:
-			return
-		case msg, ok := <-ch:
-			if !ok {
-				return
-			}
-			h.handleRemote(msg.Payload)
-		}
-	}
-}
-
-// handleRemote re-dispatches an event from another replica, ignoring this
-// replica's own echo and any event bound to a different backend location.
-func (h *Hub) handleRemote(payload string) {
-	var w wireEvent
-	if json.Unmarshal([]byte(payload), &w) != nil {
-		return
-	}
-	if w.Origin == h.origin || w.Name != h.name || w.Identity != h.identity {
-		return
-	}
-	h.dispatch(Event{
-		Key:       w.Key,
-		Op:        w.Op,
-		ETag:      w.ETag,
-		VersionID: w.VersionID,
-		Time:      time.UnixMilli(w.TimeMS),
-	})
-}
-
-func newOrigin() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
 }

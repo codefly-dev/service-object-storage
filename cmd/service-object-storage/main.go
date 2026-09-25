@@ -1,13 +1,11 @@
 // Command service-object-storage runs the object-storage gateway: it resolves
 // its configuration from SOS_* environment variables, opens the configured
-// backend, optionally wraps it in the two-tier cache, and serves the uniform
-// ObjectStorage gRPC API. Every cloud backend is compiled in and selected by
+// backend, and serves the uniform ObjectStorage gRPC API. Every cloud backend is compiled in and selected by
 // config; the client speaks only the gRPC contract.
 package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -15,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -23,7 +20,6 @@ import (
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/auth"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
-	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/config"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/health"
@@ -43,9 +39,6 @@ import (
 // GracefulStop blocked indefinitely, leaving the process un-interruptible.
 const shutdownGrace = 15 * time.Second
 
-// redisPingTimeout bounds the startup connectivity check for the shared cache.
-const redisPingTimeout = 5 * time.Second
-
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("service-object-storage: %v", err)
@@ -59,23 +52,18 @@ func run() error {
 	}
 
 	ctx := context.Background()
-	store, rdb, err := openStore(ctx, cfg)
+	store, err := backend.Open(ctx, cfg.Backend)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = store.Close()
-		if rdb != nil {
-			_ = rdb.Close()
-		}
-	}()
+	defer func() { _ = store.Close() }()
 
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return err
 	}
 
-	hub := events.NewHub(store.Name(), store.Identity(), rdb)
+	hub := events.NewHub()
 	defer hub.Close()
 
 	// Config resolution refuses an empty token unless the operator accepted an
@@ -111,39 +99,6 @@ func run() error {
 	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s prefix=%q auth=%s)",
 		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, cfg.Backend.Prefix, authMode)
 	return grpcServer.Serve(lis)
-}
-
-// openStore opens the configured backend and, when caching is enabled, wraps it
-// in the cache. A configured shared-cache (Redis) tier is verified at startup:
-// a misconfigured address must fail loudly here, because the cache silently
-// swallows Redis errors at request time — an unreachable tier would otherwise
-// degrade to L1-only with no signal, silently dropping cross-replica
-// invalidation. The returned redis client (if any) is owned by the caller.
-func openStore(ctx context.Context, cfg config.Config) (backend.Backend, redis.UniversalClient, error) {
-	be, err := backend.Open(ctx, cfg.Backend)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !cfg.Cache.Enabled {
-		return be, nil, nil
-	}
-
-	var rdb redis.UniversalClient
-	if cfg.Cache.RedisAddr != "" {
-		rdb = redis.NewClient(&redis.Options{
-			Addr:     cfg.Cache.RedisAddr,
-			Password: cfg.Cache.RedisPassword,
-			DB:       cfg.Cache.RedisDB,
-		})
-		pctx, cancel := context.WithTimeout(ctx, redisPingTimeout)
-		defer cancel()
-		if err := rdb.Ping(pctx).Err(); err != nil {
-			_ = rdb.Close()
-			_ = be.Close()
-			return nil, nil, fmt.Errorf("shared cache unreachable at %s: %w", cfg.Cache.RedisAddr, err)
-		}
-	}
-	return cache.New(be, rdb, cfg.Cache.Options), rdb, nil
 }
 
 // serveHealth registers the gRPC health service, starts the backend-access

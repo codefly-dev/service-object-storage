@@ -17,8 +17,8 @@ jobs:
     uses: codefly-dev/core/.github/workflows/go-service-ci.yml@29bc3dbdda86cc5b3432f17c249bc49301a2edad
 
   # The shared go-service-ci runs `go test` without the race detector; this
-  # repo's cache, events hub, and Watch streams are concurrent, so keep race
-  # coverage the old build-test job had.
+  # repo's events hub, Watch streams and readiness monitor are concurrent, so
+  # keep race coverage the old build-test job had.
   race:
     runs-on: ubuntu-latest
     steps:

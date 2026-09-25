@@ -1,6 +1,6 @@
 // Package mem is a real, deterministic in-memory object-storage backend. It is
 // not a mock of a cloud — it is a working store used for fast local runs and as
-// the fixture the cache/server tests exercise real behavior against. It honors
+// the fixture the server tests exercise real behavior against. It honors
 // conditional writes, ranges, conditional reads, prefix listing, and copy.
 package mem
 
