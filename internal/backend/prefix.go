@@ -51,9 +51,9 @@ func (p *prefixed) info(i *ObjectInfo) {
 
 func (p *prefixed) Name() string { return p.inner.Name() }
 
-// Identity folds the prefix in: the cache keys on Identity plus the RELATIVE
-// key, so two gateways on one bucket with different prefixes must not share
-// cache entries for the same relative key.
+// Identity folds the prefix in: two gateways on one bucket with different
+// prefixes address different objects under the same relative key, so they are
+// different locations.
 func (p *prefixed) Identity() string { return p.inner.Identity() + "#prefix=" + p.prefix }
 
 func (p *prefixed) Capabilities() Capabilities { return p.inner.Capabilities() }

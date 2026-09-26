@@ -41,8 +41,8 @@ type Verdict struct {
 // switch, not per-replica load shedding. Every replica shares one bucket and
 // one credential set, so a backend outage, a deleted bucket or a revoked grant
 // fails all of them at once and would empty the Service's endpoint list —
-// turning a degraded gateway, which can still serve presigned URLs and cached
-// reads, into an unreachable one.
+// turning a degraded gateway, which can still serve presigned URLs, into an
+// unreachable one.
 //
 // The named service is what a startupProbe gates on, so a replica must prove
 // access once before it joins rotation and a bad rollout stalls while the

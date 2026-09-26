@@ -1,6 +1,6 @@
 //go:build integration
 
-// Package integration exercises the full stack — gRPC server → cache → real
+// Package integration exercises the full stack — gRPC server → real
 // backend — against a live MinIO, the universal local/test backend. Run with:
 //
 //	go test -tags integration ./internal/integration/...
@@ -31,7 +31,6 @@ import (
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
-	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
@@ -79,12 +78,11 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 		UsePathStyle: true,
 	})
 	require.NoError(t, err)
-	cached := cache.New(be, nil, cache.Options{})
-	hub := events.NewHub(cached.Name(), cached.Identity(), nil)
+	hub := events.NewHub()
 
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(cached, hub, probetest.Monitor(t, cached)))
+	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
@@ -92,7 +90,7 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close(); _ = cached.Close() })
+	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close(); _ = be.Close() })
 	return storagev0.NewObjectStorageClient(conn)
 }
 
@@ -142,7 +140,7 @@ func TestMinIOFullStack(t *testing.T) {
 	require.Equal(t, "text/plain", hdr.GetInfo().GetContentType())
 	require.Equal(t, int64(len(payload)), hdr.GetInfo().GetSize())
 
-	// Cached second read must match.
+	// A second read must match.
 	body2, _ := get(t, c, key)
 	require.Equal(t, payload, body2)
 

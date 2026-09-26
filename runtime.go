@@ -476,7 +476,6 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 		resources.Env("SOS_BACKEND", s.conf.backend),
 		resources.Env("SOS_BUCKET", s.conf.bucket),
 		resources.Env("SOS_REGION", s.conf.region),
-		resources.Env("SOS_CACHE", "false"),
 		resources.Env("SOS_AUTH_TOKEN", s.gatewayToken),
 	}
 	if s.conf.endpoint != "" {

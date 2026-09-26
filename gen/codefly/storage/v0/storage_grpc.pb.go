@@ -58,9 +58,9 @@ type ObjectStorageClient interface {
 	Copy(ctx context.Context, in *CopyRequest, opts ...grpc.CallOption) (*CopyResult, error)
 	Presign(ctx context.Context, in *PresignRequest, opts ...grpc.CallOption) (*PresignResult, error)
 	// Watch streams write events (Put/Delete) as they complete through the
-	// gateway. With a shared cache tier configured, events from other replicas
-	// bound to the same backend location are mirrored in best-effort (see
-	// WriteEvent for the delivery contract — it is a hint stream, not a log). The
+	// replica the client is connected to; writes served by other replicas are not
+	// delivered (see WriteEvent for the delivery contract — it is a hint stream,
+	// not a log). The
 	// stream's initial gRPC header marks the subscription as live: events are live
 	// and never replayed, so a client reconciles state from before the header out
 	// of band, and periodically thereafter to recover any dropped events.
@@ -241,9 +241,9 @@ type ObjectStorageServer interface {
 	Copy(context.Context, *CopyRequest) (*CopyResult, error)
 	Presign(context.Context, *PresignRequest) (*PresignResult, error)
 	// Watch streams write events (Put/Delete) as they complete through the
-	// gateway. With a shared cache tier configured, events from other replicas
-	// bound to the same backend location are mirrored in best-effort (see
-	// WriteEvent for the delivery contract — it is a hint stream, not a log). The
+	// replica the client is connected to; writes served by other replicas are not
+	// delivered (see WriteEvent for the delivery contract — it is a hint stream,
+	// not a log). The
 	// stream's initial gRPC header marks the subscription as live: events are live
 	// and never replayed, so a client reconciles state from before the header out
 	// of band, and periodically thereafter to recover any dropped events.

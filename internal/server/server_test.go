@@ -35,7 +35,7 @@ func newTestClientFor(t *testing.T, be backend.Backend) storagev0.ObjectStorageC
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 
-	hub := events.NewHub(be.Name(), be.Identity(), nil)
+	hub := events.NewHub()
 	s := grpc.NewServer()
 	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = s.Serve(lis) }()
@@ -354,7 +354,7 @@ func TestReadyDoesNotProbePerCall(t *testing.T) {
 	mem := openMemBackend(t)
 	counting := &countingBackend{Backend: mem}
 
-	hub := events.NewHub(counting.Name(), counting.Identity(), nil)
+	hub := events.NewHub()
 	t.Cleanup(hub.Close)
 	srv := server.New(counting, hub, fixedReadiness{health.Verdict{Ready: true, CheckedAt: time.Now()}})
 
@@ -370,7 +370,7 @@ func TestReadyDoesNotProbePerCall(t *testing.T) {
 // Ready must say so rather than imply a probe ran and passed.
 func TestReadyBeforeFirstProbe(t *testing.T) {
 	be := openMemBackend(t)
-	hub := events.NewHub(be.Name(), be.Identity(), nil)
+	hub := events.NewHub()
 	t.Cleanup(hub.Close)
 	srv := server.New(be, hub, fixedReadiness{})
 

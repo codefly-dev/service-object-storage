@@ -1,7 +1,6 @@
 package events
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -9,7 +8,7 @@ import (
 )
 
 func TestPublishPrefixScoped(t *testing.T) {
-	h := NewHub("mem", "mem://local", nil)
+	h := NewHub()
 	defer h.Close()
 
 	all := h.Subscribe("")
@@ -40,7 +39,7 @@ func TestPublishPrefixScoped(t *testing.T) {
 }
 
 func TestPublishStampsTime(t *testing.T) {
-	h := NewHub("mem", "mem://local", nil)
+	h := NewHub()
 	defer h.Close()
 	fixed := time.UnixMilli(1_700_000_000_000)
 	h.nowFn = func() time.Time { return fixed }
@@ -53,7 +52,7 @@ func TestPublishStampsTime(t *testing.T) {
 }
 
 func TestSlowSubscriberDropped(t *testing.T) {
-	h := NewHub("mem", "mem://local", nil)
+	h := NewHub()
 	defer h.Close()
 
 	sub := h.Subscribe("")
@@ -72,40 +71,8 @@ func TestSlowSubscriberDropped(t *testing.T) {
 	require.Equal(t, subBuffer, got, "buffered events drain, then the channel closes")
 }
 
-func TestHandleRemoteFilters(t *testing.T) {
-	h := NewHub("mem", "mem://local", nil) // nil rdb: no goroutine, drive handleRemote directly
-	defer h.Close()
-	h.origin = "self"
-
-	sub := h.Subscribe("")
-	defer sub.Close()
-
-	msg := func(w wireEvent) string {
-		raw, err := json.Marshal(w)
-		require.NoError(t, err)
-		return string(raw)
-	}
-
-	// Own echo is ignored.
-	h.handleRemote(msg(wireEvent{Origin: "self", Name: "mem", Identity: "mem://local", Key: "a"}))
-	// A different backend location is ignored.
-	h.handleRemote(msg(wireEvent{Origin: "other", Name: "s3", Identity: "mem://local", Key: "b"}))
-	h.handleRemote(msg(wireEvent{Origin: "other", Name: "mem", Identity: "s3://bucket", Key: "c"}))
-	// A matching event from another replica is delivered.
-	h.handleRemote(msg(wireEvent{Origin: "other", Name: "mem", Identity: "mem://local", Key: "d", Op: OpDelete}))
-
-	e := <-sub.Events()
-	require.Equal(t, "d", e.Key)
-	require.Equal(t, OpDelete, e.Op)
-	select {
-	case leaked := <-sub.Events():
-		t.Fatalf("delivered a filtered remote event: %q", leaked.Key)
-	default:
-	}
-}
-
 func TestCloseDropsSubscribers(t *testing.T) {
-	h := NewHub("mem", "mem://local", nil)
+	h := NewHub()
 	sub := h.Subscribe("")
 
 	h.Close()

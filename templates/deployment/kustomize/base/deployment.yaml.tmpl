@@ -110,8 +110,7 @@ rendering it as YAML would ship GCS prose into every s3/azure manifest. */}}
           # credential set, so a backend outage, a deleted bucket or a revoked
           # grant fails all of them within one probe interval. Draining on that
           # empties the Service's endpoint list and turns a degraded gateway —
-          # one that can still serve presigned URLs and cached reads — into an
-          # unreachable one. Lost access is reported per request as UNAVAILABLE
+          # one that can still serve presigned URLs — into an unreachable one. Lost access is reported per request as UNAVAILABLE
           # instead, and liveness stays put so nothing gets restarted over it.
           #
           # The grpc probe handler requires Kubernetes >= 1.24 (GA in 1.27); on

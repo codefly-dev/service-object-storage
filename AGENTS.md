@@ -5,15 +5,15 @@ S3 / GCS / Azure Blob / MinIO, plus the codefly service agent
 (`codefly.dev/object-storage`) that runs it. Clients speak the gRPC contract and
 never link a cloud SDK.
 
-`README.md` is the reference for the API, the cache, readiness, authentication
+`README.md` is the reference for the API, Watch, readiness, authentication
 and the local/deployed profiles. This file is how to work in the repo.
 
 ## What this repo owns
 
 - The contract and its stubs: `proto/codefly/storage/v0`, `gen/`.
 - The gateway server: `cmd/service-object-storage` and `internal/**` — the
-  backends, the two-tier cache, caller auth, the readiness probe, and the
-  normalization of backend errors to gRPC codes.
+  backends, the per-replica Watch event hub, caller auth, the readiness probe,
+  and the normalization of backend errors to gRPC codes.
 - The codefly agent that runs the gateway as a first-class service: the repo
   root (`main.go`, `runtime.go`, `builder.go`, `agent.codefly.yaml`) and
   `templates/`, the Kubernetes manifests the Builder renders.
@@ -42,7 +42,7 @@ go build ./...
 go vet ./...
 go mod tidy -diff      # CI fails on an untidy go.mod/go.sum
 go test ./...          # CI runs this with -v
-go test -race ./...    # its own CI job: cache, events hub and Watch are concurrent
+go test -race ./...    # its own CI job: events hub, Watch and readiness monitor are concurrent
 ```
 
 Integration against a real MinIO, behind the `integration` build tag:
@@ -152,8 +152,8 @@ agent version and refuses a stale lock.
 
 ## Where the depth is
 
-- `README.md` — API, byte path, cache, readiness semantics (including why
-  `stat` is the weaker probe), authentication, local vs deployed profiles,
+- `README.md` — API, byte path, Watch delivery, readiness semantics (including
+  why `stat` is the weaker probe), authentication, local vs deployed profiles,
   supply-chain evidence.
 - `docs/local-minio-recovery.md` — local MinIO custody, retained volumes and
   recovery.

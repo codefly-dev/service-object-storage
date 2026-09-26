@@ -24,7 +24,7 @@ import (
 // address.
 func serveGateway(t *testing.T, be backend.Backend) string {
 	t.Helper()
-	hub := events.NewHub(be.Name(), be.Identity(), nil)
+	hub := events.NewHub()
 	t.Cleanup(hub.Close)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

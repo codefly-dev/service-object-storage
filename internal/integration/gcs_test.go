@@ -35,7 +35,6 @@ import (
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
-	"github.com/codefly-dev/service-object-storage/internal/cache"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
@@ -72,12 +71,11 @@ func newGCSStack(t *testing.T, bucket, prefix string) storagev0.ObjectStorageCli
 	// takes (the emulator stands in for the credential exchange).
 	be, err := backend.Open(context.Background(), backend.Config{Kind: "gcs", Bucket: bucket, Prefix: prefix})
 	require.NoError(t, err)
-	cached := cache.New(be, nil, cache.Options{})
-	hub := events.NewHub(cached.Name(), cached.Identity(), nil)
+	hub := events.NewHub()
 
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(cached, hub, probetest.Monitor(t, cached)))
+	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
@@ -85,7 +83,7 @@ func newGCSStack(t *testing.T, bucket, prefix string) storagev0.ObjectStorageCli
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close(); _ = cached.Close() })
+	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close(); _ = be.Close() })
 	return storagev0.NewObjectStorageClient(conn)
 }
 

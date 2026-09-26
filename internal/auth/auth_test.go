@@ -103,7 +103,7 @@ func startGateway(t *testing.T) string {
 
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
-	hub := events.NewHub(be.Name(), be.Identity(), nil)
+	hub := events.NewHub()
 
 	s := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(serverToken)),

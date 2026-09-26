@@ -28,12 +28,13 @@ The honest intersection across all four backends (the surface OpenDAL /
 | RPC | Purpose |
 |-----|---------|
 | `Stat` | object metadata (HEAD), conditional |
-| `Get` | streaming read; range + conditional; small objects are cache-served |
+| `Get` | streaming read; range + conditional |
 | `Put` | streaming write; multipart hidden in the backend; conditional (create-if-absent / CAS) |
 | `Delete` / `DeleteMany` | delete; batch with per-key results |
 | `List` | prefix + delimiter + opaque page token |
 | `Copy` | server-side copy where supported |
 | `Presign` | time-limited URL the client uses directly over plain HTTP (no cloud SDK) |
+| `Watch` | stream of write events (Put/Delete) served by the replica the client is connected to |
 | `Capabilities` | machine-readable feature set — introspect before calling |
 | `Ready` | probe the backing store: is the bucket reachable with these credentials? |
 | `Native` | escape hatch for backend-specific verbs |
@@ -43,18 +44,22 @@ Errors are normalized to gRPC status codes (`NotFound`, `AlreadyExists`,
 
 ## Byte path
 
-- **Small objects** are proxied through the gateway and are cacheable.
+- **Small objects** are proxied through the gateway.
 - **Large objects** use `Presign` — the client transfers directly to/from the
   backend over plain HTTP (still no cloud SDK). Presign is GET-biased: writes
-  should route through `Put` so the cache always invalidates.
+  should route through `Put` so they produce a `Watch` event.
 
-## Cache
+## Watch
 
-A two-tier read-through cache (in-process L1 LRU + shared **Redis** L2), with the
-immutable-block trick (bytes keyed by validator, only the key→validator pointer
-invalidated on write), singleflight stampede protection, short negative caching,
-and write-around + invalidate. Set `SOS_REDIS_ADDR` to enable the shared tier;
-without it the cache is L1-only.
+`Watch` streams a change hint for every `Put`/`Delete` that completes through
+the gateway, scoped by key prefix. Delivery is **per replica**: a stream carries
+the writes served by the replica the client is connected to, never writes served
+by other replicas or made to the bucket directly. It is a hint stream, not a
+log — a consumer reconciles against `List` periodically and after a
+`RESOURCE_EXHAUSTED` drop (see the `WriteEvent` contract in the proto). A
+consumer that needs every write to the bucket across replicas subscribes to the
+backing store's event notifications (S3/MinIO bucket notifications, GCS Pub/Sub
+notifications, Azure Event Grid) instead.
 
 ## Configuration (env)
 
@@ -71,9 +76,6 @@ without it the cache is L1-only.
 | `SOS_ACCESS_KEY` / `SOS_SECRET_KEY` | — | S3 / MinIO credentials |
 | `SOS_GCS_CREDENTIALS_FILE` | — | path **inside the container** to a GCS service-account JSON (else ADC) |
 | `SOS_AZURE_ACCOUNT` / `SOS_AZURE_KEY` | — | Azure account + shared key |
-| `SOS_CACHE` | `true` | enable the cache |
-| `SOS_REDIS_ADDR` | — | shared cache tier (empty = L1-only) |
-| `SOS_CACHE_MAX_OBJECT_BYTES` | `1048576` | max byte-cached object size |
 | `SOS_PROBE_STRATEGY` | `list` | readiness probe: `list` \| `stat` |
 | `SOS_PROBE_KEY` | — | required for `stat`; the object headed (need not exist) |
 | `SOS_PROBE_INTERVAL` | `10s` | how often readiness is re-probed |
@@ -139,7 +141,7 @@ Readiness deliberately does *not* follow the backend probe. Every replica shares
 one bucket and one credential set, so a cloud outage, a deleted bucket or a
 revoked grant fails all of them within a single interval; draining on that
 empties the Service's endpoint list and converts a degraded gateway — one that
-can still serve presigned URLs and cached reads — into an unreachable one.
+can still serve presigned URLs — into an unreachable one.
 Access lost after startup is reported per request as `UNAVAILABLE`, which tells
 a client more than a connection failure does, and liveness stays put so nothing
 is restarted over it.
@@ -216,8 +218,8 @@ general authentication design.
 ## Running as a codefly service
 
 This repo ships a **codefly service agent** (`codefly.dev/object-storage`) so the
-gateway runs as a first-class codefly service — the way `codefly.dev/postgres` or
-`codefly.dev/redis` do. A consumer declares it as a `service-dependency` and dials
+gateway runs as a first-class codefly service — the way `codefly.dev/postgres`
+does. A consumer declares it as a `service-dependency` and dials
 the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
 
 - **Local / test**: the agent's Runtime starts a **MinIO** container with persistent
@@ -373,7 +375,7 @@ buf generate
 
 go build ./...
 go vet ./...
-go test ./...            # unit tests (mem backend + miniredis)
+go test ./...            # unit tests (mem backend)
 
 # integration against real MinIO
 docker run -d --name m -p 9000:9000 ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
@@ -389,7 +391,7 @@ docker rm -f m
 proto/codefly/storage/v0/    the uniform API
 gen/                         generated gRPC stubs
 internal/backend/            Backend interface + s3, gcs, azure, minio, mem
-internal/cache/              two-tier read-through cache
+internal/events/             in-process write-event hub behind Watch
 internal/auth/               caller authentication on the gRPC surface
 internal/server/             gRPC ObjectStorage implementation
 internal/config/             env configuration

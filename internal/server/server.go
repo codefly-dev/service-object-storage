@@ -1,5 +1,5 @@
 // Package server implements the ObjectStorage gRPC service over a
-// backend.Backend (typically a cache-decorated one). It maps the proto surface
+// backend.Backend. It maps the proto surface
 // to the backend contract, streams Get/Put, and normalizes errors to gRPC codes.
 package server
 
@@ -269,7 +269,7 @@ func (s *Server) Capabilities(ctx context.Context, _ *storagev0.CapabilitiesRequ
 // onto the cloud API — a client in a loop became a LIST-per-request stream,
 // whose throttling degrades real traffic — and gave it a private timeout that
 // SOS_PROBE_TIMEOUT could not reach. checked_at_unix_ms carries how fresh the
-// answer is, so a caller can judge staleness rather than be told a cached
+// answer is, so a caller can judge staleness rather than be told a stored
 // verdict was measured now.
 func (s *Server) Ready(ctx context.Context, _ *storagev0.ReadyRequest) (*storagev0.Readiness, error) {
 	v := s.readiness.Verdict()

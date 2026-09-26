@@ -12,7 +12,6 @@ import (
 
 	"github.com/codefly-dev/service-object-storage/internal/auth"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
-	"github.com/codefly-dev/service-object-storage/internal/cache"
 )
 
 // Config is the fully resolved server configuration.
@@ -27,7 +26,6 @@ type Config struct {
 	// explicitly accepted it.
 	AuthToken string
 	Backend   backend.Config
-	Cache     CacheConfig
 	Health    HealthConfig
 }
 
@@ -37,17 +35,6 @@ type Config struct {
 type HealthConfig struct {
 	Interval time.Duration
 	Timeout  time.Duration
-}
-
-// CacheConfig controls the caching layer. When RedisAddr is empty the cache is
-// L1-only (single-replica / local); a shared Redis tier enables cross-replica
-// coherency.
-type CacheConfig struct {
-	Enabled       bool
-	RedisAddr     string
-	RedisPassword string
-	RedisDB       int
-	Options       cache.Options
 }
 
 // FromEnv resolves configuration from SOS_* environment variables.
@@ -70,18 +57,6 @@ func FromEnv() (Config, error) {
 			PresignMaxExpiry:   envDuration("SOS_PRESIGN_MAX_EXPIRY", 0),
 			ProbeStrategy:      backend.ProbeStrategy(env("SOS_PROBE_STRATEGY", string(backend.ProbeList))),
 			ProbeKey:           os.Getenv("SOS_PROBE_KEY"),
-		},
-		Cache: CacheConfig{
-			Enabled:       envBool("SOS_CACHE", true),
-			RedisAddr:     os.Getenv("SOS_REDIS_ADDR"),
-			RedisPassword: os.Getenv("SOS_REDIS_PASSWORD"),
-			RedisDB:       int(envInt("SOS_REDIS_DB", 0)),
-			Options: cache.Options{
-				MaxCachedObjectBytes: envInt("SOS_CACHE_MAX_OBJECT_BYTES", 1<<20),
-				MetaTTL:              envDuration("SOS_CACHE_META_TTL", 0),
-				BytesTTL:             envDuration("SOS_CACHE_BYTES_TTL", 0),
-				NegativeTTL:          envDuration("SOS_CACHE_NEGATIVE_TTL", 0),
-			},
 		},
 		Health: HealthConfig{
 			Interval: envDuration("SOS_PROBE_INTERVAL", 10*time.Second),
@@ -199,18 +174,6 @@ func envBool(key string, def bool) bool {
 		return def
 	}
 	return b
-}
-
-func envInt(key string, def int64) int64 {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return def
-	}
-	return n
 }
 
 func envDuration(key string, def time.Duration) time.Duration {
