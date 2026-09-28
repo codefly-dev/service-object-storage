@@ -29,10 +29,12 @@ func UnreachableMinIO(t *testing.T, name string) backend.Backend {
 	require.NoError(t, l.Close())
 
 	be, err := miniobe.New(context.Background(), backend.Config{
-		Endpoint:  "http://" + addr,
-		Bucket:    name,
-		AccessKey: name,
-		SecretKey: name + "-secret",
+		Endpoint: "http://" + addr,
+		// Probes never presign; the dialled address stands in for the origin.
+		PresignEndpoint: "http://" + addr,
+		Bucket:          name,
+		AccessKey:       name,
+		SecretKey:       name + "-secret",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = be.Close() })

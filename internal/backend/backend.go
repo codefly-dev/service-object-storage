@@ -7,7 +7,9 @@ package backend
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -24,8 +26,19 @@ type Config struct {
 	// backend kind (see prefixed); a backend implementation never reads it.
 	Prefix string
 	Region string
-	// Endpoint overrides the service endpoint (MinIO / S3-compatible).
+	// Endpoint overrides the service endpoint (MinIO / S3-compatible /
+	// Azurite). It is the address the gateway DIALS.
 	Endpoint string
+	// PresignEndpoint is the endpoint presigned URLs are signed against: the
+	// exact scheme://host[:port] (plus, for Azure, the account path) that
+	// whoever fetches the URL uses. SigV4 signs the host header, so a URL
+	// signed for the dialled address cannot be re-hosted afterwards.
+	//
+	// It is required exactly when SignsAgainstEndpoint(Kind, Endpoint) and
+	// refused otherwise; each backend enforces that at New, so a URL is never
+	// minted for the dialled address because nobody said otherwise. It equals
+	// Endpoint when the caller chose to sign against the dialled address.
+	PresignEndpoint string
 	// UsePathStyle forces path-style addressing (required by MinIO).
 	UsePathStyle bool
 
@@ -68,6 +81,40 @@ const (
 	// wherever the grant allows it; that is the strategy that detects both.
 	ProbeStat ProbeStrategy = "stat"
 )
+
+// SignsAgainstEndpoint reports whether a backend of this kind, configured with
+// this endpoint, puts that endpoint's host into the URLs it presigns — and so
+// whether the caller has to say which host those URLs name. MinIO always does;
+// S3 and Azure do only when pointed at a custom endpoint (without one they sign
+// against the provider's own public host). GCS signs against
+// storage.googleapis.com and mem mints no fetchable URL.
+func SignsAgainstEndpoint(kind, endpoint string) bool {
+	switch kind {
+	case "minio":
+		return true
+	case "s3", "azure":
+		return strings.TrimSpace(endpoint) != ""
+	default:
+		return false
+	}
+}
+
+// CheckPresignEndpoint is the rule every backend constructor applies to
+// cfg.PresignEndpoint: present exactly when SignsAgainstEndpoint. The kind is
+// the constructor's own, never cfg.Kind, which a direct New call leaves empty.
+func CheckPresignEndpoint(kind string, cfg Config) error {
+	signs := SignsAgainstEndpoint(kind, cfg.Endpoint)
+	set := strings.TrimSpace(cfg.PresignEndpoint) != ""
+	switch {
+	case signs && !set:
+		return fmt.Errorf("backend %s with endpoint %q presigns URLs naming a host, and no presign endpoint was given: "+
+			"state the host callers fetch from (SOS_PRESIGN_ORIGIN=public with SOS_PUBLIC_ENDPOINT) "+
+			"or that they fetch from the dialled endpoint (SOS_PRESIGN_ORIGIN=endpoint)", kind, cfg.Endpoint)
+	case !signs && set:
+		return fmt.Errorf("backend %s does not sign against a configured endpoint, so a presign endpoint (%q) has no effect and is refused", kind, cfg.PresignEndpoint)
+	}
+	return nil
+}
 
 // Strategy resolves the configured probe strategy.
 func (c Config) Strategy() ProbeStrategy {

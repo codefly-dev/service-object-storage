@@ -20,6 +20,7 @@ func probeEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("SOS_BUCKET", "documents")
 	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
+	t.Setenv("SOS_PRESIGN_ORIGIN", "endpoint")
 	t.Setenv("SOS_AUTH_TOKEN", "a-per-run-secret")
 }
 
@@ -60,6 +61,8 @@ func TestFromEnv_TokenIsWhitespaceNormalized(t *testing.T) {
 	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_AUTH_TOKEN", "s3cr3t\n")
 
+	t.Setenv("SOS_PRESIGN_ORIGIN", "endpoint")
+
 	cfg, err := config.FromEnv()
 	require.NoError(t, err)
 	require.Equal(t, "s3cr3t", cfg.AuthToken, "the enforced token must be what a client can actually send")
@@ -85,6 +88,8 @@ func TestFromEnv_TokenEnablesEnforcement(t *testing.T) {
 	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_AUTH_TOKEN", "a-per-run-secret")
 
+	t.Setenv("SOS_PRESIGN_ORIGIN", "endpoint")
+
 	cfg, err := config.FromEnv()
 	require.NoError(t, err)
 	require.Equal(t, "a-per-run-secret", cfg.AuthToken)
@@ -96,6 +101,8 @@ func TestFromEnv_ExplicitOptOut(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
 	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 	t.Setenv("SOS_ALLOW_ANONYMOUS", "true")
+
+	t.Setenv("SOS_PRESIGN_ORIGIN", "endpoint")
 
 	cfg, err := config.FromEnv()
 	require.NoError(t, err)
@@ -240,7 +247,7 @@ func TestFromEnv_SelectsBackend(t *testing.T) {
 	}{
 		{
 			name:     "minio-local",
-			env:      map[string]string{"SOS_ENDPOINT": "127.0.0.1:9000"},
+			env:      map[string]string{"SOS_ENDPOINT": "127.0.0.1:9000", "SOS_PRESIGN_ORIGIN": "endpoint"},
 			wantKind: "minio",
 			wantPath: true,
 		},
@@ -274,6 +281,147 @@ func TestFromEnv_SelectsBackend(t *testing.T) {
 			require.Equal(t, tc.wantPrefix, cfg.Backend.Prefix)
 			require.Equal(t, tc.wantPath, cfg.Backend.UsePathStyle)
 			require.Empty(t, cfg.Backend.GCSCredentialsFile)
+		})
+	}
+}
+
+// TestFromEnv_PresignOriginIsTheCallersChoice pins which host presigned URLs
+// are signed for. The gateway used to sign against SOS_ENDPOINT unconditionally,
+// so a local run minted URLs naming host.docker.internal, or the machine's LAN
+// address where an operator substituted it, and every DHCP change broke them.
+// Now a backend that signs against a configured endpoint needs an explicit
+// SOS_PRESIGN_ORIGIN, and "public" signs against SOS_PUBLIC_ENDPOINT while the
+// gateway keeps dialling SOS_ENDPOINT.
+func TestFromEnv_PresignOriginIsTheCallersChoice(t *testing.T) {
+	const dialled = "http://host.docker.internal:9000"
+	resolved := []struct {
+		name        string
+		env         map[string]string
+		wantPresign string
+	}{
+		{
+			name:        "minio-public",
+			env:         map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "public", "SOS_PUBLIC_ENDPOINT": "http://localhost:9000"},
+			wantPresign: "http://localhost:9000",
+		},
+		{
+			name:        "minio-endpoint",
+			env:         map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "endpoint"},
+			wantPresign: dialled,
+		},
+		{
+			name:        "s3-compatible-public",
+			env:         map[string]string{"SOS_BACKEND": "s3", "SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "public", "SOS_PUBLIC_ENDPOINT": "https://objects.example.test"},
+			wantPresign: "https://objects.example.test",
+		},
+		{
+			name:        "azurite-public-keeps-account-path",
+			env:         map[string]string{"SOS_BACKEND": "azure", "SOS_ENDPOINT": "http://azurite:10000/acct/", "SOS_PRESIGN_ORIGIN": "public", "SOS_PUBLIC_ENDPOINT": "http://localhost:10000/acct/"},
+			wantPresign: "http://localhost:10000/acct/",
+		},
+		{
+			name: "aws-s3-has-no-choice",
+			env:  map[string]string{"SOS_BACKEND": "s3"},
+		},
+		{
+			name: "gcs-has-no-choice",
+			env:  map[string]string{"SOS_BACKEND": "gcs"},
+		},
+	}
+	for _, tc := range resolved {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SOS_BUCKET", "documents")
+			t.Setenv("SOS_ALLOW_ANONYMOUS", "true")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := config.FromEnv()
+			require.NoError(t, err)
+			require.Equal(t, tc.wantPresign, cfg.Backend.PresignEndpoint)
+			if ep := tc.env["SOS_ENDPOINT"]; ep != "" {
+				require.Equal(t, ep, cfg.Backend.Endpoint, "the gateway keeps dialling SOS_ENDPOINT whatever it signs for")
+			}
+		})
+	}
+
+	refused := []struct {
+		name  string
+		env   map[string]string
+		wants []string
+	}{
+		{
+			name:  "minio-without-a-choice",
+			env:   map[string]string{"SOS_ENDPOINT": dialled},
+			wants: []string{"SOS_PRESIGN_ORIGIN is required", "SOS_PRESIGN_ORIGIN=endpoint", "SOS_PUBLIC_ENDPOINT"},
+		},
+		{
+			name:  "public-endpoint-alone-is-not-a-choice",
+			env:   map[string]string{"SOS_ENDPOINT": dialled, "SOS_PUBLIC_ENDPOINT": "http://localhost:9000"},
+			wants: []string{"SOS_PRESIGN_ORIGIN is required"},
+		},
+		{
+			name:  "s3-compatible-without-a-choice",
+			env:   map[string]string{"SOS_BACKEND": "s3", "SOS_ENDPOINT": dialled},
+			wants: []string{"SOS_PRESIGN_ORIGIN is required"},
+		},
+		{
+			name:  "azurite-without-a-choice",
+			env:   map[string]string{"SOS_BACKEND": "azure", "SOS_ENDPOINT": "http://azurite:10000/acct/"},
+			wants: []string{"SOS_PRESIGN_ORIGIN is required"},
+		},
+		{
+			name:  "unknown-origin",
+			env:   map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "lan"},
+			wants: []string{`unknown SOS_PRESIGN_ORIGIN "lan"`},
+		},
+		{
+			name:  "public-without-endpoint",
+			env:   map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "public"},
+			wants: []string{"requires SOS_PUBLIC_ENDPOINT"},
+		},
+		{
+			name:  "endpoint-with-public-is-contradictory",
+			env:   map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "endpoint", "SOS_PUBLIC_ENDPOINT": "http://localhost:9000"},
+			wants: []string{"contradictory"},
+		},
+		{
+			name:  "public-without-scheme",
+			env:   map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "public", "SOS_PUBLIC_ENDPOINT": "localhost:9000"},
+			wants: []string{"http:// or https://"},
+		},
+		{
+			name:  "public-with-path-for-minio",
+			env:   map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "public", "SOS_PUBLIC_ENDPOINT": "http://localhost:9000/bucket"},
+			wants: []string{"must be an origin"},
+		},
+		{
+			name:  "public-with-credentials",
+			env:   map[string]string{"SOS_ENDPOINT": dialled, "SOS_PRESIGN_ORIGIN": "public", "SOS_PUBLIC_ENDPOINT": "http://u:p@localhost:9000"},
+			wants: []string{"must not carry credentials"},
+		},
+		{
+			name:  "gcs-refuses-a-choice-with-no-effect",
+			env:   map[string]string{"SOS_BACKEND": "gcs", "SOS_PRESIGN_ORIGIN": "public", "SOS_PUBLIC_ENDPOINT": "http://localhost:4443"},
+			wants: []string{"would have no effect"},
+		},
+		{
+			name:  "aws-s3-refuses-a-choice-with-no-effect",
+			env:   map[string]string{"SOS_BACKEND": "s3", "SOS_PRESIGN_ORIGIN": "endpoint"},
+			wants: []string{"would have no effect"},
+		},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SOS_BUCKET", "documents")
+			t.Setenv("SOS_ALLOW_ANONYMOUS", "true")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_, err := config.FromEnv()
+			require.Error(t, err)
+			for _, want := range tc.wants {
+				require.Contains(t, err.Error(), want)
+			}
 		})
 	}
 }

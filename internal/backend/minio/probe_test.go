@@ -56,6 +56,7 @@ func openBackend(t *testing.T, cfg backend.Config) backend.Backend {
 	cfg.Bucket = "probe"
 	cfg.AccessKey = "probe"
 	cfg.SecretKey = "probe-secret"
+	cfg.PresignEndpoint = cfg.Endpoint
 	be, err := miniobe.New(context.Background(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = be.Close() })

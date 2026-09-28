@@ -17,7 +17,10 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	miniogo "github.com/minio/minio-go/v7"
@@ -60,7 +63,15 @@ func ensureBucket(t *testing.T, endpoint, ak, sk, bucket string) {
 	}
 }
 
+// newStack signs presigned URLs against the endpoint it dials.
 func newStack(t *testing.T) storagev0.ObjectStorageClient {
+	t.Helper()
+	return newStackSigningFor(t, func(endpoint string) string { return endpoint })
+}
+
+// newStackSigningFor dials MINIO_ENDPOINT and signs presigned URLs against the
+// endpoint presign derives from it.
+func newStackSigningFor(t *testing.T, presign func(endpoint string) string) storagev0.ObjectStorageClient {
 	t.Helper()
 	endpoint := mustEnv(t, "MINIO_ENDPOINT")
 	ak := mustEnv(t, "MINIO_ACCESS_KEY")
@@ -69,13 +80,14 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 	ensureBucket(t, endpoint, ak, sk, bucket)
 
 	be, err := backend.Open(context.Background(), backend.Config{
-		Kind:         "minio",
-		Endpoint:     endpoint,
-		Region:       "us-east-1",
-		AccessKey:    ak,
-		SecretKey:    sk,
-		Bucket:       bucket,
-		UsePathStyle: true,
+		Kind:            "minio",
+		Endpoint:        endpoint,
+		PresignEndpoint: presign(endpoint),
+		Region:          "us-east-1",
+		AccessKey:       ak,
+		SecretKey:       sk,
+		Bucket:          bucket,
+		UsePathStyle:    true,
 	})
 	require.NoError(t, err)
 	hub := events.NewHub()
@@ -196,4 +208,61 @@ func TestMinIOConditionalDelete(t *testing.T) {
 	require.NoError(t, err)
 	_, rerr := st.Recv()
 	require.Equal(t, codes.NotFound, status.Code(rerr), "object must be gone after a matching conditional delete")
+}
+
+// TestMinIOPresignSignsForThePublicEndpoint is the local-profile byte path: the
+// gateway dials MinIO at one address and the caller fetches the presigned URL
+// at another. The URL must name the caller's host, and MinIO must accept its
+// signature there. The second half shows why the dialled-address URL the
+// gateway used to mint cannot be repaired downstream: SigV4 signs the host, so
+// re-hosting it is refused.
+func TestMinIOPresignSignsForThePublicEndpoint(t *testing.T) {
+	dialled := mustEnv(t, "MINIO_ENDPOINT")
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimPrefix(dialled, "http://"), "https://"))
+	require.NoError(t, err)
+	public := "localhost:" + port
+	require.NotEqual(t, strings.TrimPrefix(dialled, "http://"), public, "MINIO_ENDPOINT must not already be localhost, or this proves nothing")
+
+	key := "integration/presign-public.txt"
+	payload := []byte("fetched at the public host")
+
+	signed := newStackSigningFor(t, func(string) string { return "http://" + public })
+	_, err = put(t, signed, key, payload, &storagev0.PutHeader{ContentType: "text/plain"})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = signed.Delete(context.Background(), &storagev0.DeleteRequest{Key: key})
+	})
+
+	ps, err := signed.Presign(context.Background(), &storagev0.PresignRequest{
+		Key: key, Method: storagev0.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 600,
+	})
+	require.NoError(t, err)
+	u, err := url.Parse(ps.GetUrl())
+	require.NoError(t, err)
+	require.Equal(t, public, u.Host, "the URL must name the host the caller fetches from")
+	status, body := fetch(t, ps.GetUrl())
+	require.Equal(t, http.StatusOK, status, "MinIO must accept a URL signed for the public host: %s", body)
+	require.Equal(t, payload, body)
+
+	dialledStack := newStack(t)
+	old, err := dialledStack.Presign(context.Background(), &storagev0.PresignRequest{
+		Key: key, Method: storagev0.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 600,
+	})
+	require.NoError(t, err)
+	ou, err := url.Parse(old.GetUrl())
+	require.NoError(t, err)
+	require.NotEqual(t, public, ou.Host)
+	ou.Host = public
+	status, body = fetch(t, ou.String())
+	require.Equal(t, http.StatusForbidden, status, "a URL signed for another host must not verify once re-hosted: %s", body)
+}
+
+func fetch(t *testing.T, raw string) (int, []byte) {
+	t.Helper()
+	resp, err := http.Get(raw) //nolint:gosec // the URL is the presign under test
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, body
 }

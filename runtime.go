@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	miniogo "github.com/minio/minio-go/v7"
@@ -162,6 +163,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
+	// Checked before any container exists, like the credentials above: a run
+	// that cannot say which host its URLs name must not leave MinIO behind.
+	if err = s.checkPresignConfiguration(); err != nil {
+		return s.Runtime.InitError(err)
+	}
+
 	if s.runsLocalMinIO() {
 		release, startErr := s.startLocalMinIOWithRelease(ctx)
 		if startErr != nil {
@@ -214,6 +221,69 @@ func (s *Runtime) resolveGatewayToken() (string, error) {
 		return s.conf.authToken, nil
 	}
 	return randomSecret()
+}
+
+// presignOriginPublic is the gateway's SOS_PRESIGN_ORIGIN value that signs
+// against SOS_PUBLIC_ENDPOINT while dialling SOS_ENDPOINT.
+const presignOriginPublic = "public"
+
+// checkPresignConfiguration decides, before anything starts, whether this run
+// can say which host its presigned URLs name.
+//
+// For the agent's own MinIO the answer has to come from presign-host: the
+// gateway dials MinIO as host.docker.internal, a name no host process
+// resolves, and the agent will not substitute an address it detected — a LAN
+// address is exactly what broke every URL at the next DHCP lease. A configured
+// SOS_PRESIGN_ORIGIN / SOS_PUBLIC_ENDPOINT is refused there rather than
+// overridden: the port is allocated per run, so no configured endpoint can
+// name it.
+//
+// For a store the agent does not run, the configured SOS_PRESIGN_ORIGIN and
+// SOS_PUBLIC_ENDPOINT pass through and the gateway validates them against its
+// backend. presign-host then has nothing to apply to; it is reported, not
+// refused, because it is a spec-wide setting a local backend override leaves
+// in place.
+func (s *Runtime) checkPresignConfiguration() error {
+	if !s.runsLocalMinIO() {
+		if s.conf.presignHost != "" {
+			s.Wool.Warn("presign-host applies only to the agent-managed local MinIO and is not used for this backend; " +
+				"presigned URLs follow SOS_PRESIGN_ORIGIN / SOS_PUBLIC_ENDPOINT")
+		}
+		return nil
+	}
+	if s.conf.presignOrigin != "" || s.conf.publicEndpoint != "" {
+		return fmt.Errorf("SOS_PRESIGN_ORIGIN / SOS_PUBLIC_ENDPOINT cannot be configured for the agent-managed local MinIO: " +
+			"its port is allocated per run, so no configured endpoint can name it; " +
+			"set presign-host (or SOS_PRESIGN_HOST) to the host name callers reach it at, e.g. localhost")
+	}
+	return validatePresignHost(s.conf.presignHost)
+}
+
+// validatePresignHost accepts a bare host name or IP literal: the scheme and
+// port are the agent's to supply, so a value carrying either is a
+// misunderstanding the gateway would otherwise sign into every URL.
+func validatePresignHost(host string) error {
+	if host == "" {
+		return fmt.Errorf("presign-host is required for a local run: presigned URLs name a host, and the gateway dials MinIO as " +
+			"host.docker.internal, which callers on this machine cannot resolve. Set presign-host in service.codefly.yaml " +
+			"(or SOS_PRESIGN_HOST in the object-storage configuration) to the host name callers reach this machine's published " +
+			"ports at, e.g. localhost; choose one that survives network changes, never a LAN address")
+	}
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	for _, r := range host {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
+			return fmt.Errorf("presign-host %q must be a bare host name or IP address, without scheme, port or path", host)
+		}
+	}
+	return nil
+}
+
+// localPublicEndpoint is the origin a caller on this machine fetches the
+// agent's MinIO at.
+func localPublicEndpoint(host string, port uint16) string {
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(int(port)))
 }
 
 var errMinIOCustody = errors.New("MinIO custody preflight failed")
@@ -278,12 +348,7 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 		return nil, s.Wool.Wrapf(err, "cannot start minio")
 	}
 
-	// The agent reaches MinIO on the host; the gateway resolves the same store
-	// through host.docker.internal (dockerrun injects it into the container).
-	s.conf.endpoint = fmt.Sprintf("http://host.docker.internal:%d", s.minioHostPort)
-	s.conf.backend = "minio"
-	s.conf.accessKey = localMinioUser
-	s.conf.secretKey = s.minioPassword
+	s.pointGatewayAtLocalMinIO()
 
 	if err = s.ensureBucket(ctx); err != nil {
 		return nil, err
@@ -292,6 +357,22 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 		return nil, err
 	}
 	return release, nil
+}
+
+// pointGatewayAtLocalMinIO configures the gateway against the MinIO this run
+// published on minioHostPort.
+func (s *Runtime) pointGatewayAtLocalMinIO() {
+	// The agent reaches MinIO on the host; the gateway resolves the same store
+	// through host.docker.internal (dockerrun injects it into the container).
+	s.conf.endpoint = fmt.Sprintf("http://host.docker.internal:%d", s.minioHostPort)
+	// That name resolves only inside containers, so presigned URLs are signed
+	// for the host the caller configured instead, on the port published above.
+	// The gateway keeps dialling host.docker.internal.
+	s.conf.presignOrigin = presignOriginPublic
+	s.conf.publicEndpoint = localPublicEndpoint(s.conf.presignHost, s.minioHostPort)
+	s.conf.backend = "minio"
+	s.conf.accessKey = localMinioUser
+	s.conf.secretKey = s.minioPassword
 }
 
 // ensureBucket creates the configured bucket if it does not yet exist, retrying
@@ -450,6 +531,48 @@ func (s *Runtime) rollbackInit(ctx context.Context) {
 	}
 }
 
+// gatewayEnvironment is the gateway container's SOS_* environment for the
+// resolved configuration.
+func (s *Runtime) gatewayEnvironment() []*resources.EnvironmentVariable {
+	envs := []*resources.EnvironmentVariable{
+		resources.Env("SOS_LISTEN", fmt.Sprintf(":%d", gatewayContainerPort)),
+		resources.Env("SOS_BACKEND", s.conf.backend),
+		resources.Env("SOS_BUCKET", s.conf.bucket),
+		resources.Env("SOS_REGION", s.conf.region),
+		resources.Env("SOS_AUTH_TOKEN", s.gatewayToken),
+	}
+	if s.conf.endpoint != "" {
+		envs = append(envs, resources.Env("SOS_ENDPOINT", s.conf.endpoint))
+	}
+	if s.conf.presignOrigin != "" {
+		envs = append(envs, resources.Env("SOS_PRESIGN_ORIGIN", s.conf.presignOrigin))
+	}
+	if s.conf.publicEndpoint != "" {
+		envs = append(envs, resources.Env("SOS_PUBLIC_ENDPOINT", s.conf.publicEndpoint))
+	}
+	if s.conf.prefix != "" {
+		envs = append(envs, resources.Env("SOS_PREFIX", s.conf.prefix))
+	}
+	if s.conf.accessKey != "" {
+		envs = append(envs,
+			resources.Env("SOS_ACCESS_KEY", s.conf.accessKey),
+			resources.Env("SOS_SECRET_KEY", s.conf.secretKey),
+		)
+	}
+	// The configured key file lives on the host, so the gateway is given the
+	// projected copy and the container path it appears at — never the host path,
+	// which does not exist inside the container.
+	if s.gcsCredentialsHostFile != "" {
+		envs = append(envs, resources.Env("SOS_GCS_CREDENTIALS_FILE", gcsCredentialsContainerPath))
+	}
+	// The account name is not a credential; the shared key that pairs with it has
+	// no local delivery path, so an azure backend only authenticates deployed.
+	if s.conf.azureAccount != "" {
+		envs = append(envs, resources.Env("SOS_AZURE_ACCOUNT", s.conf.azureAccount))
+	}
+	return envs
+}
+
 // startGateway runs the gateway container, mapping the assigned host port onto
 // the gateway's listen port and pointing it at the resolved backend.
 func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
@@ -471,37 +594,10 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	// bound only to 127.0.0.1. Publish on all interfaces, as MinIO does; what
 	// makes that safe is SOS_AUTH_TOKEN below, not the binding.
 	runner.WithPublicPorts()
-	envs := []*resources.EnvironmentVariable{
-		resources.Env("SOS_LISTEN", fmt.Sprintf(":%d", gatewayContainerPort)),
-		resources.Env("SOS_BACKEND", s.conf.backend),
-		resources.Env("SOS_BUCKET", s.conf.bucket),
-		resources.Env("SOS_REGION", s.conf.region),
-		resources.Env("SOS_AUTH_TOKEN", s.gatewayToken),
-	}
-	if s.conf.endpoint != "" {
-		envs = append(envs, resources.Env("SOS_ENDPOINT", s.conf.endpoint))
-	}
-	if s.conf.prefix != "" {
-		envs = append(envs, resources.Env("SOS_PREFIX", s.conf.prefix))
-	}
-	if s.conf.accessKey != "" {
-		envs = append(envs,
-			resources.Env("SOS_ACCESS_KEY", s.conf.accessKey),
-			resources.Env("SOS_SECRET_KEY", s.conf.secretKey),
-		)
-	}
-	// The configured key file lives on the host, so the gateway is given the
-	// projected copy and the container path it appears at — never the host path,
-	// which does not exist inside the container.
 	if s.gcsCredentialsHostFile != "" {
 		runner.WithMount(s.gcsCredentialsHostFile, gcsCredentialsContainerPath)
-		envs = append(envs, resources.Env("SOS_GCS_CREDENTIALS_FILE", gcsCredentialsContainerPath))
 	}
-	// The account name is not a credential; the shared key that pairs with it has
-	// no local delivery path, so an azure backend only authenticates deployed.
-	if s.conf.azureAccount != "" {
-		envs = append(envs, resources.Env("SOS_AZURE_ACCOUNT", s.conf.azureAccount))
-	}
+	envs := s.gatewayEnvironment()
 	runner.WithEnvironmentVariables(ctx, envs...)
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start gateway")

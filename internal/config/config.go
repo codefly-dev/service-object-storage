@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -95,6 +96,13 @@ func FromEnv() (Config, error) {
 	if err := checkBackendIsComplete(cfg.Backend); err != nil {
 		return Config{}, err
 	}
+	presign, err := resolvePresignEndpoint(cfg.Backend,
+		PresignOrigin(strings.TrimSpace(os.Getenv("SOS_PRESIGN_ORIGIN"))),
+		strings.TrimSpace(os.Getenv("SOS_PUBLIC_ENDPOINT")))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Backend.PresignEndpoint = presign
 	prefix, err := backend.NormalizePrefix(cfg.Backend.Prefix)
 	if err != nil {
 		return Config{}, err
@@ -105,6 +113,91 @@ func FromEnv() (Config, error) {
 		cfg.Backend.UsePathStyle = true
 	}
 	return cfg, nil
+}
+
+// PresignOrigin names which host the URLs Presign mints are signed for.
+type PresignOrigin string
+
+const (
+	// PresignFromEndpoint signs against SOS_ENDPOINT, the address the gateway
+	// dials. Right when whoever fetches the URL reaches the store at that same
+	// address — typically a deployment whose store endpoint is public.
+	PresignFromEndpoint PresignOrigin = "endpoint"
+	// PresignFromPublic signs against SOS_PUBLIC_ENDPOINT while the gateway keeps
+	// dialling SOS_ENDPOINT. Right when the two differ — a gateway container that
+	// reaches MinIO over the Docker bridge while a browser on the host reaches it
+	// at localhost.
+	PresignFromPublic PresignOrigin = "public"
+)
+
+// resolvePresignEndpoint turns the caller's explicit presign choice into the
+// endpoint the backend signs against. There is no default: a backend that puts
+// a configured endpoint's host into its URLs (backend.SignsAgainstEndpoint)
+// requires SOS_PRESIGN_ORIGIN, and one that does not refuses it, because a
+// setting with no effect reads as one that is in force.
+//
+// Before this choice existed the gateway always signed against SOS_ENDPOINT.
+// Locally that is a container-only name (host.docker.internal) or, where an
+// operator substituted one, the machine's LAN address — which the next DHCP
+// lease invalidates for every URL and CSP that named it.
+func resolvePresignEndpoint(b backend.Config, origin PresignOrigin, public string) (string, error) {
+	if !backend.SignsAgainstEndpoint(b.Kind, b.Endpoint) {
+		if origin != "" || public != "" {
+			return "", fmt.Errorf("SOS_PRESIGN_ORIGIN / SOS_PUBLIC_ENDPOINT are set, but SOS_BACKEND=%s with this SOS_ENDPOINT "+
+				"signs against the provider's own host, so they would have no effect: unset them", b.Kind)
+		}
+		return "", nil
+	}
+	switch origin {
+	case "":
+		return "", fmt.Errorf("SOS_PRESIGN_ORIGIN is required for SOS_BACKEND=%s with SOS_ENDPOINT=%s: presigned URLs name a host, "+
+			"and the gateway will not guess which one the caller fetches from. "+
+			"Set SOS_PRESIGN_ORIGIN=%s to sign against SOS_ENDPOINT, or SOS_PRESIGN_ORIGIN=%s with SOS_PUBLIC_ENDPOINT "+
+			"(e.g. http://localhost:<port>) to sign against the host callers use while still dialling SOS_ENDPOINT",
+			b.Kind, b.Endpoint, PresignFromEndpoint, PresignFromPublic)
+	case PresignFromEndpoint:
+		if public != "" {
+			return "", fmt.Errorf("SOS_PRESIGN_ORIGIN=%s and SOS_PUBLIC_ENDPOINT are contradictory: "+
+				"unset SOS_PUBLIC_ENDPOINT to sign against SOS_ENDPOINT, or set SOS_PRESIGN_ORIGIN=%s to sign against it",
+				PresignFromEndpoint, PresignFromPublic)
+		}
+		return b.Endpoint, nil
+	case PresignFromPublic:
+		if public == "" {
+			return "", fmt.Errorf("SOS_PRESIGN_ORIGIN=%s requires SOS_PUBLIC_ENDPOINT, the exact origin callers fetch presigned URLs from", PresignFromPublic)
+		}
+		if err := checkPublicEndpoint(b.Kind, public); err != nil {
+			return "", err
+		}
+		return public, nil
+	default:
+		return "", fmt.Errorf("unknown SOS_PRESIGN_ORIGIN %q (want %q or %q)", origin, PresignFromEndpoint, PresignFromPublic)
+	}
+}
+
+// checkPublicEndpoint requires an absolute http(s) URL naming a host and
+// nothing a signer could not honour. The scheme is required, unlike
+// SOS_ENDPOINT's, because it is the one the fetcher uses and cannot be inferred.
+func checkPublicEndpoint(kind, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("SOS_PUBLIC_ENDPOINT %q is not a URL: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("SOS_PUBLIC_ENDPOINT %q must start with http:// or https://", raw)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("SOS_PUBLIC_ENDPOINT %q names no host", raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("SOS_PUBLIC_ENDPOINT %q must not carry credentials, a query or a fragment", raw)
+	}
+	// Azure (Azurite) addresses the account as a path segment; the S3 signers
+	// take an origin only, and minio-go refuses a path outright.
+	if kind != "azure" && u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("SOS_PUBLIC_ENDPOINT %q must be an origin (scheme://host[:port]) for SOS_BACKEND=%s", raw, kind)
+	}
+	return nil
 }
 
 // checkBackendIsComplete refuses a backend selection that cannot open a store,

@@ -42,6 +42,11 @@ type Backend struct {
 	// required for presigning (service SAS) and for authenticating same-account
 	// server-side copy sources.
 	sharedKey *azblob.SharedKeyCredential
+	// signer is the client whose URLs presigned links are built on: bound to
+	// cfg.PresignEndpoint when the backend dials a custom endpoint, else the
+	// dialling client itself (the account's public blob host). It is only ever
+	// asked for a URL, never sent a request.
+	signer    *azblob.Client
 	maxExpiry time.Duration
 	probe     backend.ProbeStrategy
 	probeKey  string
@@ -50,6 +55,9 @@ type Backend struct {
 // New opens an Azure Blob backend bound to cfg.Bucket (the container).
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	const op = "azure.New"
+	if err := backend.CheckPresignEndpoint("azure", cfg); err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, op, err)
+	}
 	serviceURL := cfg.Endpoint
 	if serviceURL == "" {
 		serviceURL = fmt.Sprintf("https://%s.blob.core.windows.net/", cfg.AzureAccount)
@@ -74,6 +82,14 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		}
 		b.client = client
 		b.sharedKey = cred
+		b.signer = client
+		if cfg.PresignEndpoint != "" {
+			signer, err := azblob.NewClientWithSharedKeyCredential(cfg.PresignEndpoint, cred, nil)
+			if err != nil {
+				return nil, serr.Wrap(serr.InvalidArgument, op, fmt.Errorf("presign endpoint: %w", err))
+			}
+			b.signer = signer
+		}
 		return b, nil
 	}
 
@@ -394,7 +410,7 @@ func (b *Backend) copySourceURL(srcKey string) (string, error) {
 	}
 	now := time.Now().UTC()
 	qp, err := sas.BlobSignatureValues{
-		Protocol:      sas.ProtocolHTTPS,
+		Protocol:      presignProtocol(base),
 		StartTime:     now.Add(-5 * time.Minute),
 		ExpiryTime:    now.Add(1 * time.Hour),
 		Permissions:   (&sas.BlobPermissions{Read: true}).String(),
@@ -430,10 +446,11 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 		perms = sas.BlobPermissions{Read: true}
 	}
 
+	blobURL := b.signer.ServiceClient().NewContainerClient(b.container).NewBlobClient(key).URL()
 	now := time.Now().UTC()
 	expiresAt := now.Add(clamped)
 	qp, err := sas.BlobSignatureValues{
-		Protocol:      sas.ProtocolHTTPS,
+		Protocol:      presignProtocol(blobURL),
 		StartTime:     now.Add(-5 * time.Minute),
 		ExpiryTime:    expiresAt,
 		Permissions:   perms.String(),
@@ -444,7 +461,8 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 		return nil, serr.Wrap(serr.Internal, op, err)
 	}
 
-	blobURL := b.containerClient().NewBlobClient(key).URL()
+	// A service SAS signs the resource path, not the host, so the URL is built
+	// on the presign endpoint's client and still verifies against the store.
 	return &backend.PresignResult{
 		Method:    method,
 		URL:       blobURL + "?" + qp.Encode(),
@@ -641,4 +659,11 @@ func fromMetaPtr(m map[string]*string) map[string]string {
 		out[k] = derefStr(v)
 	}
 	return out
+}
+
+func presignProtocol(blobURL string) sas.Protocol {
+	if strings.HasPrefix(blobURL, "http://") {
+		return sas.ProtocolHTTPSandHTTP
+	}
+	return sas.ProtocolHTTPS
 }

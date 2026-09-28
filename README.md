@@ -72,7 +72,9 @@ notifications, Azure Event Grid) instead.
 | `SOS_BUCKET` | — | required (container for Azure) |
 | `SOS_PREFIX` | — | confine the gateway to one key prefix inside the bucket; keys are relative to it |
 | `SOS_REGION` | `us-east-1` | |
-| `SOS_ENDPOINT` | — | MinIO / S3-compatible / Azurite endpoint; **required** for `minio` |
+| `SOS_ENDPOINT` | — | MinIO / S3-compatible / Azurite endpoint the gateway **dials**; **required** for `minio` |
+| `SOS_PRESIGN_ORIGIN` | — | which host presigned URLs are signed for: `endpoint` (`SOS_ENDPOINT`) \| `public` (`SOS_PUBLIC_ENDPOINT`). **Required** whenever the backend signs against `SOS_ENDPOINT` (`minio`; `s3` / `azure` with `SOS_ENDPOINT`), refused otherwise. See [Presigned URL host](#presigned-url-host) |
+| `SOS_PUBLIC_ENDPOINT` | — | with `SOS_PRESIGN_ORIGIN=public`: the exact `http(s)://host[:port]` callers fetch presigned URLs from (Azure may add the account path); refused with `endpoint` |
 | `SOS_ACCESS_KEY` / `SOS_SECRET_KEY` | — | S3 / MinIO credentials |
 | `SOS_GCS_CREDENTIALS_FILE` | — | path **inside the container** to a GCS service-account JSON (else ADC) |
 | `SOS_AZURE_ACCOUNT` / `SOS_AZURE_KEY` | — | Azure account + shared key |
@@ -80,6 +82,30 @@ notifications, Azure Event Grid) instead.
 | `SOS_PROBE_KEY` | — | required for `stat`; the object headed (need not exist) |
 | `SOS_PROBE_INTERVAL` | `10s` | how often readiness is re-probed |
 | `SOS_PROBE_TIMEOUT` | `5s` | per-probe deadline |
+
+## Presigned URL host
+
+S3 and MinIO v4 signatures cover the `Host` header, so a presigned URL is valid
+only at the host it was signed for; rewriting the host afterwards invalidates
+it. The address the gateway dials and the address a caller fetches from are
+often different — locally, the gateway container reaches MinIO as
+`host.docker.internal`, a name a browser on the host cannot resolve. So the
+gateway does not pick a host: when the backend signs against `SOS_ENDPOINT`, the
+caller sets `SOS_PRESIGN_ORIGIN`, and an unset or unknown value is refused at
+startup.
+
+- `endpoint` signs against `SOS_ENDPOINT`. Use it when callers reach the store at
+  the same address the gateway dials (a deployment whose store endpoint is
+  public, for example).
+- `public` signs against `SOS_PUBLIC_ENDPOINT` and keeps dialling `SOS_ENDPOINT`.
+  Use it when the two differ. Choose a host that stays valid across network
+  changes, such as `localhost` or a DNS name. A LAN address breaks every URL, and
+  every CSP that names it, at the next DHCP lease.
+
+GCS, and S3 and Azure without `SOS_ENDPOINT`, sign against the provider's own
+public host. Setting either variable for them is refused, because it would have
+no effect. Presigning is local computation: the signer never contacts the
+public endpoint, so the gateway does not need to be able to reach it.
 
 ## Readiness
 
@@ -233,18 +259,34 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
   bridge with its own, so `Start` still waits on the gateway's `Ready` probe.
   The agent probes over the **native** network view, since it is a host process
   even when the service it started runs in a container.
+  Presigned URLs are signed for `http://<presign-host>:<published MinIO port>`
+  (`SOS_PRESIGN_ORIGIN=public`), while the gateway keeps dialling
+  `host.docker.internal`. `presign-host` is a setting in `service.codefly.yaml`,
+  overridable as `SOS_PRESIGN_HOST` in the `object-storage` configuration. It is
+  the bare host name callers on this machine reach published ports at, such as
+  `localhost`. A service scaffolded by the agent gets `presign-host: localhost`
+  in its spec. A local MinIO run without it is **refused at `Init`, before any
+  container starts**: the agent never substitutes an address it detected. Setting
+  `SOS_PRESIGN_ORIGIN` or `SOS_PUBLIC_ENDPOINT` for the agent's own MinIO is
+  refused as well, because its port is allocated per run and no configured
+  endpoint can name it. For a store the agent does not run, both pass through to
+  the gateway, and `presign-host` is reported as unused.
 - **Deployed**: the Builder emits a Kubernetes Deployment running the gateway
   image against the configured cloud backend (`SOS_BACKEND` = `s3` | `gcs` |
   `azure`, defaulting to `s3` when the environment names none). `SOS_BUCKET`,
   `SOS_PREFIX`, `SOS_REGION`, `SOS_ENDPOINT` and the backend are read from the
   deployment configuration (the `object-storage` group), overriding the service
-  spec. The container also declares `CODEFLY__SERVICE=<service name>`, so an
+  spec. `SOS_PRESIGN_ORIGIN` and `SOS_PUBLIC_ENDPOINT` are read from the same
+  group and rendered only when configured. The container also declares `CODEFLY__SERVICE=<service name>`, so an
   environment's service configuration bound by the CLI after the render replaces
   those `SOS_*` literals by name — the usual way a cell selects its store over a
   spec still on the local default (`backend: minio`). A deployment never starts
   MinIO, so a gateway left on `minio` without `SOS_ENDPOINT` **refuses to start**
   naming the missing variable and the remedy (the render cannot refuse it: the
-  binding it would need to see happens afterwards). The Service publishes the
+  binding it would need to see happens afterwards). For the same reason, a
+  gateway that signs against `SOS_ENDPOINT` (`minio`, or `s3` / `azure` pointed
+  at one) without `SOS_PRESIGN_ORIGIN` refuses to start, and the render does not
+  refuse it. The Service publishes the
   in-cluster port core allocated to the gRPC endpoint (falling back to 9464) and
   forwards it to the container's 9464. The pod runs under its own Kubernetes ServiceAccount, named after the service
   and rendered in the target namespace (never the namespace `default`), so a

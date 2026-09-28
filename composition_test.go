@@ -335,10 +335,10 @@ func TestConnectionConfigurationWithoutTokenOmitsIt(t *testing.T) {
 
 func TestSettings_YAMLRoundTrip(t *testing.T) {
 	var s Settings
-	if err := yaml.Unmarshal([]byte("backend: s3\nbucket: docs\nregion: us-east-2\n"), &s); err != nil {
+	if err := yaml.Unmarshal([]byte("backend: s3\nbucket: docs\nregion: us-east-2\npresign-host: localhost\n"), &s); err != nil {
 		t.Fatalf("yaml unmarshal: %v", err)
 	}
-	if s.Backend != "s3" || s.Bucket != "docs" || s.Region != "us-east-2" {
+	if s.Backend != "s3" || s.Bucket != "docs" || s.Region != "us-east-2" || s.PresignHost != "localhost" {
 		t.Fatalf("settings = %+v", s)
 	}
 }
