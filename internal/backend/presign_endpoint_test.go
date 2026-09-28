@@ -117,3 +117,25 @@ func TestPresignEndpointIsRequiredExactlyWhereItMatters(t *testing.T) {
 		})
 	}
 }
+
+// The public URL determines SAS protocol, even when the dial endpoint differs.
+func TestAzurePresignProtocolMatchesTheFetchEndpoint(t *testing.T) {
+	for _, tc := range []struct{ name, dial, public, protocol string }{
+		{"http-public", "https://private.example.test/acct", "http://localhost:10000/acct", "https,http"},
+		{"https-public", "http://azurite:10000/acct", "https://public.example.test/acct", "https"},
+		{"provider", "", "", "https"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be, err := backend.Open(context.Background(), backend.Config{Kind: "azure", Endpoint: tc.dial, PresignEndpoint: tc.public, AzureAccount: "acct", AzureKey: base64.StdEncoding.EncodeToString([]byte("synthetic-shared-key-for-tests")), Bucket: "bkt"})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = be.Close() })
+			for _, method := range []backend.PresignMethod{backend.PresignGet, backend.PresignPut} {
+				result, err := be.Presign(context.Background(), "object", method, time.Minute)
+				require.NoError(t, err)
+				u, err := url.Parse(result.URL)
+				require.NoError(t, err)
+				require.Equal(t, tc.protocol, u.Query().Get("spr"))
+			}
+		})
+	}
+}

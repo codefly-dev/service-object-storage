@@ -410,7 +410,7 @@ func (b *Backend) copySourceURL(srcKey string) (string, error) {
 	}
 	now := time.Now().UTC()
 	qp, err := sas.BlobSignatureValues{
-		Protocol:      sas.ProtocolHTTPS,
+		Protocol:      presignProtocol(base),
 		StartTime:     now.Add(-5 * time.Minute),
 		ExpiryTime:    now.Add(1 * time.Hour),
 		Permissions:   (&sas.BlobPermissions{Read: true}).String(),
@@ -446,10 +446,11 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 		perms = sas.BlobPermissions{Read: true}
 	}
 
+	blobURL := b.signer.ServiceClient().NewContainerClient(b.container).NewBlobClient(key).URL()
 	now := time.Now().UTC()
 	expiresAt := now.Add(clamped)
 	qp, err := sas.BlobSignatureValues{
-		Protocol:      sas.ProtocolHTTPS,
+		Protocol:      presignProtocol(blobURL),
 		StartTime:     now.Add(-5 * time.Minute),
 		ExpiryTime:    expiresAt,
 		Permissions:   perms.String(),
@@ -462,7 +463,6 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 
 	// A service SAS signs the resource path, not the host, so the URL is built
 	// on the presign endpoint's client and still verifies against the store.
-	blobURL := b.signer.ServiceClient().NewContainerClient(b.container).NewBlobClient(key).URL()
 	return &backend.PresignResult{
 		Method:    method,
 		URL:       blobURL + "?" + qp.Encode(),
@@ -659,4 +659,11 @@ func fromMetaPtr(m map[string]*string) map[string]string {
 		out[k] = derefStr(v)
 	}
 	return out
+}
+
+func presignProtocol(blobURL string) sas.Protocol {
+	if strings.HasPrefix(blobURL, "http://") {
+		return sas.ProtocolHTTPSandHTTP
+	}
+	return sas.ProtocolHTTPS
 }
