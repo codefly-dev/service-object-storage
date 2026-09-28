@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -165,6 +167,26 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	require.Equal(t, payload, body)
 	require.Equal(t, "text/plain", hdr.GetInfo().GetContentType())
 	require.Equal(t, int64(len(payload)), hdr.GetInfo().GetSize())
+
+	// The URL a caller on this machine receives must be fetchable from here. The
+	// gateway dials MinIO as host.docker.internal, which a host process cannot
+	// resolve, so the URL has to name the presign-host the scaffolded spec
+	// states, on the port MinIO was published at — and MinIO has to accept the
+	// signature there.
+	ps, err := client.Presign(ctx, &storagev0.PresignRequest{
+		Key: key, Method: storagev0.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 60,
+	})
+	require.NoError(t, err)
+	presigned, err := url.Parse(ps.GetUrl())
+	require.NoError(t, err)
+	require.Equal(t, net.JoinHostPort("localhost", fmt.Sprint(rt.minioHostPort)), presigned.Host, ps.GetUrl())
+	resp, err := http.Get(ps.GetUrl())
+	require.NoError(t, err)
+	fetched, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(fetched))
+	require.Equal(t, payload, fetched)
 
 	// Teardown owns exactly what it started. The agent creates no Docker network
 	// of its own, so removing both containers removes everything it holds —

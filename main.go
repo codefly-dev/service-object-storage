@@ -141,9 +141,10 @@ func parseMinioImageLock(content []byte) (*resources.DockerImage, error) {
 	return &resources.DockerImage{Name: lock.Name, Tag: lock.Release, Digest: lock.Digest}, nil
 }
 
-// Settings are the service.codefly.yaml knobs. Local runs need none — the
-// defaults stand up a MinIO-backed gateway. Deployed runs name a cloud backend
-// and its bucket; credentials arrive as runtime configuration, never here.
+// Settings are the service.codefly.yaml knobs. A local run needs one: the host
+// name presigned URLs are signed for (presign-host); the other defaults stand up
+// a MinIO-backed gateway. Deployed runs name a cloud backend and its bucket;
+// credentials arrive as runtime configuration, never here.
 type Settings struct {
 	// Backend selects the object store: empty means the local MinIO default.
 	// A deployed environment sets "s3", "gcs", or "azure".
@@ -156,6 +157,15 @@ type Settings struct {
 	// consumer can be handed a shared, provisioned bucket. Empty is the whole
 	// bucket.
 	Prefix string `yaml:"prefix"`
+	// PresignHost is the host name presigned URLs name when the agent runs its
+	// own MinIO locally — the name a caller on this machine (a browser, the
+	// frontend) reaches the published MinIO port at, e.g. "localhost". The agent
+	// signs for http://<presign-host>:<the port it published> while the gateway
+	// keeps dialling MinIO over the container bridge. It must stay valid across
+	// network changes: a LAN address breaks every URL and CSP naming it at the
+	// next DHCP lease. Required for a local MinIO run, which is refused without
+	// it; a deployment never starts MinIO and does not read it.
+	PresignHost string `yaml:"presign-host"`
 }
 
 // resolved holds the effective configuration after defaults and runtime
@@ -176,6 +186,14 @@ type resolved struct {
 	gcsCredentialsFile string
 	azureAccount       string
 	authToken          string
+	// presignHost is Settings.PresignHost after the SOS_PRESIGN_HOST override.
+	presignHost string
+	// presignOrigin and publicEndpoint are the gateway's SOS_PRESIGN_ORIGIN and
+	// SOS_PUBLIC_ENDPOINT. Configured values pass through to a gateway that
+	// dials a store the agent does not run; for the agent's own MinIO the
+	// Runtime derives them from presignHost and the port it published.
+	presignOrigin  string
+	publicEndpoint string
 }
 
 type Service struct {
@@ -237,10 +255,11 @@ func resolveServingGRPCEndpoint(ctx context.Context, endpoints []*basev0.Endpoin
 // takes precedence.
 func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configuration) error {
 	r := resolved{
-		backend: s.Backend,
-		bucket:  s.Bucket,
-		region:  s.Region,
-		prefix:  s.Prefix,
+		backend:     s.Backend,
+		bucket:      s.Bucket,
+		region:      s.Region,
+		prefix:      s.Prefix,
+		presignHost: s.PresignHost,
 	}
 	if r.bucket == "" {
 		r.bucket = "documents"
@@ -260,6 +279,9 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 			"SOS_GCS_CREDENTIALS_FILE": &r.gcsCredentialsFile,
 			"SOS_AZURE_ACCOUNT":        &r.azureAccount,
 			"SOS_AUTH_TOKEN":           &r.authToken,
+			"SOS_PRESIGN_HOST":         &r.presignHost,
+			"SOS_PRESIGN_ORIGIN":       &r.presignOrigin,
+			"SOS_PUBLIC_ENDPOINT":      &r.publicEndpoint,
 		} {
 			v, err := resources.GetConfigurationValue(ctx, conf, "object-storage", key)
 			if err == nil && v != "" {
@@ -279,6 +301,9 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 	r.gcsCredentialsFile = strings.TrimSpace(r.gcsCredentialsFile)
 	r.endpoint = strings.TrimSpace(r.endpoint)
 	r.prefix = strings.TrimSpace(r.prefix)
+	r.presignHost = strings.TrimSpace(r.presignHost)
+	r.presignOrigin = strings.TrimSpace(r.presignOrigin)
+	r.publicEndpoint = strings.TrimSpace(r.publicEndpoint)
 	s.conf = r
 	return nil
 }

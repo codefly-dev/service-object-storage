@@ -24,14 +24,15 @@ func s3Error(code string) string {
 func openProbe(t *testing.T, endpoint string, strategy backend.ProbeStrategy) backend.Backend {
 	t.Helper()
 	be, err := New(context.Background(), backend.Config{
-		Bucket:        "probe",
-		Region:        "us-east-1",
-		Endpoint:      endpoint,
-		UsePathStyle:  true,
-		AccessKey:     "probe",
-		SecretKey:     "probe-secret",
-		ProbeStrategy: strategy,
-		ProbeKey:      "sentinel",
+		Bucket:          "probe",
+		Region:          "us-east-1",
+		Endpoint:        endpoint,
+		PresignEndpoint: endpoint,
+		UsePathStyle:    true,
+		AccessKey:       "probe",
+		SecretKey:       "probe-secret",
+		ProbeStrategy:   strategy,
+		ProbeKey:        "sentinel",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = be.Close() })

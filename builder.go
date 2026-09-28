@@ -34,6 +34,15 @@ type deploymentTemplateParameters struct {
 	// Endpoint is the store's address for minio (required) and S3-compatible
 	// stores (optional). It is an address, not a credential.
 	Endpoint string
+	// PresignOrigin and PublicEndpoint are SOS_PRESIGN_ORIGIN and
+	// SOS_PUBLIC_ENDPOINT from the deployment configuration, rendered only when
+	// configured. The gateway requires the origin whenever it signs against a
+	// configured endpoint (minio; s3/azure with SOS_ENDPOINT) and refuses to
+	// start without it. The render does not decide or refuse it, for the same
+	// reason as a missing minio endpoint: the environment's service
+	// configuration is bound onto the container after this render.
+	PresignOrigin  string
+	PublicEndpoint string
 	// ServicePort is the port the Kubernetes Service publishes: the in-cluster
 	// port core allocated to the gRPC endpoint, the one every consumer is told
 	// to dial. It forwards to the container's gatewayContainerPort.
@@ -133,12 +142,14 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 
 	parameters := &deploymentTemplateParameters{
-		Backend:      s.conf.backend,
-		Bucket:       s.conf.bucket, // LoadConfiguration already defaults bucket/region.
-		Region:       s.conf.region,
-		Prefix:       s.conf.prefix,
-		Endpoint:     s.conf.endpoint,
-		AzureAccount: s.conf.azureAccount,
+		Backend:        s.conf.backend,
+		Bucket:         s.conf.bucket, // LoadConfiguration already defaults bucket/region.
+		Region:         s.conf.region,
+		Prefix:         s.conf.prefix,
+		Endpoint:       s.conf.endpoint,
+		PresignOrigin:  s.conf.presignOrigin,
+		PublicEndpoint: s.conf.publicEndpoint,
+		AzureAccount:   s.conf.azureAccount,
 	}
 	servicePort, err := s.servicePort(ctx, req.GetNetworkMappings())
 	if err != nil {
@@ -268,6 +279,12 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	defer s.Wool.Catch()
 	if err := s.Templates(ctx, s.Information, services.WithFactory(factoryFS)); err != nil {
 		return s.Builder.CreateError(err)
+	}
+	// A new service states the host its presigned URLs name in its own spec,
+	// where the caller can see and change it; the Runtime refuses a local run
+	// without one rather than choosing it.
+	if s.Settings.PresignHost == "" {
+		s.Settings.PresignHost = "localhost"
 	}
 	if err := s.CreateEndpoints(ctx); err != nil {
 		return s.Builder.CreateErrorf(err, "cannot create endpoints")

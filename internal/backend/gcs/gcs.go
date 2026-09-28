@@ -52,6 +52,9 @@ type Backend struct {
 
 // New opens a GCS backend bound to cfg.Bucket.
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
+	if err := backend.CheckPresignEndpoint("gcs", cfg); err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, "gcs.New", err)
+	}
 	var opts []option.ClientOption
 	if cfg.GCSCredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(cfg.GCSCredentialsFile))

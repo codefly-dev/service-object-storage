@@ -1,3 +1,5 @@
 # Getting started
 
-This service runs the object-storage gateway. Locally it stands up MinIO automatically; no configuration is required.
+This service runs the object-storage gateway. Locally it stands up MinIO automatically.
+
+Presigned URLs are signed for `presign-host` in `service.codefly.yaml`, on the port MinIO is published at. The scaffold sets it to `localhost`. Change it only to a host name that callers on this machine can use and that survives network changes. A local run without it is refused.

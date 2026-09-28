@@ -60,6 +60,14 @@ spec:
             - name: SOS_ENDPOINT
               value: "{{ .Deployment.Parameters.Endpoint }}"
 {{- end }}
+{{- if .Deployment.Parameters.PresignOrigin }}
+            - name: SOS_PRESIGN_ORIGIN
+              value: "{{ .Deployment.Parameters.PresignOrigin }}"
+{{- end }}
+{{- if .Deployment.Parameters.PublicEndpoint }}
+            - name: SOS_PUBLIC_ENDPOINT
+              value: "{{ .Deployment.Parameters.PublicEndpoint }}"
+{{- end }}
             # The gateway refuses to start on an unauthenticated listener unless
             # this is set. In the deployed profile caller identity is enforced by
             # the cluster — NetworkPolicy plus service-mesh mTLS in front of this

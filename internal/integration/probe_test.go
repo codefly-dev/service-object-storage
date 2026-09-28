@@ -22,6 +22,7 @@ func openProbeBackend(t *testing.T, cfg backend.Config) backend.Backend {
 	t.Helper()
 	cfg.Kind = "minio"
 	cfg.Endpoint = mustEnv(t, "MINIO_ENDPOINT")
+	cfg.PresignEndpoint = cfg.Endpoint // probes never presign
 	cfg.Region = "us-east-1"
 	cfg.UsePathStyle = true
 

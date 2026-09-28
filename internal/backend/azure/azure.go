@@ -42,6 +42,11 @@ type Backend struct {
 	// required for presigning (service SAS) and for authenticating same-account
 	// server-side copy sources.
 	sharedKey *azblob.SharedKeyCredential
+	// signer is the client whose URLs presigned links are built on: bound to
+	// cfg.PresignEndpoint when the backend dials a custom endpoint, else the
+	// dialling client itself (the account's public blob host). It is only ever
+	// asked for a URL, never sent a request.
+	signer    *azblob.Client
 	maxExpiry time.Duration
 	probe     backend.ProbeStrategy
 	probeKey  string
@@ -50,6 +55,9 @@ type Backend struct {
 // New opens an Azure Blob backend bound to cfg.Bucket (the container).
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	const op = "azure.New"
+	if err := backend.CheckPresignEndpoint("azure", cfg); err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, op, err)
+	}
 	serviceURL := cfg.Endpoint
 	if serviceURL == "" {
 		serviceURL = fmt.Sprintf("https://%s.blob.core.windows.net/", cfg.AzureAccount)
@@ -74,6 +82,14 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		}
 		b.client = client
 		b.sharedKey = cred
+		b.signer = client
+		if cfg.PresignEndpoint != "" {
+			signer, err := azblob.NewClientWithSharedKeyCredential(cfg.PresignEndpoint, cred, nil)
+			if err != nil {
+				return nil, serr.Wrap(serr.InvalidArgument, op, fmt.Errorf("presign endpoint: %w", err))
+			}
+			b.signer = signer
+		}
 		return b, nil
 	}
 
@@ -444,7 +460,9 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 		return nil, serr.Wrap(serr.Internal, op, err)
 	}
 
-	blobURL := b.containerClient().NewBlobClient(key).URL()
+	// A service SAS signs the resource path, not the host, so the URL is built
+	// on the presign endpoint's client and still verifies against the store.
+	blobURL := b.signer.ServiceClient().NewContainerClient(b.container).NewBlobClient(key).URL()
 	return &backend.PresignResult{
 		Method:    method,
 		URL:       blobURL + "?" + qp.Encode(),

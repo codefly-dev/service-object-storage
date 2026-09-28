@@ -38,7 +38,12 @@ func init() { backend.Register("minio", New) }
 
 // Backend is the MinIO implementation of backend.Backend.
 type Backend struct {
-	client     *minio.Client
+	client *minio.Client
+	// signer mints presigned URLs. It is a separate client bound to
+	// cfg.PresignEndpoint, because SigV4 signs the host header: the URL has to
+	// name the host its fetcher dials, which need not be the one the gateway
+	// dials. It is never used for a request — presigning is local computation.
+	signer     *minio.Client
 	bucket     string
 	endpoint   string
 	presignMax time.Duration
@@ -50,7 +55,43 @@ type Backend struct {
 func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 	const op = "minio.New"
 
-	endpoint := cfg.Endpoint
+	if err := backend.CheckPresignEndpoint("minio", cfg); err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, op, err)
+	}
+
+	region := cfg.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	client, endpoint, err := newClient(cfg.Endpoint, region, cfg)
+	if err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, op, err)
+	}
+	// The region is fixed on the signer, so presigning never asks the store for
+	// the bucket location: the signer's host may be one this process cannot
+	// reach at all (the host's localhost, seen from a container).
+	signer, _, err := newClient(cfg.PresignEndpoint, region, cfg)
+	if err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, op, fmt.Errorf("presign endpoint: %w", err))
+	}
+
+	return &Backend{
+		client:     client,
+		signer:     signer,
+		bucket:     cfg.Bucket,
+		endpoint:   endpoint,
+		presignMax: cfg.PresignMaxExpiry,
+		probe:      cfg.Strategy(),
+		probeKey:   cfg.ProbeKey,
+	}, nil
+}
+
+// newClient opens a minio-go client against raw, an endpoint with or without an
+// http:// / https:// scheme (without one, plain http). It returns the endpoint
+// with the scheme and trailing slash removed.
+func newClient(raw, region string, cfg backend.Config) (*minio.Client, string, error) {
+	endpoint := raw
 	secure := false
 	switch {
 	case strings.HasPrefix(endpoint, "https://"):
@@ -62,28 +103,15 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 	}
 	endpoint = strings.TrimSuffix(endpoint, "/")
 
-	region := cfg.Region
-	if region == "" {
-		region = "us-east-1"
-	}
-
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: secure,
 		Region: region,
 	})
 	if err != nil {
-		return nil, serr.Wrap(serr.InvalidArgument, op, err)
+		return nil, "", err
 	}
-
-	return &Backend{
-		client:     client,
-		bucket:     cfg.Bucket,
-		endpoint:   endpoint,
-		presignMax: cfg.PresignMaxExpiry,
-		probe:      cfg.Strategy(),
-		probeKey:   cfg.ProbeKey,
-	}, nil
+	return client, endpoint, nil
 }
 
 // Name reports the backend kind.
@@ -468,7 +496,8 @@ func (b *Backend) Copy(ctx context.Context, srcKey, dstKey string, opts backend.
 	return &backend.PutResult{ETag: info.ETag, VersionID: info.VersionID}, nil
 }
 
-// Presign returns a time-limited URL. This is computed locally (no server call).
+// Presign returns a time-limited URL signed for the presign endpoint's host.
+// This is computed locally (no server call).
 func (b *Backend) Presign(ctx context.Context, key string, method backend.PresignMethod, expiry time.Duration) (*backend.PresignResult, error) {
 	const op = "minio.Presign"
 
@@ -483,9 +512,9 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 	var err error
 	switch method {
 	case backend.PresignGet:
-		u, err = b.client.PresignedGetObject(ctx, b.bucket, key, expiry, url.Values{})
+		u, err = b.signer.PresignedGetObject(ctx, b.bucket, key, expiry, url.Values{})
 	case backend.PresignPut:
-		u, err = b.client.PresignedPutObject(ctx, b.bucket, key, expiry)
+		u, err = b.signer.PresignedPutObject(ctx, b.bucket, key, expiry)
 	default:
 		return nil, serr.New(serr.InvalidArgument, op, fmt.Sprintf("unknown presign method %d", method))
 	}

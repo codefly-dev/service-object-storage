@@ -7,3 +7,7 @@ store initializes on its first run when its custody directory is absent or
 empty; a directory holding data without a custody record fails closed.
 Existing anonymous-volume stores require explicit recovery;
 see https://github.com/codefly-dev/service-object-storage/blob/main/docs/local-minio-recovery.md.
+
+Presigned URLs are signed for `presign-host` (service.codefly.yaml, or
+`SOS_PRESIGN_HOST`) on the published MinIO port. The gateway itself dials MinIO
+as host.docker.internal. A local run without `presign-host` is refused.

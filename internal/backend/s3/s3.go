@@ -60,6 +60,10 @@ type Backend struct {
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	const op = "s3.New"
 
+	if err := backend.CheckPresignEndpoint("s3", cfg); err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, op, err)
+	}
+
 	optFns := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 	}
@@ -80,11 +84,23 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		}
 		o.UsePathStyle = cfg.UsePathStyle
 	})
+	// Presigned URLs come from a client bound to the presign endpoint, because
+	// SigV4 signs the host header: the URL has to name the host its fetcher
+	// dials, which need not be the one this client dials. Without a custom
+	// endpoint both are AWS's own host and CheckPresignEndpoint refused any
+	// presign endpoint above.
+	signer := client
+	if cfg.PresignEndpoint != "" {
+		signer = s3.NewFromConfig(awscfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(cfg.PresignEndpoint)
+			o.UsePathStyle = cfg.UsePathStyle
+		})
+	}
 
 	return &Backend{
 		client:     client,
 		uploader:   manager.NewUploader(client),
-		presign:    s3.NewPresignClient(client),
+		presign:    s3.NewPresignClient(signer),
 		creds:      awscfg.Credentials,
 		bucket:     cfg.Bucket,
 		endpoint:   cfg.Endpoint,

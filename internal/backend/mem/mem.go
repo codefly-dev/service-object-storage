@@ -38,6 +38,9 @@ type Backend struct {
 
 // New constructs an empty in-memory backend.
 func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
+	if err := backend.CheckPresignEndpoint("mem", cfg); err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, "mem.New", err)
+	}
 	return &Backend{objs: map[string]object{}, bucket: cfg.Bucket, now: time.Now}, nil
 }
 

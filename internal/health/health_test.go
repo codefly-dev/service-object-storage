@@ -83,10 +83,11 @@ func TestMonitorFollowsAccess(t *testing.T) {
 	store := newRevocableStore(t)
 
 	be, err := miniobe.New(context.Background(), backend.Config{
-		Endpoint:  store.URL,
-		Bucket:    "probe",
-		AccessKey: "probe",
-		SecretKey: "probe-secret",
+		Endpoint:        store.URL,
+		PresignEndpoint: store.URL,
+		Bucket:          "probe",
+		AccessKey:       "probe",
+		SecretKey:       "probe-secret",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = be.Close() })
@@ -114,10 +115,11 @@ func TestMonitorFollowsAccess(t *testing.T) {
 // readiness NOT_SERVING rather than defaulting to serving.
 func TestMonitorStartsUnready(t *testing.T) {
 	be, err := miniobe.New(context.Background(), backend.Config{
-		Endpoint:  "http://127.0.0.1:1",
-		Bucket:    "probe",
-		AccessKey: "probe",
-		SecretKey: "probe-secret",
+		Endpoint:        "http://127.0.0.1:1",
+		PresignEndpoint: "http://127.0.0.1:1",
+		Bucket:          "probe",
+		AccessKey:       "probe",
+		SecretKey:       "probe-secret",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = be.Close() })
@@ -136,10 +138,11 @@ func TestMonitorRecordsVerdict(t *testing.T) {
 	store := newRevocableStore(t)
 
 	be, err := miniobe.New(context.Background(), backend.Config{
-		Endpoint:  store.URL,
-		Bucket:    "probe",
-		AccessKey: "probe",
-		SecretKey: "probe-secret",
+		Endpoint:        store.URL,
+		PresignEndpoint: store.URL,
+		Bucket:          "probe",
+		AccessKey:       "probe",
+		SecretKey:       "probe-secret",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = be.Close() })
