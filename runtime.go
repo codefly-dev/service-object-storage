@@ -66,9 +66,8 @@ const (
 )
 
 // localMinioUser is the root user for the agent-managed local MinIO. The
-// password is generated per run (see startLocalMinIO): the container publishes
-// on all interfaces so the gateway can reach it on Linux, so a fixed password
-// would be a known credential on the host's network.
+// password is generated per run (see startLocalMinIO), so no container on the
+// service network and no process on this host holds a well-known credential.
 const localMinioUser = "minioadmin"
 
 // containerEnvironment is the part of dockerrun.DockerEnvironment the Runtime
@@ -86,14 +85,24 @@ type Runtime struct {
 	minioEnv   containerEnvironment
 	gatewayEnv containerEnvironment
 
-	// minioHostPort is the host port MinIO is mapped to; the agent reaches it at
-	// localhost and the gateway container at host.docker.internal.
+	// minioHostPort is the loopback host port MinIO is mapped to. Only the agent
+	// (a host process) uses it; the gateway container reaches MinIO on
+	// minioNetwork instead.
 	minioHostPort uint16
+	// minioNetwork is the Docker network the gateway and MinIO share, once the
+	// agent has attached a container to it.
+	minioNetwork string
+	// networkClient opens the Docker API for the network steps; nil uses core's
+	// client. Tests substitute a fake.
+	networkClient func() (dockerNetworks, error)
 
 	// minioPassword is the MinIO root password generated for this run.
 	minioPassword    string
 	minioNewStore    bool
 	minioCustodyRoot string
+	// minioContainerUser is the UID:GID MinIO runs as, measured by
+	// chooseMinIOContainerUser so its files land as the agent's host user.
+	minioContainerUser string
 
 	// gcsCredentialsHostFile is the projected copy of the configured GCS
 	// service-account key that the gateway container mounts.
@@ -258,29 +267,37 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 	// then exits still has to be removed, and only Shutdown does that.
 	s.minioEnv = runner
 	runner.WithOutput(os.Stdout)
+	// The published port is for the agent alone (bucket bootstrap, below) and an
+	// operator's recovery tools, so it stays on core's loopback default. The
+	// gateway never dials it: see joinMinIONetwork.
 	runner.WithPortMapping(ctx, s.minioHostPort, minioContainerPort)
-	// The gateway container reaches MinIO through host.docker.internal, which on
-	// Linux is the bridge gateway (172.17.0.1). A port bound only to 127.0.0.1 is
-	// unreachable there, so publish on all interfaces.
-	runner.WithPublicPorts()
 	runner.WithEnvironmentVariables(ctx,
 		resources.Env("MINIO_ROOT_USER", localMinioUser),
 		resources.Env("MINIO_ROOT_PASSWORD", s.minioPassword),
 	)
-	// The agent owns the private bind directory. Container root would leave
-	// nested MinIO files owned by root on Linux, making backup, recovery and
-	// disposable-test cleanup fail for the agent user. Core fingerprints User,
-	// so this identity is also retained across configuration replacement.
-	runner.WithUser(fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()))
+	// The agent owns the private bind directory, so MinIO runs as the container
+	// user prepareMinIOData measured to write as the agent's host user. Image
+	// default root would leave nested files owned by host root under a rootful
+	// daemon, making backup, recovery and disposable-test cleanup fail for the
+	// agent user. Core fingerprints User, so a changed mapping recreates the
+	// container rather than reusing one that writes as someone else.
+	runner.WithUser(s.minioContainerUser)
 	runner.WithMount(data, "/data")
 	runner.WithCommand("server", "/data")
 	if err = runner.Init(ctx); err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot start minio")
 	}
+	minioID, err := runner.ContainerID()
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot identify minio container")
+	}
+	if err = s.joinMinIONetwork(ctx, minioID, minioNetworkAlias); err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot attach minio to the service network")
+	}
 
-	// The agent reaches MinIO on the host; the gateway resolves the same store
-	// through host.docker.internal (dockerrun injects it into the container).
-	s.conf.endpoint = fmt.Sprintf("http://host.docker.internal:%d", s.minioHostPort)
+	// The agent reaches MinIO on the host; the gateway reaches the same store by
+	// alias on the service network, at MinIO's own container port.
+	s.conf.endpoint = fmt.Sprintf("http://%s:%d", minioNetworkAlias, minioContainerPort)
 	s.conf.backend = "minio"
 	s.conf.accessKey = localMinioUser
 	s.conf.secretKey = s.minioPassword
@@ -299,7 +316,7 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 //
 // Succeeding here says nothing about the gateway: the agent reaches MinIO on
 // localhost with the root credentials, while the gateway reaches it over the
-// container bridge with whatever credentials it was configured with. Only the
+// service network with whatever credentials it was configured with. Only the
 // gateway's own probe, awaited in WaitForReady, establishes that.
 func (s *Runtime) ensureBucket(ctx context.Context) error {
 	endpoint := fmt.Sprintf("localhost:%d", s.minioHostPort)
@@ -437,6 +454,10 @@ func (s *Runtime) teardown(ctx context.Context) error {
 			s.minioEnv = nil
 		}
 	}
+	// Last, so it runs once the containers that used it are gone.
+	if err := s.removeMinIONetwork(ctx); err != nil {
+		errs = append(errs, s.Wool.Wrapf(err, "cannot remove the service network"))
+	}
 	s.discardProjectedCredentials()
 	return errors.Join(errs...)
 }
@@ -505,6 +526,18 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	runner.WithEnvironmentVariables(ctx, envs...)
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start gateway")
+	}
+	// A local MinIO is reached only on the service network. The gateway joins it
+	// after starting, so its first backend probe can precede the attach; the
+	// readiness wait in Start covers the next one.
+	if s.minioNetwork != "" {
+		gatewayID, idErr := runner.ContainerID()
+		if idErr != nil {
+			return s.Wool.Wrapf(idErr, "cannot identify gateway container")
+		}
+		if err = s.joinMinIONetwork(ctx, gatewayID); err != nil {
+			return s.Wool.Wrapf(err, "cannot attach gateway to the service network")
+		}
 	}
 	return nil
 }

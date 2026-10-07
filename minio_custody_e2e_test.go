@@ -231,20 +231,28 @@ func TestMinIOMissingBucketFailsClosed(t *testing.T) {
 	require.False(t, exists)
 }
 
-// Assert the actual container declaration even on Docker Desktop, whose bind
-// mount ownership translation masked the Linux bug. After the test tears down
-// its containers, check the host can manage every retained file and directory.
-// No permission repair or data deletion is used to make cleanup pass.
+// Assert the actual container declaration is the measured user, then, after
+// the test tears down its containers, that every retained entry is owned by
+// this host user and manageable by it. The declared user differs by daemon
+// (euid:egid on a one-to-one mapping, 0:0 under rootless Docker run by this
+// user); host ownership is the invariant. No permission repair or data
+// deletion is used to make cleanup pass.
 func requireMinIOFilesystemOwner(t *testing.T, rt *Runtime, containerID string) {
 	t.Helper()
-	owner := fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid())
-	require.Equal(t, owner, strings.TrimSpace(dockerInspect(t, containerID, `{{.Config.User}}`)), "MinIO must write as the owner of its private host data")
+	t.Logf("MinIO runs as measured container user %s; agent is %d:%d", rt.minioContainerUser, os.Geteuid(), os.Getegid())
+	require.Contains(t, []string{fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()), "0:0"}, rt.minioContainerUser)
+	require.Equal(t, rt.minioContainerUser, strings.TrimSpace(dockerInspect(t, containerID, `{{.Config.User}}`)), "MinIO must run as the measured container user")
 	data := filepath.Join(minioCustodyDir(rt.minioOwner()), "data")
 	t.Cleanup(func() {
 		metadataFiles := 0
 		err := filepath.WalkDir(data, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
+			}
+			if uid, _, err := hostFileOwner(path); err != nil {
+				return err
+			} else if uid != os.Geteuid() {
+				return fmt.Errorf("%s is owned by uid %d, not the agent's uid %d", path, uid, os.Geteuid())
 			}
 			if entry.IsDir() {
 				// Removing a nested entry requires write permission on its parent. An

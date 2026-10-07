@@ -13,6 +13,7 @@ import (
 
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
+	"github.com/codefly-dev/core/wool"
 	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -93,13 +94,6 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 	if host := cli.DaemonHost(); !strings.HasPrefix(host, "unix://") && !strings.HasPrefix(host, "npipe://") {
 		return "", nil, fmt.Errorf("local MinIO custody requires a Docker daemon sharing the agent host filesystem")
 	}
-	info, err := cli.Info(ctx)
-	if err != nil {
-		return "", nil, fmt.Errorf("inspect Docker user mapping: %w", err)
-	}
-	if err = validateMinIODaemon(info.SecurityOptions); err != nil {
-		return "", nil, err
-	}
 	if err = os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
 		return "", nil, err
 	}
@@ -115,6 +109,18 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 		return "", nil, err
 	}
 	root = filepath.Join(parent, filepath.Base(root))
+	// Measure which container user writes as this host user before any lock,
+	// custody record or retained file is touched; a refusal leaves only the
+	// custody parent behind.
+	if err = dockerrun.GetImageIfNotPresent(ctx, cli, minioImage, s.Wool); err != nil {
+		return "", nil, fmt.Errorf("pull MinIO image: %w", err)
+	}
+	user, mapping, err := chooseMinIOContainerUser(ctx, dockerProbeRunner{cli: cli, image: minioImage.FullName()}, hostFileOwner, parent, os.Geteuid(), os.Getegid())
+	if err != nil {
+		return "", nil, err
+	}
+	s.Wool.Debug("measured MinIO container user", wool.Field("user", user), wool.Field("container ID map", mapping))
+	s.minioContainerUser = user
 	// Serialize even identities whose legacy Docker display names collide.
 	lock := flock.New(minioCustodyDir(displayName) + ".lock")
 	// A concurrent run of the same service is provisioning the same store, not
@@ -319,17 +325,5 @@ func (s *Runtime) commitMinIOProvisioning() error {
 		return err
 	}
 	s.minioNewStore = false
-	return nil
-}
-
-// Host UID:GID is valid only without a daemon-wide user namespace translation.
-// Reject before creating locks or custody; never chown retained data to guess.
-func validateMinIODaemon(options []string) error {
-	for _, option := range options {
-		name := strings.SplitN(strings.TrimPrefix(option, "name="), ",", 2)[0]
-		if name == "rootless" || name == "userns" {
-			return fmt.Errorf("local MinIO custody does not support Docker %s UID mapping; use a local daemon without rootless/userns-remap, or configure an external storage backend; retained data was not changed", name)
-		}
-	}
 	return nil
 }

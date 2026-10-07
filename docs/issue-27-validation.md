@@ -133,3 +133,89 @@ without changing production image selection or substituting another version.
 Actionlint reports the pre-existing unused `i` loop-variable warning (SC2034);
 no suppression was added. Production cold pulls from Docker Hub remain an external
 registry dependency; this CI workaround does not claim to repair that service.
+
+## Measured container user (rootless Docker)
+
+The rootless/userns rejection above inferred the UID mapping from
+`docker info` security options. It is replaced by a measurement: before
+locking or touching custody, the agent runs the pinned MinIO image as each
+candidate user (`euid:egid`, then `0:0`) with a fresh 0700 scratch directory
+under the custody parent bind-mounted, writes one file, and stats it on the
+host. The first candidate whose file lands as the agent's UID becomes MinIO's
+`--user`; the scratch directory is removed by unlinking from the agent-owned
+directory, with no chown. The same container prints `/proc/self/uid_map` and
+`gid_map`, used only in the refusal message and a debug log, never to decide:
+only a write sees a VM or file-sharing layer's ownership translation. Nothing is
+cached; core fingerprints the container user, so a changed mapping recreates the
+container.
+
+Local validation on 2026-10-07, Linux amd64, Go 1.27.1, rootless Docker
+(`name=rootless`, daemon run by the agent's own user 1001:1002). The rootful
+system daemon on this host was not accessible and was not used.
+
+| Check | Result |
+| --- | --- |
+| `go build ./...`, `go vet ./...`, `go vet -tags e2e ./...`, `go mod tidy -diff` | Passed |
+| `go test -race -count=1 ./...` | Passed |
+| `TestMinIOContainerUserIsMeasured` (fake probe: one-to-one, rootless, foreign owner, refusal, Docker failure) | Passed |
+| `TestMinIORejectsUserMappingBeforeCustodyMutation` (mock daemon refusing both writes) | Passed: both candidates tried, both probe containers removed, no lock or record created |
+| e2e `TestMinIOMissingBucketFailsClosed`, `TestMinIOBootstrapResumesAfterInterruption`, `TestMinIOLegacyVolumeRefusesReplacement`, `TestMinIORejectsAmbiguousLegacyCustody`, `TestMinIORejectsCollidingContainerIdentity`, `TestGCSCredentialProjection`, `TestGatewayStartFailureIsOwnedByRuntime` | Passed. Measured user `0:0`; after teardown every retained entry, including real `xl.meta`, is owned by host UID 1001 and manageable without privilege |
+| e2e `TestMinIOPersistentCustody`, `TestRuntimeEndToEndPutGet` | **Failed**, not on custody: the gateway container cannot reach MinIO's published port at `host.docker.internal` (172.17.0.1) under this rootless daemon (`connection refused`); the host reaches it on 127.0.0.1. Reproduced without the agent with two plain containers. A separate networking defect |
+
+The e2e runs used the released v0.0.12 gateway image retagged as
+`service-object-storage:e2e`; the gateway source is unchanged by this fix.
+Rootful, userns-remap, Podman and Docker Desktop are covered by the unit tests'
+fake probe only; no live run on them was made.
+
+
+## Gateway reaches MinIO on a service network (2026-10-07)
+
+The two failures above were not custody: the gateway dialed MinIO at
+`host.docker.internal:<published port>`, which only works where the daemon
+routes container-to-host traffic to a published port. This rootless daemon runs
+rootlesskit with `--port-driver=builtin --disable-host-loopback`, so it refuses
+it; a host firewall can too.
+
+The agent now creates a user-defined bridge network per service
+(`codefly-<UniqueWithWorkspace>-network`, named like the containers so two
+workspaces never share one), attaches MinIO to it under the alias `minio` and
+the gateway beside it, and points the gateway at `http://minio:9000`. The
+network is created if missing and reused if present, a container already on it
+stays on it, and teardown removes it after both containers; a network still
+carrying a successor's containers (the stale-teardown path) is left for it. It
+holds no data. MinIO's published port drops to core's loopback default: only the
+agent's bucket bootstrap and an operator's tools on this host use it. Core's
+`dockerrun` has no network primitive in any release through 0.15.0, so the agent
+makes the network calls itself through core's Docker client, after each
+container starts.
+
+Consequences:
+
+- The gateway joins after it has started, so its first backend probe can run
+  before the attach and fail on name resolution; the next probe, one
+  `SOS_PROBE_INTERVAL` (10s) later, succeeds. Start's readiness wait covers it.
+  Joining at create time needs a network option in core's runner.
+- A locally presigned URL is signed for the endpoint the gateway dials, so it
+  now names `minio:9000` and only a container on the service network can fetch
+  it. Before, it named `host.docker.internal:<port>`, fetchable from
+  default-bridge containers on rootful Linux and Docker Desktop only, never
+  from a host process on Linux nor under this rootless daemon. A URL a host
+  client or browser can fetch needs the gateway to sign against a separate
+  client-facing endpoint, which it does not support today.
+- Consumers still reach the gateway itself through its all-interface published
+  port and `host.docker.internal`; that is unchanged and not addressed here.
+
+Local validation on 2026-10-07, Linux amd64, Go 1.27.1, the same rootless
+Docker 29.1.3 daemon; gateway image the released v0.0.12 retagged as
+`service-object-storage:e2e` (gateway source unchanged).
+
+| Check | Result |
+| --- | --- |
+| `go build ./...`, `go vet ./...`, `go vet -tags e2e .`, `go mod tidy -diff` | Passed |
+| `go test -race -count=1 ./...` | Passed |
+| `TestMinIONetwork*`, `TestTeardownRemovesNetworkAfterContainers` (fake Docker network API: create once, reuse, concurrent create, already attached, refused attach, removal, kept for a successor, real removal failure) | Passed |
+| e2e `TestMinIO*`, `TestRuntimeEndToEndPutGet`, `TestGCSCredentialProjection`, `TestGatewayStartFailureIsOwnedByRuntime` | **All 23 passed, none skipped**, including `TestMinIOPersistentCustody` and `TestRuntimeEndToEndPutGet`. The latter now asserts the gateway's `SOS_ENDPOINT=http://minio:9000`, MinIO published on 127.0.0.1 only, and the network gone after Destroy; no `codefly-test-*` network was left after the run |
+
+Verified live on rootless Docker only. Rootful Docker, Podman and Docker Desktop
+all support user-defined bridge networks with name resolution, but none was run
+here (the rootful daemon on this host was not accessible and was not used).
