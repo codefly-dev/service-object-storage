@@ -224,13 +224,21 @@ the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
 
 - **Local / test**: the agent's Runtime starts a **MinIO** container with persistent
   custody (explicit bootstrap creates the initial bucket), and runs the gateway container (`SOS_BACKEND=minio`) pointed at it —
-  "test on MinIO, ship on S3", decided by config. Both containers publish on all
-  interfaces so a consumer container reaches them over the Docker host bridge on
-  Linux; each is protected by a per-run credential rather than by the binding —
-  a random MinIO root password, and the gateway token described above. Creating
-  the bucket proves nothing about the gateway: the agent reaches MinIO on
-  localhost with the root credentials, the gateway reaches it over the container
-  bridge with its own, so `Start` still waits on the gateway's `Ready` probe.
+  "test on MinIO, ship on S3", decided by config. The two containers share a
+  Docker network of their own (`codefly-<service>-network`, scoped to the
+  workspace like the containers, removed with them), and the gateway dials MinIO
+  there as `http://minio:9000` — never through a published port and
+  `host.docker.internal`, which a rootless daemon or a host firewall can refuse.
+  MinIO's published port is bound to 127.0.0.1 for the agent alone; the gateway
+  publishes on all interfaces so a consumer container reaches it over the Docker
+  host bridge on Linux. Each is protected by a per-run credential rather than by
+  the binding — a random MinIO root password, and the gateway token described
+  above. Because presigning is computed by the gateway against the endpoint it
+  dials, a locally presigned URL names `minio:9000`: only a container on the
+  service network can fetch it. Creating the bucket proves nothing about the
+  gateway: the agent reaches MinIO on localhost with the root credentials, the
+  gateway reaches it over the service network with its own, so `Start` still
+  waits on the gateway's `Ready` probe.
   The agent probes over the **native** network view, since it is a host process
   even when the service it started runs in a container.
 - **Deployed**: the Builder emits a Kubernetes Deployment running the gateway

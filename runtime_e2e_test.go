@@ -92,18 +92,20 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, start.GetStatus().GetState(), start.GetStatus().GetMessage())
 
-	// A consumer running in its own container reaches these through
+	// A consumer running in its own container reaches the gateway through
 	// host.docker.internal, which resolves to the bridge gateway on Linux — a
-	// 127.0.0.1-bound port is unreachable there. Both must publish on all
+	// 127.0.0.1-bound port is unreachable there. It must publish on all
 	// interfaces or the container topology this agent advertises is broken; the
 	// token checked below is what keeps that binding from being an open door.
+	// MinIO serves the gateway on the service network instead, so its published
+	// port is for the agent on this host alone and stays loopback-only.
 	gatewayID, err := rt.gatewayEnv.ContainerID()
 	require.NoError(t, err)
 	requirePublishedOnAllInterfaces(t, gatewayID, gatewayContainerPort)
 	minioID, err := rt.minioEnv.ContainerID()
 	require.NoError(t, err)
 	requireMinIOFilesystemOwner(t, rt, minioID)
-	requirePublishedOnAllInterfaces(t, minioID, minioContainerPort)
+	requirePublishedOnLoopbackOnly(t, minioID, minioContainerPort)
 
 	conf, err := resources.ExtractConfiguration(init.RuntimeConfigurations, resources.NewRuntimeContextNative())
 	require.NoError(t, err)
@@ -166,14 +168,22 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	require.Equal(t, "text/plain", hdr.GetInfo().GetContentType())
 	require.Equal(t, int64(len(payload)), hdr.GetInfo().GetSize())
 
-	// Teardown owns exactly what it started. The agent creates no Docker network
-	// of its own, so removing both containers removes everything it holds —
-	// including the only place the session token lives.
+	// The gateway dialed MinIO by alias on the service network, never through a
+	// published host port.
+	network := rt.minioNetworkName()
+	require.Equal(t, network, rt.minioNetwork)
+	gatewayEnv, err := exec.Command("docker", "inspect", "-f", `{{join .Config.Env "\n"}}`, gatewayID).Output()
+	require.NoError(t, err)
+	require.Contains(t, strings.Split(string(gatewayEnv), "\n"), fmt.Sprintf("SOS_ENDPOINT=http://%s:%d", minioNetworkAlias, minioContainerPort))
+
+	// Teardown owns exactly what it started: both containers — including the
+	// only place the session token lives — and the network they shared.
 	_, err = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
 	require.NoError(t, err)
 	destroyed = true
 	requireContainerRemoved(t, gatewayID)
 	requireContainerRemoved(t, minioID)
+	require.Error(t, exec.Command("docker", "network", "inspect", network).Run(), "network %s survived teardown", network)
 }
 
 // requireContainerRemoved asserts the container no longer exists on the daemon.
@@ -357,6 +367,21 @@ func requirePublishedOnAllInterfaces(t *testing.T, containerID string, container
 		"container port %d must not be published loopback-only", containerPort)
 	require.Contains(t, hostIPs, "0.0.0.0",
 		"container port %d must publish on all interfaces", containerPort)
+}
+
+// requirePublishedOnLoopbackOnly asserts the container port is published, and
+// only on 127.0.0.1.
+func requirePublishedOnLoopbackOnly(t *testing.T, containerID string, containerPort int) {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "-f",
+		fmt.Sprintf(`{{range (index .NetworkSettings.Ports "%d/tcp")}}{{.HostIp}} {{end}}`, containerPort),
+		containerID).Output()
+	require.NoError(t, err)
+	hostIPs := strings.Fields(string(out))
+	require.NotEmpty(t, hostIPs, "container port %d has no published host binding", containerPort)
+	for _, ip := range hostIPs {
+		require.Equal(t, "127.0.0.1", ip, "container port %d must be published loopback-only", containerPort)
+	}
 }
 
 // probeImage is a shell-carrying image used to read what the gateway container

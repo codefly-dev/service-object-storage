@@ -40,6 +40,15 @@ rootless daemon run by another user), startup fails naming what each candidate
 wrote as and the container's `uid_map`/`gid_map`. Use a compatible local daemon
 or an external backend; do not chown retained data.
 
+The gateway reaches MinIO on a Docker network the two containers share
+(`codefly-<service>-network`, workspace-scoped like their names), by the alias
+`minio` on port 9000. It is created on first use, reused when present, and
+removed after both containers are gone; one still carrying a successor's
+containers is left for it. It holds no data: removing it, or `docker network
+rm` of a leftover one, never touches the custody directory. MinIO's published
+port is bound to 127.0.0.1 and serves the agent's bucket bootstrap and an
+operator's recovery tools on this host.
+
 The record binds the owner, bucket and format version to a random custody ID;
 `data/.codefly-custody.json` must match its immutable fields. The record starts
 `pending` and is atomically committed and synced after bucket provisioning. A process lock serializes provisioning
