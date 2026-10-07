@@ -19,15 +19,26 @@ The agent now declares a bind mount at `/data`, backed by:
 `CODEFLY_HOME` defaults to `~/.codefly`. The structured identity is the JSON array `[workspace,module,service,namingScope]`;
 Docker display names are not ownership evidence. Version 1 records keyed by
 container name are ambiguous and require verified recovery in a separate scope. This is durable local data, **not a runtime cache**. Preserve the
-whole custody directory in backups. MinIO runs with the agent process's effective
-UID:GID so files remain manageable by that host user on Linux. The Runtime does
-not recursively chown existing data or broaden its permissions. Stop, Destroy,
+whole custody directory in backups. MinIO runs as a container user whose files
+the host sees as the agent process's own user, so they remain manageable by that
+user. The Runtime does not recursively chown existing data or broaden its
+permissions. Stop, Destroy,
 failed startup and normal configuration replacement never delete this directory. Keep the same
 `CODEFLY_HOME` and naming scope across runs. A changed scope is a different store.
-The Docker daemon must share the agent's host filesystem (local Docker or Docker
-Desktop). Rootless and userns-remap daemons are rejected before custody mutation
-because host and container numeric UIDs do not identify the same filesystem user.
-Use a compatible local daemon or an external backend; do not chown retained data.
+The Docker daemon must share the agent's host filesystem (local Docker, Docker
+Desktop, or another local engine). How a container user maps to a host user
+differs by daemon, so the agent measures it on every start instead of inferring
+it: before any lock, record or retained file is touched, it runs the pinned
+MinIO image once per candidate user — the agent's own `euid:egid`, then `0:0` —
+writing one file into a fresh private directory under the custody parent, and
+stats that file on the host. The first candidate whose file the host sees as the
+agent's UID is the user MinIO runs as. A rootful daemon maps one to one and
+picks `euid:egid`; a rootless daemon run by the agent's user maps container root
+to that user and picks `0:0`; a VM-backed engine's file-sharing translation is
+measured the same way. When no candidate lands as the agent (userns-remap, a
+rootless daemon run by another user), startup fails naming what each candidate
+wrote as and the container's `uid_map`/`gid_map`. Use a compatible local daemon
+or an external backend; do not chown retained data.
 
 The record binds the owner, bucket and format version to a random custody ID;
 `data/.codefly-custody.json` must match its immutable fields. The record starts

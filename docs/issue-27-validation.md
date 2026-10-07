@@ -133,3 +133,37 @@ without changing production image selection or substituting another version.
 Actionlint reports the pre-existing unused `i` loop-variable warning (SC2034);
 no suppression was added. Production cold pulls from Docker Hub remain an external
 registry dependency; this CI workaround does not claim to repair that service.
+
+## Measured container user (rootless Docker)
+
+The rootless/userns rejection above inferred the UID mapping from
+`docker info` security options. It is replaced by a measurement: before
+locking or touching custody, the agent runs the pinned MinIO image as each
+candidate user (`euid:egid`, then `0:0`) with a fresh 0700 scratch directory
+under the custody parent bind-mounted, writes one file, and stats it on the
+host. The first candidate whose file lands as the agent's UID becomes MinIO's
+`--user`; the scratch directory is removed by unlinking from the agent-owned
+directory, with no chown. The same container prints `/proc/self/uid_map` and
+`gid_map`, used only in the refusal message and a debug log, never to decide:
+only a write sees a VM or file-sharing layer's ownership translation. Nothing is
+cached; core fingerprints the container user, so a changed mapping recreates the
+container.
+
+Local validation on 2026-10-07, Linux amd64, Go 1.27.1, rootless Docker
+(`name=rootless`, daemon run by the agent's own user 1001:1002). The rootful
+system daemon on this host was not accessible and was not used.
+
+| Check | Result |
+| --- | --- |
+| `go build ./...`, `go vet ./...`, `go vet -tags e2e ./...`, `go mod tidy -diff` | Passed |
+| `go test -race -count=1 ./...` | Passed |
+| `TestMinIOContainerUserIsMeasured` (fake probe: one-to-one, rootless, foreign owner, refusal, Docker failure) | Passed |
+| `TestMinIORejectsUserMappingBeforeCustodyMutation` (mock daemon refusing both writes) | Passed: both candidates tried, both probe containers removed, no lock or record created |
+| e2e `TestMinIOMissingBucketFailsClosed`, `TestMinIOBootstrapResumesAfterInterruption`, `TestMinIOLegacyVolumeRefusesReplacement`, `TestMinIORejectsAmbiguousLegacyCustody`, `TestMinIORejectsCollidingContainerIdentity`, `TestGCSCredentialProjection`, `TestGatewayStartFailureIsOwnedByRuntime` | Passed. Measured user `0:0`; after teardown every retained entry, including real `xl.meta`, is owned by host UID 1001 and manageable without privilege |
+| e2e `TestMinIOPersistentCustody`, `TestRuntimeEndToEndPutGet` | **Failed**, not on custody: the gateway container cannot reach MinIO's published port at `host.docker.internal` (172.17.0.1) under this rootless daemon (`connection refused`); the host reaches it on 127.0.0.1. Reproduced without the agent with two plain containers. A separate networking defect |
+
+The e2e runs used the released v0.0.12 gateway image retagged as
+`service-object-storage:e2e`; the gateway source is unchanged by this fix.
+Rootful, userns-remap, Podman and Docker Desktop are covered by the unit tests'
+fake probe only; no live run on them was made.
+

@@ -94,6 +94,9 @@ type Runtime struct {
 	minioPassword    string
 	minioNewStore    bool
 	minioCustodyRoot string
+	// minioContainerUser is the UID:GID MinIO runs as, measured by
+	// chooseMinIOContainerUser so its files land as the agent's host user.
+	minioContainerUser string
 
 	// gcsCredentialsHostFile is the projected copy of the configured GCS
 	// service-account key that the gateway container mounts.
@@ -267,11 +270,13 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 		resources.Env("MINIO_ROOT_USER", localMinioUser),
 		resources.Env("MINIO_ROOT_PASSWORD", s.minioPassword),
 	)
-	// The agent owns the private bind directory. Container root would leave
-	// nested MinIO files owned by root on Linux, making backup, recovery and
-	// disposable-test cleanup fail for the agent user. Core fingerprints User,
-	// so this identity is also retained across configuration replacement.
-	runner.WithUser(fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()))
+	// The agent owns the private bind directory, so MinIO runs as the container
+	// user prepareMinIOData measured to write as the agent's host user. Image
+	// default root would leave nested files owned by host root under a rootful
+	// daemon, making backup, recovery and disposable-test cleanup fail for the
+	// agent user. Core fingerprints User, so a changed mapping recreates the
+	// container rather than reusing one that writes as someone else.
+	runner.WithUser(s.minioContainerUser)
 	runner.WithMount(data, "/data")
 	runner.WithCommand("server", "/data")
 	if err = runner.Init(ctx); err != nil {

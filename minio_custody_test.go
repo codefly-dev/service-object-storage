@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,11 +203,103 @@ func TestStructuredMinIOIdentity(t *testing.T) {
 	require.NotEqual(t, first.minioOwner(), second.minioOwner())
 }
 
-func TestMinIODaemonUserMapping(t *testing.T) {
-	for _, option := range []string{"name=rootless", "name=userns", "name=rootless,version=1", "userns"} {
-		require.ErrorContains(t, validateMinIODaemon([]string{"name=seccomp,profile=builtin", option}), "UID mapping")
+// fakeProbe stands in for the probe container: per candidate user it either
+// refuses the write, fails as Docker would, or writes a file the fake host
+// stat reports as owned by owner.
+type fakeProbe struct {
+	t       *testing.T
+	parent  string
+	outcome map[string]fakeOutcome
+	tried   []string
+	dirs    []string
+	last    string
+}
+
+type fakeOutcome struct {
+	wrote bool
+	owner int
+	err   error
+}
+
+func (f *fakeProbe) run(_ context.Context, user, dir string) (minioProbeRun, error) {
+	f.tried = append(f.tried, user)
+	f.dirs = append(f.dirs, dir)
+	f.last = user
+	require.Equal(f.t, f.parent, filepath.Dir(dir), "the probe binds a scratch directory under the custody parent")
+	info, err := os.Stat(dir)
+	require.NoError(f.t, err)
+	require.Equal(f.t, os.FileMode(0o700), info.Mode().Perm())
+	outcome := f.outcome[user]
+	if outcome.err != nil {
+		return minioProbeRun{}, outcome.err
 	}
-	require.NoError(t, validateMinIODaemon([]string{"name=seccomp,profile=builtin", "name=cgroupns", "name=apparmor"}))
+	run := minioProbeRun{Wrote: outcome.wrote, Mapping: "0 1001 1\n1 165536 65536\n"}
+	if !outcome.wrote {
+		run.Stderr = "sh: /probe/owner: Permission denied\n"
+		return run, nil
+	}
+	require.NoError(f.t, os.WriteFile(filepath.Join(dir, minioProbeFile), nil, 0o600))
+	return run, nil
+}
+
+func (f *fakeProbe) ownerOf(path string) (int, int, error) {
+	if _, err := os.Lstat(path); err != nil {
+		return 0, 0, err
+	}
+	return f.outcome[f.last].owner, 1002, nil
+}
+
+func TestMinIOContainerUserIsMeasured(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		outcome  map[string]fakeOutcome
+		user     string
+		tried    []string
+		refusal  []string
+		probeErr string
+	}{
+		{name: "one-to-one mapping", outcome: map[string]fakeOutcome{"1001:1002": {wrote: true, owner: 1001}}, user: "1001:1002", tried: []string{"1001:1002"}},
+		{name: "rootless run by the agent", outcome: map[string]fakeOutcome{"1001:1002": {}, "0:0": {wrote: true, owner: 1001}}, user: "0:0", tried: []string{"1001:1002", "0:0"}},
+		{name: "own ids land as a foreign owner", outcome: map[string]fakeOutcome{"1001:1002": {wrote: true, owner: 166537}, "0:0": {wrote: true, owner: 1001}}, user: "0:0", tried: []string{"1001:1002", "0:0"}},
+		{name: "userns-remap", outcome: map[string]fakeOutcome{"1001:1002": {}, "0:0": {}}, tried: []string{"1001:1002", "0:0"},
+			refusal: []string{"uid 1001", "--user 1001:1002 could not write", "Permission denied", "container ID map: 0 1001 1 1 165536 65536", "retained data was not changed"}},
+		{name: "foreign owners only", outcome: map[string]fakeOutcome{"1001:1002": {wrote: true, owner: 166537}, "0:0": {wrote: true, owner: 0}}, tried: []string{"1001:1002", "0:0"},
+			refusal: []string{"--user 1001:1002 wrote a file the host sees as 166537:1002", "--user 0:0 wrote a file the host sees as 0:1002"}},
+		{name: "docker failure is not a refusal", outcome: map[string]fakeOutcome{"1001:1002": {err: errors.New("daemon gone")}}, tried: []string{"1001:1002"}, probeErr: "daemon gone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			probe := &fakeProbe{t: t, parent: parent, outcome: tc.outcome}
+			user, _, err := chooseMinIOContainerUser(context.Background(), probe, probe.ownerOf, parent, 1001, 1002)
+			require.Equal(t, tc.tried, probe.tried, "candidates are tried in order and the first that lands wins")
+			switch {
+			case tc.probeErr != "":
+				require.ErrorContains(t, err, tc.probeErr)
+			case tc.refusal != nil:
+				for _, want := range tc.refusal {
+					require.ErrorContains(t, err, want)
+				}
+			default:
+				require.NoError(t, err)
+				require.Equal(t, tc.user, user)
+			}
+			entries, err := os.ReadDir(parent)
+			require.NoError(t, err)
+			require.Empty(t, entries, "every probe directory is removed, whatever owner its file landed as")
+			require.Len(t, probe.dirs, len(probe.tried))
+			if len(probe.dirs) == 2 {
+				require.NotEqual(t, probe.dirs[0], probe.dirs[1], "each candidate writes into a fresh directory")
+			}
+		})
+	}
+}
+
+func TestHostFileOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owned")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	uid, _, err := hostFileOwner(path)
+	require.NoError(t, err)
+	require.Equal(t, os.Geteuid(), uid)
 }
 
 func TestMinIOProvisioningCommit(t *testing.T) {
@@ -221,43 +317,74 @@ func TestMinIOProvisioningCommit(t *testing.T) {
 	require.Error(t, ensureMinIOCustody(root, "owner", "documents", false), "loss of commit evidence cannot reopen bootstrap")
 }
 
+// A daemon on which no candidate writes as the agent (userns-remap here: the
+// probe's write is refused) is rejected after the real Docker probe protocol
+// and before a lock, a custody record or retained data exists.
 func TestMinIORejectsUserMappingBeforeCustodyMutation(t *testing.T) {
-	for _, mode := range []string{"rootless", "userns"} {
-		t.Run(mode, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("CODEFLY_HOME", home)
-			// Short independent socket path fits Darwin's sockaddr_un limit.
-			socketDir, err := os.MkdirTemp("/tmp", "sos27-daemon-")
-			require.NoError(t, err)
-			defer func() { require.NoError(t, os.RemoveAll(socketDir)) }()
-			listener, err := net.Listen("unix", filepath.Join(socketDir, "docker.sock"))
-			require.NoError(t, err)
-			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("API-Version", "1.47")
-				if strings.HasSuffix(req.URL.Path, "/_ping") {
-					return
-				}
-				if !strings.HasSuffix(req.URL.Path, "/info") {
-					t.Errorf("unexpected Docker operation: %s", req.URL.Path)
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				_, _ = w.Write([]byte(`{"SecurityOptions":["name=` + mode + `"]}`))
-			}))
-			require.NoError(t, server.Listener.Close())
-			server.Listener = listener
-			server.Start()
-			defer server.Close()
-			t.Setenv("DOCKER_HOST", "unix://"+listener.Addr().String())
-			rt := NewRuntime()
-			rt.Identity = &resources.ServiceIdentity{Workspace: "test", Module: "test", Name: "store"}
-			rt.Environment = &basev0.Environment{}
-			_, _, err = rt.prepareMinIOData(context.Background())
-			require.ErrorContains(t, err, "UID mapping")
-			entries, err := os.ReadDir(home)
-			require.NoError(t, err)
-			require.Empty(t, entries, "rejected mapping must not create even a custody lock")
-		})
-	}
+	home := t.TempDir()
+	t.Setenv("CODEFLY_HOME", home)
+	// Short independent socket path fits Darwin's sockaddr_un limit.
+	socketDir, err := os.MkdirTemp("/tmp", "sos27-daemon-")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, os.RemoveAll(socketDir)) }()
+	listener, err := net.Listen("unix", filepath.Join(socketDir, "docker.sock"))
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var created, removed []string
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("API-Version", "1.47")
+		mu.Lock()
+		defer mu.Unlock()
+		path := req.URL.Path
+		switch {
+		case strings.HasSuffix(path, "/_ping"):
+		case strings.HasSuffix(path, "/images/json"):
+			_, _ = fmt.Fprintf(w, `[{"RepoTags":[%q]}]`, minioImage.FullName())
+		case strings.HasSuffix(path, "/containers/create"):
+			var body struct {
+				User       string
+				Entrypoint []string
+				HostConfig struct{ Mounts []mount.Mount }
+			}
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			require.Len(t, body.HostConfig.Mounts, 1)
+			require.Equal(t, "/probe", body.HostConfig.Mounts[0].Target)
+			require.Equal(t, filepath.Join(home, "object-storage"), filepath.Dir(body.HostConfig.Mounts[0].Source))
+			created = append(created, body.User)
+			_, _ = fmt.Fprintf(w, `{"Id":"probe%d"}`, len(created))
+		case strings.HasSuffix(path, "/wait"):
+			_, _ = w.Write([]byte(`{"StatusCode":1}`))
+		case strings.HasSuffix(path, "/start"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(path, "/logs"):
+			w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+			for stream, text := range map[byte]string{1: "0 165536 65536\n", 2: "sh: /probe/owner: Permission denied\n"} {
+				_, _ = w.Write(append([]byte{stream, 0, 0, 0, 0, 0, 0, byte(len(text))}, text...))
+			}
+		case req.Method == http.MethodDelete && strings.Contains(path, "/containers/probe"):
+			removed = append(removed, path)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected Docker operation: %s %s", req.Method, path)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	require.NoError(t, server.Listener.Close())
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	t.Setenv("DOCKER_HOST", "unix://"+listener.Addr().String())
+	rt := NewRuntime()
+	rt.Identity = &resources.ServiceIdentity{Workspace: "test", Module: "test", Name: "store"}
+	rt.Environment = &basev0.Environment{}
+	_, _, err = rt.prepareMinIOData(context.Background())
+	require.ErrorContains(t, err, "offers none")
+	require.ErrorContains(t, err, "container ID map: 0 165536 65536")
+	require.ErrorContains(t, err, "Permission denied")
+	require.Equal(t, []string{fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()), "0:0"}, created)
+	require.Len(t, removed, 2, "every probe container is removed")
+	entries, err := os.ReadDir(filepath.Join(home, "object-storage"))
+	require.NoError(t, err)
+	require.Empty(t, entries, "rejected mapping must not create even a custody lock")
 }
