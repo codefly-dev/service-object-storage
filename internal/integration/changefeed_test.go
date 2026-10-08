@@ -226,3 +226,20 @@ func TestChangeFeedReachesEveryReplica(t *testing.T) {
 	require.Equal(t, storagev0.WriteOp_WRITE_OP_PUT, awaitEvent(t, firstWatch, key).GetOp())
 	require.Equal(t, storagev0.WriteOp_WRITE_OP_PUT, awaitEvent(t, secondWatch, key).GetOp())
 }
+
+// TestChangeFeedCarriesKeysVerbatim pins the key encoding against the real
+// store. AWS's own event notifications URL-encode the key and this listener
+// resembles them, so decoding it is the tempting mistake; MinIO does not
+// encode, and decoding would turn "+" into a space and eat percent escapes —
+// a consumer keyed by the real object key would then miss every write to such
+// an object, silently. The key here contains exactly the characters that tell
+// the two behaviours apart.
+func TestChangeFeedCarriesKeysVerbatim(t *testing.T) {
+	c, direct, bucket := newFeedStack(t)
+	stream := openFeedWatch(t, c, direct, bucket)
+
+	key := fmt.Sprintf("changefeed/sp ace+plus%%25pct-é-%d.txt", time.Now().UnixNano())
+	putDirect(t, direct, bucket, key, []byte("spaces, a plus, a percent escape and utf-8"))
+
+	require.Equal(t, storagev0.WriteOp_WRITE_OP_PUT, awaitEvent(t, stream, key).GetOp())
+}

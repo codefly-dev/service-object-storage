@@ -60,7 +60,7 @@ ok  	github.com/codefly-dev/service-object-storage/internal/integration	0.391s  
 So `ok` is not a result. Count what passed:
 
 ```bash
-go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 10
+go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 11
 go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- SKIP'   # expect 0
 ```
 

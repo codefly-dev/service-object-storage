@@ -576,9 +576,15 @@ func send(ctx context.Context, out chan<- backend.ChangeEvent, ev backend.Change
 }
 
 // toChange maps one notification record onto a Change, reporting false for an
-// event family the feed did not ask for. The object key arrives query-escaped,
-// as S3 event notifications specify, so it is decoded back to the key the rest
-// of the API uses.
+// event family the feed did not ask for.
+//
+// The key is taken verbatim. AWS's own event notifications URL-encode it, and
+// this listener looks enough like them to invite decoding, but MinIO reports
+// the object name as-is — measured against the release minio-image.json pins:
+// a key of "sp ace+plus%25pct" arrives exactly so. Decoding it would corrupt
+// every key containing "+" (it would become a space) or a percent escape,
+// silently, and the keys that survive decoding are the ones a test is most
+// likely to use.
 func toChange(e notification.Event) (backend.Change, bool) {
 	var op backend.ChangeOp
 	switch {
@@ -589,12 +595,8 @@ func toChange(e notification.Event) (backend.Change, bool) {
 	default:
 		return backend.Change{}, false
 	}
-	key, err := url.QueryUnescape(e.S3.Object.Key)
-	if err != nil {
-		key = e.S3.Object.Key
-	}
 	change := backend.Change{
-		Key:       key,
+		Key:       e.S3.Object.Key,
 		Op:        op,
 		ETag:      e.S3.Object.ETag,
 		VersionID: e.S3.Object.VersionID,
