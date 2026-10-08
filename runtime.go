@@ -505,6 +505,13 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	if s.conf.prefix != "" {
 		envs = append(envs, resources.Env("SOS_PREFIX", s.conf.prefix))
 	}
+	changeFeed, err := s.conf.wantsChangeFeed()
+	if err != nil {
+		return s.Wool.Wrap(err)
+	}
+	if changeFeed {
+		envs = append(envs, resources.Env("SOS_CHANGE_FEED", "true"))
+	}
 	if s.conf.accessKey != "" {
 		envs = append(envs,
 			resources.Env("SOS_ACCESS_KEY", s.conf.accessKey),

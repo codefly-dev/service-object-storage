@@ -12,8 +12,9 @@ and the local/deployed profiles. This file is how to work in the repo.
 
 - The contract and its stubs: `proto/codefly/storage/v0`, `gen/`.
 - The gateway server: `cmd/service-object-storage` and `internal/**` — the
-  backends, the per-replica Watch event hub, caller auth, the readiness probe,
-  and the normalization of backend errors to gRPC codes.
+  backends, the Watch event hub and the store change feed that makes it
+  cross-replica, caller auth, the readiness probe, and the normalization of
+  backend errors to gRPC codes.
 - The codefly agent that runs the gateway as a first-class service: the repo
   root (`main.go`, `runtime.go`, `builder.go`, `agent.codefly.yaml`) and
   `templates/`, the Kubernetes manifests the Builder renders.

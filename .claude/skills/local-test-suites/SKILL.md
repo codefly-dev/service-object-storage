@@ -13,7 +13,7 @@ tiers exist, and only the tier you actually ran is evidence:
 | Tier | Command shape | What it proves |
 |------|---------------|----------------|
 | unit | `go test ./...` | logic, `mem` backend, server and Watch behaviour |
-| integration | `-tags integration` + live MinIO | the gRPC server against a real S3-compatible store |
+| integration | `-tags integration` + live MinIO | the gRPC server against a real S3-compatible store, and the store change feed that makes `Watch` cross-replica |
 | e2e | `-tags e2e` + a built gateway image | the agent Runtime's container lifecycle, GCS key projection, MinIO custody, image SBOM |
 
 ## Integration
@@ -60,7 +60,7 @@ ok  	github.com/codefly-dev/service-object-storage/internal/integration	0.391s  
 So `ok` is not a result. Count what passed:
 
 ```bash
-go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 6
+go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 10
 go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- SKIP'   # expect 0
 ```
 

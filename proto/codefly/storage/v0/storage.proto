@@ -208,24 +208,31 @@ message WatchRequest {
 // returns them; a DELETE carries only the key (and version_id when a specific
 // version was removed).
 //
-// Delivery is per replica: a Watch stream carries the writes served by the
-// replica the client is connected to, never writes served by other replicas.
-// A consumer that needs every write to the bucket across replicas uses the
-// backing store's event notifications instead.
+// How much of the bucket a stream covers is reported by
+// BackendCapabilities.watch_cross_replica, which a consumer MUST read rather
+// than assume:
+//   - false: delivery is per replica. The stream carries the writes served by
+//     the replica the client is connected to, and never writes served by other
+//     replicas or made to the bucket directly (a presigned PUT, another tool).
+//   - true: the gateway is consuming the store's own event notifications, so
+//     the stream carries every write to the bucket whatever made it. A write
+//     this replica served is then delivered twice — once when it is served and
+//     once when the store reports it — which at-least-once already allows.
 //
-// Delivery is best-effort and at-least-once, so a consumer MUST periodically
-// reconcile against authoritative state (List / version enumeration) and never
-// treat the absence of an event as proof no write happened:
-//   - Writes served by other replicas, or made to the bucket directly, are
-//     never delivered on this stream.
+// Delivery is best-effort and at-least-once either way, so a consumer MUST
+// periodically reconcile against authoritative state (List / version
+// enumeration) and never treat the absence of an event as proof no write
+// happened:
 //   - A DELETE is emitted even when the key was already absent — backends do not
 //     report whether a delete removed anything — so deletes are not one-to-one
 //     with real state changes.
 //   - A consumer that receives RESOURCE_EXHAUSTED has fallen too far behind and
 //     was dropped; it must reconcile before re-watching.
+//   - A store notification stream that drops and reconnects loses the writes
+//     made while it was down, and says nothing about having lost them.
 // Writes served by the replica the client is watching are delivered in-order
-// (or the slow client is dropped), so a single-replica gateway loses events
-// only via RESOURCE_EXHAUSTED.
+// (or the slow client is dropped), so a single-replica gateway with no change
+// feed loses events only via RESOURCE_EXHAUSTED.
 message WriteEvent {
   string key = 1;
   WriteOp op = 2;
@@ -250,6 +257,13 @@ message BackendCapabilities {
   bool presign_ambient_creds = 9;
   int32 batch_delete_max = 10;
   repeated string native_verbs = 11;
+  // watch_cross_replica reports whether Watch carries every write to the
+  // bucket, because the gateway is consuming the store's own event
+  // notifications, or only the writes this replica served. It is a property of
+  // the backend AND its configuration: a backend whose store can stream
+  // notifications still reports false until the gateway is configured to
+  // consume them. See WriteEvent for what each answer obliges a consumer to do.
+  bool watch_cross_replica = 12;
 }
 
 message ReadyRequest {}
@@ -304,13 +318,13 @@ service ObjectStorage {
   rpc List(ListRequest) returns (ListResult);
   rpc Copy(CopyRequest) returns (CopyResult);
   rpc Presign(PresignRequest) returns (PresignResult);
-  // Watch streams write events (Put/Delete) as they complete through the
-  // replica the client is connected to; writes served by other replicas are not
-  // delivered (see WriteEvent for the delivery contract — it is a hint stream,
-  // not a log). The
-  // stream's initial gRPC header marks the subscription as live: events are live
-  // and never replayed, so a client reconciles state from before the header out
-  // of band, and periodically thereafter to recover any dropped events.
+  // Watch streams write events (Put/Delete) as they land, scoped by key prefix.
+  // How much of the bucket a stream covers is reported by
+  // BackendCapabilities.watch_cross_replica, and WriteEvent carries the
+  // delivery contract — it is a hint stream, not a log. The stream's initial
+  // gRPC header marks the subscription as live: events are live and never
+  // replayed, so a client reconciles state from before the header out of band,
+  // and periodically thereafter to recover any dropped events.
   rpc Watch(WatchRequest) returns (stream WriteEvent);
   rpc Capabilities(CapabilitiesRequest) returns (BackendCapabilities);
   // Ready reports whether the configured bucket/container is reachable with the

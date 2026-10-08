@@ -42,6 +42,10 @@ type deploymentTemplateParameters struct {
 	// (it forms the public blob endpoint host); the shared key that pairs with
 	// it is sensitive and travels via the Secret, not the manifest.
 	AzureAccount string
+	// ChangeFeed makes the gateway republish the store's own write
+	// notifications on Watch. Only minio is rendered with it; Deploy rejects it
+	// on the cloud backends rather than emit a switch the gateway would refuse.
+	ChangeFeed bool
 }
 
 // supportedDeployBackends is the set of backend kinds Deploy knows how to
@@ -162,6 +166,23 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	if parameters.Backend == "azure" && parameters.AzureAccount == "" {
 		return s.Builder.DeployError(fmt.Errorf("backend azure requires SOS_AZURE_ACCOUNT (the storage account name)"))
 	}
+	changeFeed, err := s.conf.wantsChangeFeed()
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+	// A change feed cannot be honored on the cloud backends: their writes are
+	// carried on SQS/EventBridge, Pub/Sub and Event Grid, which are delivery
+	// targets something has to provision and inject, and this gateway consumes
+	// none of them yet. MinIO is different because its listener is an API on the
+	// server, so a replica subscribes with the credentials it already has.
+	// Rendering the switch anyway would ship a manifest whose gateway refuses to
+	// start, so reject it here with the backend named.
+	if changeFeed && parameters.Backend != "minio" {
+		return s.Builder.DeployError(fmt.Errorf("SOS_CHANGE_FEED cannot be honored on backend %s: only minio streams the store's own write notifications. "+
+			"S3, GCS and Azure carry theirs on SQS/EventBridge, Pub/Sub and Event Grid, which this gateway does not consume; "+
+			"unset SOS_CHANGE_FEED to deploy with a per-replica Watch (see README \"Watch\")", parameters.Backend))
+	}
+	parameters.ChangeFeed = changeFeed
 	// A deployment never starts MinIO — only the local Runtime does — so minio
 	// here means "a MinIO someone else runs", and the gateway needs its address.
 	// This is NOT rejected at render time: the environment's service

@@ -570,6 +570,37 @@ func TestDeployResolvesBackendFromConfiguration(t *testing.T) {
 				"name: SOS_BACKEND", `value: "azure"`, `value: "prod-docs"`,
 				"name: SOS_AZURE_ACCOUNT", `value: "acmestorage"`,
 			},
+			// Azure's writes are carried on Event Grid, which nothing here
+			// consumes, so no change-feed switch is rendered.
+			unwanted: []string{"SOS_CHANGE_FEED"},
+		},
+		{
+			// A deployed MinIO is the one backend whose notifications the
+			// gateway can consume, so it is the one the switch renders for.
+			name: "minio-with-change-feed",
+			config: map[string]string{
+				"SOS_BACKEND":     "minio",
+				"SOS_BUCKET":      "prod-docs",
+				"SOS_ENDPOINT":    "minio.storage.svc:9000",
+				"SOS_CHANGE_FEED": "true",
+			},
+			want: []string{
+				"name: SOS_BACKEND", `value: "minio"`,
+				"name: SOS_CHANGE_FEED", `value: "true"`,
+			},
+		},
+		{
+			// Off is the default, and an explicit false must render nothing
+			// rather than a switch the gateway would read as set.
+			name: "minio-without-change-feed",
+			config: map[string]string{
+				"SOS_BACKEND":     "minio",
+				"SOS_BUCKET":      "prod-docs",
+				"SOS_ENDPOINT":    "minio.storage.svc:9000",
+				"SOS_CHANGE_FEED": "false",
+			},
+			want:     []string{"name: SOS_BACKEND", `value: "minio"`},
+			unwanted: []string{"SOS_CHANGE_FEED"},
 		},
 	}
 	for _, tc := range cases {
@@ -663,6 +694,23 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 			name:    "undeliverable-auth-token",
 			config:  map[string]string{"SOS_BACKEND": "s3", "SOS_BUCKET": "prod-docs", "SOS_AUTH_TOKEN": "operator-set"},
 			wantMsg: "SOS_AUTH_TOKEN cannot be delivered",
+		},
+		{
+			// S3 carries its writes on SQS/EventBridge, which this gateway does
+			// not consume: rendering the switch would ship a manifest whose
+			// gateway refuses to start.
+			name:        "change-feed-on-a-cloud-backend",
+			config:      map[string]string{"SOS_BACKEND": "s3", "SOS_BUCKET": "prod-docs", "SOS_CHANGE_FEED": "true"},
+			wantMsg:     "SOS_CHANGE_FEED cannot be honored on backend s3",
+			wantMsgAlso: "unset SOS_CHANGE_FEED to deploy with a per-replica Watch",
+		},
+		{
+			// Reading an unparseable value as "off" would hand the operator a
+			// per-replica Watch while they believed they had asked for every
+			// write, with nothing in the gateway's behaviour to tell them apart.
+			name:    "change-feed-is-not-a-boolean",
+			config:  map[string]string{"SOS_BACKEND": "minio", "SOS_BUCKET": "prod-docs", "SOS_CHANGE_FEED": "yes-please"},
+			wantMsg: `SOS_CHANGE_FEED must be a boolean, got "yes-please"`,
 		},
 	}
 	for _, tc := range cases {

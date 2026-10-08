@@ -55,6 +55,7 @@ func toProtoCapabilities(c backend.Capabilities) *storagev0.BackendCapabilities 
 		PresignAmbientCreds:     c.PresignAmbientCreds,
 		BatchDeleteMax:          int32(c.BatchDeleteMax),
 		NativeVerbs:             c.NativeVerbs,
+		WatchCrossReplica:       c.WatchCrossReplica,
 	}
 }
 

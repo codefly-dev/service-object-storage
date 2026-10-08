@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -176,6 +177,11 @@ type resolved struct {
 	gcsCredentialsFile string
 	azureAccount       string
 	authToken          string
+	// changeFeed asks the gateway to republish the store's own write
+	// notifications on Watch, which makes the stream cross-replica. It stays a
+	// string here because it is operator text: an unparseable value is refused
+	// where it is used rather than silently read as "off".
+	changeFeed string
 }
 
 type Service struct {
@@ -260,6 +266,7 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 			"SOS_GCS_CREDENTIALS_FILE": &r.gcsCredentialsFile,
 			"SOS_AZURE_ACCOUNT":        &r.azureAccount,
 			"SOS_AUTH_TOKEN":           &r.authToken,
+			"SOS_CHANGE_FEED":          &r.changeFeed,
 		} {
 			v, err := resources.GetConfigurationValue(ctx, conf, "object-storage", key)
 			if err == nil && v != "" {
@@ -279,8 +286,24 @@ func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configurat
 	r.gcsCredentialsFile = strings.TrimSpace(r.gcsCredentialsFile)
 	r.endpoint = strings.TrimSpace(r.endpoint)
 	r.prefix = strings.TrimSpace(r.prefix)
+	r.changeFeed = strings.TrimSpace(r.changeFeed)
 	s.conf = r
 	return nil
+}
+
+// wantsChangeFeed reads the configured change-feed switch. An unparseable
+// value is an error rather than a default: an operator who asked for a
+// cross-replica Watch and got a per-replica one would have no way to tell from
+// the gateway's behaviour, which is the failure SOS_REDIS_ADDR used to be.
+func (r resolved) wantsChangeFeed() (bool, error) {
+	if r.changeFeed == "" {
+		return false, nil
+	}
+	on, err := strconv.ParseBool(r.changeFeed)
+	if err != nil {
+		return false, fmt.Errorf("SOS_CHANGE_FEED must be a boolean, got %q", r.changeFeed)
+	}
+	return on, nil
 }
 
 func (s *Service) createConnectionString(address string) string {

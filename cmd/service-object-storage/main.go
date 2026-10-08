@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/config"
 	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/feed"
 	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 
@@ -66,6 +68,22 @@ func run() error {
 	hub := events.NewHub()
 	defer hub.Close()
 
+	feedCtx, stopFeed := context.WithCancel(ctx)
+	defer stopFeed()
+	// A requested feed the backend cannot provide is refused rather than
+	// ignored: the operator asked for a cross-replica Watch, and serving a
+	// per-replica one while reporting the capability as false would be a
+	// silently narrower contract than the one they configured.
+	if cfg.Backend.ChangeFeed {
+		feeder, ok := backend.AsChangeFeeder(store)
+		if !ok {
+			return fmt.Errorf("SOS_CHANGE_FEED=true is not supported by SOS_BACKEND=%s: only minio streams the store's own write notifications, "+
+				"through an API that is a direct listener on the server. S3, GCS and Azure carry theirs on SQS/EventBridge, Pub/Sub and Event Grid, "+
+				"which are delivery targets this gateway does not consume yet; unset SOS_CHANGE_FEED to serve a per-replica Watch", cfg.Backend.Kind)
+		}
+		go feed.Run(feedCtx, feeder, hub)
+	}
+
 	// Config resolution refuses an empty token unless the operator accepted an
 	// unauthenticated listener, so the empty case here is that choice.
 	var options []grpc.ServerOption
@@ -96,8 +114,8 @@ func run() error {
 		gracefulStop(grpcServer, shutdownGrace)
 	}()
 
-	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s prefix=%q auth=%s)",
-		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, cfg.Backend.Prefix, authMode)
+	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s prefix=%q auth=%s change-feed=%t)",
+		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, cfg.Backend.Prefix, authMode, cfg.Backend.ChangeFeed)
 	return grpcServer.Serve(lis)
 }
 

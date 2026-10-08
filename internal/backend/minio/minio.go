@@ -29,6 +29,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/notification"
 )
 
 // presignHardMax is the S3/MinIO protocol ceiling on presigned-URL lifetime.
@@ -40,10 +41,10 @@ func init() { backend.Register("minio", New) }
 type Backend struct {
 	client     *minio.Client
 	bucket     string
-	endpoint   string
 	presignMax time.Duration
 	probe      backend.ProbeStrategy
 	probeKey   string
+	changeFeed bool
 }
 
 // New opens a MinIO backend against cfg.Bucket.
@@ -79,19 +80,15 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 	return &Backend{
 		client:     client,
 		bucket:     cfg.Bucket,
-		endpoint:   endpoint,
 		presignMax: cfg.PresignMaxExpiry,
 		probe:      cfg.Strategy(),
 		probeKey:   cfg.ProbeKey,
+		changeFeed: cfg.ChangeFeed,
 	}, nil
 }
 
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "minio" }
-
-// Identity reports a globally unique identifier for this bucket. MinIO bucket
-// names are unique only within a cluster, so the endpoint is included.
-func (b *Backend) Identity() string { return b.endpoint + "/" + b.bucket }
 
 // Capabilities reports what this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {
@@ -107,6 +104,7 @@ func (b *Backend) Capabilities() backend.Capabilities {
 		PresignAmbientCreds: true,
 		BatchDeleteMax:      1000,
 		NativeVerbs:         nil,
+		WatchCrossReplica:   b.changeFeed,
 	}
 }
 
@@ -524,4 +522,85 @@ func decodeToken(token string) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// changeEventTypes are the notification families the change feed subscribes to:
+// every object creation and every object removal, whatever produced it.
+var changeEventTypes = []string{"s3:ObjectCreated:*", "s3:ObjectRemoved:*"}
+
+// Changes streams the MinIO server's own bucket notifications over the
+// ListenBucketNotification extension. That is a direct listener on the server
+// rather than a delivery target, which is what makes it usable here: nothing
+// has to be provisioned, and every replica that listens receives every event,
+// so each one sees writes served by its siblings and writes made straight to
+// the bucket. minio-go reconnects its own long poll on a transient read error
+// and pings an empty record set to keep it open; a failure it cannot retry
+// closes the channel, which the caller answers by re-subscribing.
+//
+// This is a MinIO API, not an S3 one — minio-go refuses it against an Amazon or
+// Google endpoint — so it is implemented here and nowhere else. S3, GCS and
+// Azure carry their writes on SQS/EventBridge, Pub/Sub and Event Grid, which
+// are delivery targets that have to be provisioned and injected.
+func (b *Backend) Changes(ctx context.Context, prefix string) <-chan backend.ChangeEvent {
+	out := make(chan backend.ChangeEvent)
+	go func() {
+		defer close(out)
+		for info := range b.client.ListenBucketNotification(ctx, b.bucket, prefix, "", changeEventTypes) {
+			if info.Err != nil {
+				if !send(ctx, out, backend.ChangeEvent{Err: serr.Wrap(serr.Unavailable, "minio.Changes", info.Err)}) {
+					return
+				}
+				continue
+			}
+			for _, record := range info.Records {
+				change, ok := toChange(record)
+				if !ok {
+					continue
+				}
+				if !send(ctx, out, backend.ChangeEvent{Change: change}) {
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
+func send(ctx context.Context, out chan<- backend.ChangeEvent, ev backend.ChangeEvent) bool {
+	select {
+	case out <- ev:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// toChange maps one notification record onto a Change, reporting false for an
+// event family the feed did not ask for. The object key arrives query-escaped,
+// as S3 event notifications specify, so it is decoded back to the key the rest
+// of the API uses.
+func toChange(e notification.Event) (backend.Change, bool) {
+	var op backend.ChangeOp
+	switch {
+	case strings.HasPrefix(e.EventName, "s3:ObjectCreated:"):
+		op = backend.ChangePut
+	case strings.HasPrefix(e.EventName, "s3:ObjectRemoved:"):
+		op = backend.ChangeDelete
+	default:
+		return backend.Change{}, false
+	}
+	key, err := url.QueryUnescape(e.S3.Object.Key)
+	if err != nil {
+		key = e.S3.Object.Key
+	}
+	change := backend.Change{
+		Key:       key,
+		Op:        op,
+		ETag:      e.S3.Object.ETag,
+		VersionID: e.S3.Object.VersionID,
+	}
+	if t, err := time.Parse(time.RFC3339Nano, e.EventTime); err == nil {
+		change.Time = t
+	}
+	return change, true
 }
