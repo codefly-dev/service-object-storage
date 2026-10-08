@@ -1600,25 +1600,32 @@ func (x *WatchRequest) GetPrefix() string {
 // returns them; a DELETE carries only the key (and version_id when a specific
 // version was removed).
 //
-// Delivery is per replica: a Watch stream carries the writes served by the
-// replica the client is connected to, never writes served by other replicas.
-// A consumer that needs every write to the bucket across replicas uses the
-// backing store's event notifications instead.
+// How much of the bucket a stream covers is reported by
+// BackendCapabilities.watch_cross_replica, which a consumer MUST read rather
+// than assume:
+//   - false: delivery is per replica. The stream carries the writes served by
+//     the replica the client is connected to, and never writes served by other
+//     replicas or made to the bucket directly (a presigned PUT, another tool).
+//   - true: the gateway is consuming the store's own event notifications, so
+//     the stream carries every write to the bucket whatever made it. A write
+//     this replica served is then delivered twice — once when it is served and
+//     once when the store reports it — which at-least-once already allows.
 //
-// Delivery is best-effort and at-least-once, so a consumer MUST periodically
-// reconcile against authoritative state (List / version enumeration) and never
-// treat the absence of an event as proof no write happened:
-//   - Writes served by other replicas, or made to the bucket directly, are
-//     never delivered on this stream.
+// Delivery is best-effort and at-least-once either way, so a consumer MUST
+// periodically reconcile against authoritative state (List / version
+// enumeration) and never treat the absence of an event as proof no write
+// happened:
 //   - A DELETE is emitted even when the key was already absent — backends do not
 //     report whether a delete removed anything — so deletes are not one-to-one
 //     with real state changes.
 //   - A consumer that receives RESOURCE_EXHAUSTED has fallen too far behind and
 //     was dropped; it must reconcile before re-watching.
+//   - A store notification stream that drops and reconnects loses the writes
+//     made while it was down, and says nothing about having lost them.
 //
 // Writes served by the replica the client is watching are delivered in-order
-// (or the slow client is dropped), so a single-replica gateway loses events
-// only via RESOURCE_EXHAUSTED.
+// (or the slow client is dropped), so a single-replica gateway with no change
+// feed loses events only via RESOURCE_EXHAUSTED.
 type WriteEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -1746,8 +1753,15 @@ type BackendCapabilities struct {
 	PresignAmbientCreds     bool                   `protobuf:"varint,9,opt,name=presign_ambient_creds,json=presignAmbientCreds,proto3" json:"presign_ambient_creds,omitempty"`
 	BatchDeleteMax          int32                  `protobuf:"varint,10,opt,name=batch_delete_max,json=batchDeleteMax,proto3" json:"batch_delete_max,omitempty"`
 	NativeVerbs             []string               `protobuf:"bytes,11,rep,name=native_verbs,json=nativeVerbs,proto3" json:"native_verbs,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// watch_cross_replica reports whether Watch carries every write to the
+	// bucket, because the gateway is consuming the store's own event
+	// notifications, or only the writes this replica served. It is a property of
+	// the backend AND its configuration: a backend whose store can stream
+	// notifications still reports false until the gateway is configured to
+	// consume them. See WriteEvent for what each answer obliges a consumer to do.
+	WatchCrossReplica bool `protobuf:"varint,12,opt,name=watch_cross_replica,json=watchCrossReplica,proto3" json:"watch_cross_replica,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *BackendCapabilities) Reset() {
@@ -1855,6 +1869,13 @@ func (x *BackendCapabilities) GetNativeVerbs() []string {
 		return x.NativeVerbs
 	}
 	return nil
+}
+
+func (x *BackendCapabilities) GetWatchCrossReplica() bool {
+	if x != nil {
+		return x.WatchCrossReplica
+	}
+	return false
 }
 
 type ReadyRequest struct {
@@ -2219,7 +2240,7 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"version_id\x18\x04 \x01(\tR\tversionId\x12 \n" +
 	"\ftime_unix_ms\x18\x05 \x01(\x03R\n" +
 	"timeUnixMs\"\x15\n" +
-	"\x13CapabilitiesRequest\"\xb0\x03\n" +
+	"\x13CapabilitiesRequest\"\xe0\x03\n" +
 	"\x13BackendCapabilities\x12\x18\n" +
 	"\abackend\x18\x01 \x01(\tR\abackend\x12'\n" +
 	"\x0fconditional_put\x18\x02 \x01(\bR\x0econditionalPut\x12)\n" +
@@ -2232,7 +2253,8 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\x15presign_ambient_creds\x18\t \x01(\bR\x13presignAmbientCreds\x12(\n" +
 	"\x10batch_delete_max\x18\n" +
 	" \x01(\x05R\x0ebatchDeleteMax\x12!\n" +
-	"\fnative_verbs\x18\v \x03(\tR\vnativeVerbs\"\x0e\n" +
+	"\fnative_verbs\x18\v \x03(\tR\vnativeVerbs\x12.\n" +
+	"\x13watch_cross_replica\x18\f \x01(\bR\x11watchCrossReplica\"\x0e\n" +
 	"\fReadyRequest\"\x94\x01\n" +
 	"\tReadiness\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x18\n" +

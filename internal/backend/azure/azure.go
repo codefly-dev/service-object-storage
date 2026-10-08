@@ -37,7 +37,6 @@ const maxPresignExpiry = 7 * 24 * time.Hour
 type Backend struct {
 	client    *azblob.Client
 	container string
-	account   string
 	// sharedKey is non-nil only when a shared account key was supplied; it is
 	// required for presigning (service SAS) and for authenticating same-account
 	// server-side copy sources.
@@ -57,7 +56,6 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 
 	b := &Backend{
 		container: cfg.Bucket,
-		account:   cfg.AzureAccount,
 		maxExpiry: cfg.PresignMaxExpiry,
 		probe:     cfg.Strategy(),
 		probeKey:  cfg.ProbeKey,
@@ -91,10 +89,6 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "azure" }
-
-// Identity reports a globally unique identifier for this container. Container
-// names are unique only within a storage account, so the account is included.
-func (b *Backend) Identity() string { return b.account + "/" + b.container }
 
 // Capabilities reports the feature set this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {

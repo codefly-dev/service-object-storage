@@ -40,7 +40,6 @@ func TestOpenAppliesNoWrapperWithoutPrefix(t *testing.T) {
 	be, err := backend.Open(context.Background(), backend.Config{Kind: "mem", Bucket: "b"})
 	require.NoError(t, err)
 	require.IsType(t, &mem.Backend{}, be)
-	require.Equal(t, "b", be.Identity())
 }
 
 func TestOpenRejectsUnusablePrefix(t *testing.T) {
@@ -111,16 +110,10 @@ func TestPrefixConfinesKeys(t *testing.T) {
 	require.True(t, serr.Is(err, serr.NotFound), "%v", err)
 }
 
-// TestPrefixSeparatesIdentity: two prefixes on one bucket address different
-// objects under the same relative key, so they must not share an identity.
-func TestPrefixSeparatesIdentity(t *testing.T) {
+func TestPrefixKeepsBackendName(t *testing.T) {
 	store, err := mem.New(context.Background(), backend.Config{Bucket: "shared"})
 	require.NoError(t, err)
-	a := backend.WithPrefix(store, "tenant-a/")
-	b := backend.WithPrefix(store, "tenant-b/")
-	require.NotEqual(t, a.Identity(), b.Identity())
-	require.NotEqual(t, store.Identity(), a.Identity())
-	require.Equal(t, store.Name(), a.Name())
+	require.Equal(t, store.Name(), backend.WithPrefix(store, "tenant-a/").Name())
 }
 
 func TestPrefixRefusesNative(t *testing.T) {

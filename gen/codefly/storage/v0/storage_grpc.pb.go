@@ -57,13 +57,13 @@ type ObjectStorageClient interface {
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResult, error)
 	Copy(ctx context.Context, in *CopyRequest, opts ...grpc.CallOption) (*CopyResult, error)
 	Presign(ctx context.Context, in *PresignRequest, opts ...grpc.CallOption) (*PresignResult, error)
-	// Watch streams write events (Put/Delete) as they complete through the
-	// replica the client is connected to; writes served by other replicas are not
-	// delivered (see WriteEvent for the delivery contract — it is a hint stream,
-	// not a log). The
-	// stream's initial gRPC header marks the subscription as live: events are live
-	// and never replayed, so a client reconciles state from before the header out
-	// of band, and periodically thereafter to recover any dropped events.
+	// Watch streams write events (Put/Delete) as they land, scoped by key prefix.
+	// How much of the bucket a stream covers is reported by
+	// BackendCapabilities.watch_cross_replica, and WriteEvent carries the
+	// delivery contract — it is a hint stream, not a log. The stream's initial
+	// gRPC header marks the subscription as live: events are live and never
+	// replayed, so a client reconciles state from before the header out of band,
+	// and periodically thereafter to recover any dropped events.
 	Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WriteEvent], error)
 	Capabilities(ctx context.Context, in *CapabilitiesRequest, opts ...grpc.CallOption) (*BackendCapabilities, error)
 	// Ready reports whether the configured bucket/container is reachable with the
@@ -240,13 +240,13 @@ type ObjectStorageServer interface {
 	List(context.Context, *ListRequest) (*ListResult, error)
 	Copy(context.Context, *CopyRequest) (*CopyResult, error)
 	Presign(context.Context, *PresignRequest) (*PresignResult, error)
-	// Watch streams write events (Put/Delete) as they complete through the
-	// replica the client is connected to; writes served by other replicas are not
-	// delivered (see WriteEvent for the delivery contract — it is a hint stream,
-	// not a log). The
-	// stream's initial gRPC header marks the subscription as live: events are live
-	// and never replayed, so a client reconciles state from before the header out
-	// of band, and periodically thereafter to recover any dropped events.
+	// Watch streams write events (Put/Delete) as they land, scoped by key prefix.
+	// How much of the bucket a stream covers is reported by
+	// BackendCapabilities.watch_cross_replica, and WriteEvent carries the
+	// delivery contract — it is a hint stream, not a log. The stream's initial
+	// gRPC header marks the subscription as live: events are live and never
+	// replayed, so a client reconciles state from before the header out of band,
+	// and periodically thereafter to recover any dropped events.
 	Watch(*WatchRequest, grpc.ServerStreamingServer[WriteEvent]) error
 	Capabilities(context.Context, *CapabilitiesRequest) (*BackendCapabilities, error)
 	// Ready reports whether the configured bucket/container is reachable with the

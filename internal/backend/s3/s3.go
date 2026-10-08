@@ -49,7 +49,6 @@ type Backend struct {
 	presign    *s3.PresignClient
 	creds      aws.CredentialsProvider
 	bucket     string
-	endpoint   string
 	presignMax time.Duration
 	probe      backend.ProbeStrategy
 	probeKey   string
@@ -87,7 +86,6 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		presign:    s3.NewPresignClient(client),
 		creds:      awscfg.Credentials,
 		bucket:     cfg.Bucket,
-		endpoint:   cfg.Endpoint,
 		presignMax: cfg.PresignMaxExpiry,
 		probe:      cfg.Strategy(),
 		probeKey:   cfg.ProbeKey,
@@ -96,16 +94,6 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 
 // Name reports the backend kind.
 func (b *Backend) Name() string { return "s3" }
-
-// Identity reports a globally unique identifier for this bucket. Real S3 bucket
-// names are globally unique, but an S3-compatible service reached via a custom
-// endpoint is not, so the endpoint disambiguates when set.
-func (b *Backend) Identity() string {
-	if b.endpoint != "" {
-		return b.endpoint + "/" + b.bucket
-	}
-	return b.bucket
-}
 
 // Capabilities reports what this backend honors.
 func (b *Backend) Capabilities() backend.Capabilities {

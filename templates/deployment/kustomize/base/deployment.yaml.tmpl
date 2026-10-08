@@ -60,6 +60,14 @@ spec:
             - name: SOS_ENDPOINT
               value: "{{ .Deployment.Parameters.Endpoint }}"
 {{- end }}
+{{- if .Deployment.Parameters.ChangeFeed }}
+            # The gateway consumes the store's own write notifications and
+            # republishes them on Watch, so every replica carries every write to
+            # the bucket — including writes made with no gateway at all. Deploy
+            # only renders this for minio; see README "Watch".
+            - name: SOS_CHANGE_FEED
+              value: "true"
+{{- end }}
             # The gateway refuses to start on an unauthenticated listener unless
             # this is set. In the deployed profile caller identity is enforced by
             # the cluster — NetworkPolicy plus service-mesh mTLS in front of this

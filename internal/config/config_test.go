@@ -277,3 +277,23 @@ func TestFromEnv_SelectsBackend(t *testing.T) {
 		})
 	}
 }
+
+// TestFromEnv_ChangeFeedIsOffByDefault: turning it on changes what Watch
+// carries, so it is a choice an operator makes rather than one a version bump
+// makes for them.
+func TestFromEnv_ChangeFeedIsOffByDefault(t *testing.T) {
+	probeEnv(t)
+
+	cfg, err := config.FromEnv()
+	require.NoError(t, err)
+	require.False(t, cfg.Backend.ChangeFeed)
+}
+
+func TestFromEnv_ReadsChangeFeed(t *testing.T) {
+	probeEnv(t)
+	t.Setenv("SOS_CHANGE_FEED", "true")
+
+	cfg, err := config.FromEnv()
+	require.NoError(t, err)
+	require.True(t, cfg.Backend.ChangeFeed)
+}

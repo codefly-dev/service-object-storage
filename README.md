@@ -51,15 +51,48 @@ Errors are normalized to gRPC status codes (`NotFound`, `AlreadyExists`,
 
 ## Watch
 
-`Watch` streams a change hint for every `Put`/`Delete` that completes through
-the gateway, scoped by key prefix. Delivery is **per replica**: a stream carries
-the writes served by the replica the client is connected to, never writes served
-by other replicas or made to the bucket directly. It is a hint stream, not a
-log — a consumer reconciles against `List` periodically and after a
-`RESOURCE_EXHAUSTED` drop (see the `WriteEvent` contract in the proto). A
-consumer that needs every write to the bucket across replicas subscribes to the
-backing store's event notifications (S3/MinIO bucket notifications, GCS Pub/Sub
-notifications, Azure Event Grid) instead.
+`Watch` streams a change hint for every write, scoped by key prefix. It is a
+hint stream, not a log — a consumer reconciles against `List` periodically and
+after a `RESOURCE_EXHAUSTED` drop (see the `WriteEvent` contract in the proto).
+
+How much of the bucket a stream covers depends on whether the gateway is
+consuming the store's own write notifications, and
+`Capabilities.watch_cross_replica` is how a consumer tells rather than assumes:
+
+| `watch_cross_replica` | What a stream carries |
+|---|---|
+| `false` (default) | the `Put`/`Delete` calls served by **the replica the client is connected to**, and nothing else — not writes served by sibling replicas, not writes made to the bucket directly (a presigned PUT, another tool) |
+| `true` | **every write to the bucket**, whatever made it, because each replica subscribes to the store's notifications itself |
+
+### The cross-replica change feed
+
+`SOS_CHANGE_FEED=true` makes the gateway consume the backing store's own write
+notifications and republish them on `Watch`. That is what a consumer needing
+every write — a cache over this gateway invalidating on an out-of-band write —
+subscribes to, and it keeps that consumer on one gRPC API with no cloud SDK
+linked.
+
+It is supported on **`minio` only**. MinIO's listener is an API on the server
+(`ListenBucketNotification`), so a replica subscribes with the credentials it
+already has and nothing has to be provisioned; the credential needs the
+`s3:ListenNotification` action. The cloud backends carry their writes on
+delivery targets that something must provision and inject first — S3 on
+EventBridge or SQS, GCS on Pub/Sub, Azure on Event Grid — and this gateway
+consumes none of them yet, so it **refuses** `SOS_CHANGE_FEED` there rather than
+serve a narrower `Watch` than the one that was configured: the gateway fails at
+startup naming the backend, and `Deploy` rejects the manifest before it is
+written.
+
+Two properties to design against:
+
+- **A write this replica serves is delivered twice** — once when the call
+  completes, once when the store reports it. `Watch` is at-least-once by
+  contract, so a consumer is already idempotent; suppressing the local
+  publication instead would cost it *every* event for as long as the store's
+  stream was down.
+- **A gap is not signalled.** Writes made while the notification stream was
+  down are lost and nothing reports them as lost. The feed re-subscribes with
+  backoff, and periodic reconciliation remains a consumer's obligation.
 
 ## Configuration (env)
 
@@ -80,6 +113,7 @@ notifications, Azure Event Grid) instead.
 | `SOS_PROBE_KEY` | — | required for `stat`; the object headed (need not exist) |
 | `SOS_PROBE_INTERVAL` | `10s` | how often readiness is re-probed |
 | `SOS_PROBE_TIMEOUT` | `5s` | per-probe deadline |
+| `SOS_CHANGE_FEED` | `false` | republish the store's own write notifications on `Watch`, making it cross-replica; `minio` only, refused on other backends (see [Watch](#watch)) |
 
 ## Readiness
 

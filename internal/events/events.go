@@ -3,13 +3,13 @@
 // Hub, which delivers it to matching Watch subscribers — the journal seed a
 // consumer reconciles its own index against.
 //
-// Delivery is per replica: the Hub is in-process, so a Watch subscriber sees
-// the writes served by the replica it is connected to, and only those. A
-// consumer that needs every write across replicas uses the backing store's own
-// event notifications (S3/MinIO bucket notifications, GCS Pub/Sub, Azure Event
-// Grid), which observe the bucket rather than one gateway process. Delivery is
-// a change hint, not a log: consumers reconcile out of band (see the
-// WriteEvent proto contract).
+// The Hub is in-process, so on its own it carries only the writes served by
+// this replica. internal/feed adds the store's own write notifications as a
+// second publisher when the gateway is configured to consume them, which is
+// what makes a Watch stream cover writes served by sibling replicas and writes
+// made to the bucket directly; Capabilities.watch_cross_replica reports which
+// of the two a consumer is subscribed to. Delivery is a change hint, not a log:
+// consumers reconcile out of band (see the WriteEvent proto contract).
 //
 // A slow Watch subscriber is dropped rather than allowed to stall the fan-out:
 // its channel is closed once its buffer overflows, ending the RPC with a lag

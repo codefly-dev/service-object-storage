@@ -46,6 +46,10 @@ type Config struct {
 	ProbeStrategy ProbeStrategy
 	// ProbeKey is the object ProbeStat heads. It need not exist.
 	ProbeKey string
+	// ChangeFeed asks the backend to stream the store's own write
+	// notifications, which the gateway republishes on Watch. Only a backend
+	// that implements ChangeFeeder can honor it.
+	ChangeFeed bool
 }
 
 // ProbeStrategy names how a backend verifies access to its bucket/container.
@@ -194,6 +198,10 @@ type Capabilities struct {
 	PresignAmbientCreds bool
 	BatchDeleteMax      int
 	NativeVerbs         []string
+	// WatchCrossReplica is true when this backend is streaming the store's own
+	// write notifications, so Watch carries every write to the bucket rather
+	// than only the writes this replica served.
+	WatchCrossReplica bool
 }
 
 // Backend is the provider-agnostic object-storage contract. Implementations
@@ -202,13 +210,6 @@ type Capabilities struct {
 type Backend interface {
 	// Name is the backend kind ("s3", "gcs", "azure", "minio").
 	Name() string
-	// Identity is a GLOBALLY UNIQUE identifier for the physical location this
-	// instance is bound to — the bucket/container plus whatever disambiguates
-	// it across deployments (the account for Azure, the endpoint for MinIO and
-	// S3-compatible services). A bare bucket name is not enough: two containers
-	// named "data" in different Azure accounts, or two MinIO clusters with a
-	// bucket named "data", are different locations and must not compare equal.
-	Identity() string
 	// Capabilities reports what this backend honors. It is static feature
 	// introspection computed from the backend kind and its configuration: it
 	// reaches no network and proves nothing about access — see Probe.
@@ -256,4 +257,53 @@ type Backend interface {
 type DeleteEntry struct {
 	Key   string
 	Error string
+}
+
+// ChangeOp is the mutation a Change reports.
+type ChangeOp int8
+
+const (
+	ChangePut ChangeOp = iota
+	ChangeDelete
+)
+
+// Change is one mutation the STORE reports, not one the gateway served. The
+// store observes the bucket, so a change covers writes made by every gateway
+// replica and writes made with no gateway at all (a presigned PUT, another
+// tool). ETag and VersionID are set when the store reports them.
+type Change struct {
+	Key       string
+	Op        ChangeOp
+	ETag      string
+	VersionID string
+	Time      time.Time
+}
+
+// ChangeEvent carries either a change or an error the store's stream reported.
+// An error does not end the stream: a feed that cannot continue closes its
+// channel instead.
+type ChangeEvent struct {
+	Change Change
+	Err    error
+}
+
+// ChangeFeeder is implemented by a backend whose store can stream its own write
+// notifications. A backend that cannot does not implement it at all, so Watch
+// stays per replica rather than silently claiming a coverage it does not have.
+type ChangeFeeder interface {
+	// Changes streams the store's notifications for keys under prefix (empty =
+	// the whole bucket) until ctx is done. The returned channel is closed when
+	// the stream cannot continue; the caller re-subscribes.
+	Changes(ctx context.Context, prefix string) <-chan ChangeEvent
+}
+
+// AsChangeFeeder reports whether be can stream the store's own notifications.
+// It sees through the prefix decorator, which forwards the inner feed with keys
+// translated into the prefixed key space rather than implementing one itself.
+func AsChangeFeeder(be Backend) (ChangeFeeder, bool) {
+	if d, ok := be.(interface{ changeFeeder() (ChangeFeeder, bool) }); ok {
+		return d.changeFeeder()
+	}
+	f, ok := be.(ChangeFeeder)
+	return f, ok
 }

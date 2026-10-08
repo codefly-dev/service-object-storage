@@ -237,8 +237,9 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 	defer sub.Close()
 	// The header marks the subscription as live. Writes served by this replica
 	// after the client observes it are delivered in order (or a slow client is
-	// dropped); writes served by other replicas arrive best-effort over the
-	// shared tier. A client reconciles anything before this point out of band.
+	// dropped); whether writes from elsewhere arrive at all is what
+	// Capabilities.watch_cross_replica reports. A client reconciles anything
+	// before this point out of band.
 	if err := stream.SendHeader(nil); err != nil {
 		return err
 	}

@@ -57,6 +57,7 @@ func FromEnv() (Config, error) {
 			PresignMaxExpiry:   envDuration("SOS_PRESIGN_MAX_EXPIRY", 0),
 			ProbeStrategy:      backend.ProbeStrategy(env("SOS_PROBE_STRATEGY", string(backend.ProbeList))),
 			ProbeKey:           os.Getenv("SOS_PROBE_KEY"),
+			ChangeFeed:         envBool("SOS_CHANGE_FEED", false),
 		},
 		Health: HealthConfig{
 			Interval: envDuration("SOS_PROBE_INTERVAL", 10*time.Second),

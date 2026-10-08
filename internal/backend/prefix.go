@@ -51,11 +51,6 @@ func (p *prefixed) info(i *ObjectInfo) {
 
 func (p *prefixed) Name() string { return p.inner.Name() }
 
-// Identity folds the prefix in: two gateways on one bucket with different
-// prefixes address different objects under the same relative key, so they are
-// different locations.
-func (p *prefixed) Identity() string { return p.inner.Identity() + "#prefix=" + p.prefix }
-
 func (p *prefixed) Capabilities() Capabilities { return p.inner.Capabilities() }
 
 func (p *prefixed) Probe(ctx context.Context) error { return p.inner.Probe(ctx) }
@@ -124,3 +119,46 @@ func (p *prefixed) Native(_ context.Context, verb string, _ map[string]string) (
 }
 
 func (p *prefixed) Close() error { return p.inner.Close() }
+
+// changeFeeder forwards the inner store's feed confined to the prefix: the
+// store filters by it, and the keys it reports are stripped on the way out, so
+// a subscriber sees the same relative keys every other RPC uses.
+func (p *prefixed) changeFeeder() (ChangeFeeder, bool) {
+	inner, ok := AsChangeFeeder(p.inner)
+	if !ok {
+		return nil, false
+	}
+	return &prefixedFeed{inner: inner, prefix: p.prefix}, true
+}
+
+type prefixedFeed struct {
+	inner  ChangeFeeder
+	prefix string
+}
+
+// Changes joins prefix onto the configured one, so a caller watching a relative
+// prefix cannot reach outside the store's confinement. A key the store reports
+// that does not carry the prefix is dropped: whether the store honored the
+// filter is its promise, not an invariant here, and stripping such a key would
+// hand the subscriber something it must not see.
+func (f *prefixedFeed) Changes(ctx context.Context, prefix string) <-chan ChangeEvent {
+	in := f.inner.Changes(ctx, f.prefix+prefix)
+	out := make(chan ChangeEvent)
+	go func() {
+		defer close(out)
+		for ev := range in {
+			if ev.Err == nil {
+				if !strings.HasPrefix(ev.Change.Key, f.prefix) {
+					continue
+				}
+				ev.Change.Key = strings.TrimPrefix(ev.Change.Key, f.prefix)
+			}
+			select {
+			case out <- ev:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
