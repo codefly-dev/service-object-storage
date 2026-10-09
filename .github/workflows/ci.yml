@@ -14,7 +14,7 @@ jobs:
     # Pinned to an immutable core commit SHA, not @main: a mutable ref lets an
     # upstream change alter this repo's gate — which runs with this repo's token
     # — with no commit here. Bump deliberately alongside the go.mod core version.
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@29bc3dbdda86cc5b3432f17c249bc49301a2edad
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@579616e99123228bb573e20cdcac9b3077b686c3
 
   # The shared go-service-ci runs `go test` without the race detector; this
   # repo's events hub, Watch streams and readiness monitor are concurrent, so
@@ -22,8 +22,8 @@ jobs:
   race:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -32,8 +32,8 @@ jobs:
   integration-minio:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -76,8 +76,8 @@ jobs:
   agent-runtime-e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -98,8 +98,8 @@ jobs:
   image-sbom:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -107,7 +107,7 @@ jobs:
         run: docker build -t service-object-storage:e2e .
       # The daemon holds this image and no registry serves it, so the scan needs
       # syft on PATH: the managed containerized scanner has no Docker access.
-      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
       - name: assert the image contract against a real image
         env:
           SOS_GATEWAY_IMAGE: service-object-storage:e2e
