@@ -281,7 +281,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 		return s.Wool.Wrapf(err, "cannot load grpc api")
 	}
 	endpoint := s.Base.BaseEndpoint(standards.GRPC)
-	endpoint.Visibility = resources.VisibilityExternal
+	endpoint.Visibility = resources.VisibilityPrivate
 	s.GrpcEndpoint, err = resources.NewAPI(ctx, endpoint, resources.ToGrpcAPI(grpc))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create grpc endpoint")

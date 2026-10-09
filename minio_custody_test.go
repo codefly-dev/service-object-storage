@@ -321,7 +321,10 @@ func TestMinIOProvisioningCommit(t *testing.T) {
 // probe's write is refused) is rejected after the real Docker probe protocol
 // and before a lock, a custody record or retained data exists.
 func TestMinIORejectsUserMappingBeforeCustodyMutation(t *testing.T) {
-	home := t.TempDir()
+	// Canonical: the mount source the runtime reports is symlink-resolved, and
+	// macOS keeps TempDir under /var → /private/var.
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	t.Setenv("CODEFLY_HOME", home)
 	// Short independent socket path fits Darwin's sockaddr_un limit.
 	socketDir, err := os.MkdirTemp("/tmp", "sos27-daemon-")

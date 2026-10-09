@@ -4,7 +4,7 @@ name: object-storage
 version: 0.0.12
 source:
   directory: .
-  agent: codefly.dev/go:0.0.56
+  agent: codefly.dev/go:0.0.69
 release:
   owner: workflow
   workflow: release.yml
