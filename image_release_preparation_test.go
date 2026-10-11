@@ -125,7 +125,7 @@ func TestImagePreparationRefusesUnmergedCommitsBeforePublishing(t *testing.T) {
 	git(origin, "checkout", "release")
 	checkout := t.TempDir()
 	git(checkout, "clone", "--no-hardlinks", origin, ".")
-	git(checkout, "tag", "origin/release", unmerged)
+	git(checkout, "-c", "tag.gpgsign=false", "tag", "origin/release", unmerged)
 
 	for _, tc := range []struct {
 		name, sha string
