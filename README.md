@@ -333,9 +333,13 @@ The agent runs that image by digest, not by tag: `gateway-image.json` records
 the digest and the agent pins it, so the container a release runs — and reports
 evidence for — is the one that was built for it rather than whatever the tag
 serves now. The digest only exists once the image is built, so the image is
-published ahead of the release tag by `publish-gateway-image.yml`. That caller
-uses core's `publish-service-image.yml`, pinned by commit SHA, with the
-upcoming stable version. It checks out without persisting credentials and
+published ahead of the release tag by `publish-gateway-image.yml`, with the
+upcoming stable version. This repository owns the publishing job as an
+owner-approved stopgap (hack): GHCR denied the push from core's reusable
+workflow because the job was defined in core. Replace this copy with the
+composite action planned for core 0.18.2 in
+[core#770](https://github.com/codefly-dev/core/issues/770) once it ships.
+The job checks out without persisting credentials and
 refuses a commit not reachable from this repository's default branch. Adopt
 its `gateway-image.json-<version>` artifact in a reviewed PR before the
 coordinator runs `codefly publish`; never hand-tag. `release.yml` creates the
@@ -399,8 +403,8 @@ was written in. Every release runs the same command and publishes the documents
 and an `index.txt` naming each digest and platform, as build artifacts of
 `.github/workflows/release.yml`. The platform list lives only in
 `internal/imageevidence`, which now contains only the service declaration and
-calls core. A test asserts the platforms against the reusable publisher's
-inputs. Document filenames include repository, platform and digest; each index
+calls core. A test asserts the platforms against the publisher's build step.
+Document filenames include repository, platform and digest; each index
 row contains platform (`-` if unstated), repository plus scanned digest, filename
 and canonical inventory checksum (not the checksum of the formatted file).
 
