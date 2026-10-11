@@ -202,7 +202,7 @@ func TestReleaseEvidenceComesFromTheSharedCommand(t *testing.T) {
 		t.Error("the release workflow loops over its own platform list; it must read imageevidence.Platforms through cmd/image-sbom")
 	}
 	if strings.Contains(workflowBody(t, "publish-gateway-image.yml"), "for platform in") {
-		t.Error("the publish workflow loops over its own platform list; the platforms it builds are passed to the reusable workflow")
+		t.Error("the publish workflow loops over its own platform list; read the platforms from its build step")
 	}
 }
 
@@ -223,23 +223,25 @@ func expectedFromReleasePipeline(t *testing.T, reference string) []*builderv0.Im
 	return expected
 }
 
-// publishedPlatforms reads the platforms passed to core's image publisher,
+// publishedPlatforms reads the platforms passed to the image build step,
 // independently of the service declaration used to derive evidence subjects.
 func publishedPlatforms(t *testing.T) []string {
 	t.Helper()
 	var workflow struct {
 		Jobs map[string]struct {
-			With struct{ Platforms string }
+			Steps []releaseStep
 		}
 	}
 	if err := yaml.Unmarshal([]byte(workflowBody(t, "publish-gateway-image.yml")), &workflow); err != nil {
 		t.Fatalf("parse publish workflow: %v", err)
 	}
-	platforms := workflow.Jobs["publish"].With.Platforms
-	if platforms == "" {
-		t.Fatal("the publish workflow declares no platforms")
+	for _, step := range workflow.Jobs["publish"].Steps {
+		if strings.HasPrefix(step.Uses, "docker/build-push-action@") && step.With.Platforms != "" {
+			return strings.Split(step.With.Platforms, ",")
+		}
 	}
-	return strings.Split(platforms, ",")
+	t.Fatal("the publish workflow declares no build platforms")
+	return nil
 }
 
 func releaseWorkflow(t *testing.T) string {

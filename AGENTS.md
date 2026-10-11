@@ -112,7 +112,7 @@ one workflow, in that order. The tag must match `version:` in
 that file resolves the *previous* image, which exists, so nothing fails at run
 time and the evidence describes an image the agent never runs. The shipped
 platform list lives in `internal/imageevidence` and a test asserts it against
-the inputs to core's reusable image publisher. Core's agent-release workflow
+the build step in `publish-gateway-image.yml`. Core's agent-release workflow
 accepts only pushed tags whose commits are reachable from the default branch.
 
 Prepare the gateway before publishing the agent: use `codefly publish --dry-run`
@@ -120,9 +120,15 @@ to determine the next version, then dispatch `publish-gateway-image.yml` with
 that explicit `version` (without `v`). Adopt its `gateway-image.json-<version>`
 artifact as `gateway-image.json` in a reviewed PR. Only then run normal
 `codefly publish`; the tag gate still checks the image label against the bumped
-agent version and refuses a stale lock. The reusable publisher checks out with
+agent version and refuses a stale lock. The publisher checks out with
 `persist-credentials: false` and refuses a commit outside the default branch's
 history. It changes no release tag or lock in this repository.
+
+The repository-owned publishing job is an owner-approved stopgap (hack): GHCR
+denied package writes from core's reusable workflow because core defined the
+job. Replace the local copy with the composite action planned for core 0.18.2
+in [core#770](https://github.com/codefly-dev/core/issues/770) once it ships.
+Keep the default-branch refusal and `persist-credentials: false` when adopting it.
 
 The gateway lock accepts only its expected registry/name, a lowercase SHA-256
 digest, and the two known JSON keys; an empty digest means unpublished. MinIO's
