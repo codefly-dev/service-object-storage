@@ -13,7 +13,7 @@ func TestParseGatewayImageLock(t *testing.T) {
 		"digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"
 	}`), "service-object-storage")
 	if err != nil {
-		t.Fatalf("parseGatewayImageLock: %v", err)
+		t.Fatalf("resources.ParseImageLock: %v", err)
 	}
 	const want = "ghcr.io/codefly-dev/service-object-storage@sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"
 	if got := image.FullName(); got != want {
@@ -57,7 +57,7 @@ func TestGatewayImageMatchesTheLockOnDisk(t *testing.T) {
 	}
 	expected, err := resources.ParseImageLock(lock, "service-object-storage")
 	if err != nil {
-		t.Fatalf("parseGatewayImageLock: %v", err)
+		t.Fatalf("resources.ParseImageLock: %v", err)
 	}
 	if got, want := gatewayImage.FullName(), expected.FullName(); got != want {
 		t.Errorf("gateway image = %q, want the recorded %q", got, want)

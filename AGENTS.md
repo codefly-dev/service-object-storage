@@ -24,7 +24,7 @@ and the local/deployed profiles. This file is how to work in the repo.
 
 - The CLI and the agent framework — `codefly-dev/cli`, and `codefly-dev/core`,
   which is both a `go.mod` dependency and the home of the shared CI workflows
-  this repo calls (pinned here by commit SHA, never `@main`). Core v0.18.1 also
+  this repo calls (pinned here by commit SHA, never `@main`). Core also
   owns `callertoken`, the gateway image-lock parser and shared image evidence.
   Do not restore service-local copies. Pin dependencies with
   `codefly agent deps --pin <version>` so every owned lock is checked.
@@ -112,7 +112,8 @@ one workflow, in that order. The tag must match `version:` in
 that file resolves the *previous* image, which exists, so nothing fails at run
 time and the evidence describes an image the agent never runs. The shipped
 platform list lives in `internal/imageevidence` and a test asserts it against
-the inputs to core's reusable image publisher.
+the inputs to core's reusable image publisher. Core's agent-release workflow
+accepts only pushed tags whose commits are reachable from the default branch.
 
 Prepare the gateway before publishing the agent: use `codefly publish --dry-run`
 to determine the next version, then dispatch `publish-gateway-image.yml` with
@@ -129,7 +130,7 @@ source metadata has its own schema but shares core's digest validation. Registry
 evidence rejects bare tags and declares one subject per shipped platform; local
 evidence reads its image ID and actual platform from Docker.
 
-Caller tokens are now 64 hex characters, also used for generated MinIO passwords
+Caller tokens are 64 hex characters, also used for generated MinIO passwords
 and custody IDs. Only exact health Check/Watch RPCs bypass the token; Health/List
 requires it. An empty interceptor token fails closed, while the gateway's
 explicit anonymous profile continues to install no interceptors.

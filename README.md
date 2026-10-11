@@ -174,11 +174,11 @@ With `SOS_AUTH_TOKEN` set, every RPC — unary and streaming, `Capabilities`
 included — must carry the secret as the `x-codefly-token` gRPC metadata header,
 the same key the codefly host already uses to authenticate agent plugins.
 Anything else is rejected with `UNAUTHENTICATED` before it reaches a backend.
-Core v0.18.1's `callertoken` package compares the token in constant time.
+Core's `callertoken` package compares the token in constant time.
 Only the exact `/grpc.health.v1.Health/Check` and
 `/grpc.health.v1.Health/Watch` RPCs are exempt; `Health/List` requires a token.
-Generated tokens are 64 lowercase hex characters (32 random bytes), previously
-48. Operator-provided tokens retain their configured value. The same generator
+Generated tokens are 64 lowercase hex characters (32 random bytes).
+Operator-provided tokens retain their configured value. The same generator
 supplies local MinIO passwords and custody identifiers.
 
 An empty token passed to a core interceptor fails closed. The gateway installs
@@ -334,7 +334,7 @@ the digest and the agent pins it, so the container a release runs — and report
 evidence for — is the one that was built for it rather than whatever the tag
 serves now. The digest only exists once the image is built, so the image is
 published ahead of the release tag by `publish-gateway-image.yml`. That caller
-uses core v0.18.1's `publish-service-image.yml`, pinned by commit SHA, with the
+uses core's `publish-service-image.yml`, pinned by commit SHA, with the
 upcoming stable version. It checks out without persisting credentials and
 refuses a commit not reachable from this repository's default branch. Adopt
 its `gateway-image.json-<version>` artifact in a reviewed PR before the
