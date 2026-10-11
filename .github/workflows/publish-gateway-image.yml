@@ -45,7 +45,7 @@ jobs:
       # Full history for the ancestry proof, and no persisted credential — the
       # action refuses a checkout that left one in the local git config, since
       # the build context would otherwise carry it into the image.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
