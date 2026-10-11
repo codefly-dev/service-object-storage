@@ -202,7 +202,7 @@ func TestReleaseEvidenceComesFromTheSharedCommand(t *testing.T) {
 		t.Error("the release workflow loops over its own platform list; it must read imageevidence.Platforms through cmd/image-sbom")
 	}
 	if strings.Contains(workflowBody(t, "publish-gateway-image.yml"), "for platform in") {
-		t.Error("the publish workflow loops over its own platform list; the platforms it builds are read from its build-push step")
+		t.Error("the publish workflow loops over its own platform list; the platforms it builds are passed to the reusable workflow")
 	}
 }
 
@@ -223,41 +223,23 @@ func expectedFromReleasePipeline(t *testing.T, reference string) []*builderv0.Im
 	return expected
 }
 
-// publishedPlatforms reads the platforms the pipeline actually builds, from the
-// step that pushes the image rather than from any step that happens to carry a
-// platform list.
+// publishedPlatforms reads the platforms passed to core's image publisher,
+// independently of the service declaration used to derive evidence subjects.
 func publishedPlatforms(t *testing.T) []string {
 	t.Helper()
 	var workflow struct {
 		Jobs map[string]struct {
-			Steps []struct {
-				Uses string `yaml:"uses"`
-				With struct {
-					Platforms string `yaml:"platforms"`
-				} `yaml:"with"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
+			With struct{ Platforms string }
+		}
 	}
 	if err := yaml.Unmarshal([]byte(workflowBody(t, "publish-gateway-image.yml")), &workflow); err != nil {
 		t.Fatalf("parse publish workflow: %v", err)
 	}
-	var published []string
-	for _, job := range workflow.Jobs {
-		for _, step := range job.Steps {
-			if !strings.Contains(step.Uses, "docker/build-push-action") {
-				continue
-			}
-			for _, platform := range strings.Split(step.With.Platforms, ",") {
-				if platform = strings.TrimSpace(platform); platform != "" {
-					published = append(published, platform)
-				}
-			}
-		}
+	platforms := workflow.Jobs["publish"].With.Platforms
+	if platforms == "" {
+		t.Fatal("the publish workflow declares no platforms")
 	}
-	if len(published) == 0 {
-		t.Fatal("the publish workflow's build-push step publishes no platforms")
-	}
-	return published
+	return strings.Split(platforms, ",")
 }
 
 func releaseWorkflow(t *testing.T) string {
@@ -632,4 +614,13 @@ func evidenceFor(subjects []*builderv0.ImageSubject) []*builderv0.ImageSBOM {
 		})
 	}
 	return images
+}
+
+// A registry tag can move between declaring the subjects and scanning them.
+// The service's declaration must reach core's pin validation before any scan.
+func TestPublishedEvidenceRefusesABareTag(t *testing.T) {
+	_, err := imageevidence.Subjects(context.Background(), testService, "ghcr.io/codefly-dev/service-object-storage:latest", false)
+	if err == nil {
+		t.Fatal("accepted a mutable registry tag as an evidence subject")
+	}
 }

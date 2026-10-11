@@ -1,9 +1,7 @@
-package auth_test
+package main
 
 import (
 	"context"
-	grpchealth "google.golang.org/grpc/health"
-	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"io"
 	"net"
 	"testing"
@@ -13,11 +11,13 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	grpchealth "google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/codefly-dev/core/callertoken"
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
-	"github.com/codefly-dev/service-object-storage/internal/auth"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -106,8 +106,8 @@ func startGateway(t *testing.T) string {
 	hub := events.NewHub()
 
 	s := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(serverToken)),
-		grpc.ChainStreamInterceptor(auth.StreamInterceptor(serverToken)),
+		grpc.ChainUnaryInterceptor(callertoken.UnaryServerInterceptor(serverToken)),
+		grpc.ChainStreamInterceptor(callertoken.StreamServerInterceptor(serverToken)),
 	)
 	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	healthv1.RegisterHealthServer(s, grpchealth.NewServer())
@@ -132,9 +132,9 @@ func TestUnauthenticatedPeerIsRefused(t *testing.T) {
 
 	peers := map[string]storagev0.ObjectStorageClient{
 		"no credentials":  dial(t, address),
-		"wrong token":     dial(t, address, auth.DialOption("00000000000000000000000000000000")),
-		"prefix of token": dial(t, address, auth.DialOption(serverToken[:len(serverToken)-1])),
-		"empty token":     dial(t, address, auth.DialOption("")),
+		"wrong token":     dial(t, address, callertoken.DialOption("00000000000000000000000000000000")),
+		"prefix of token": dial(t, address, callertoken.DialOption(serverToken[:len(serverToken)-1])),
+		"empty token":     dial(t, address, callertoken.DialOption("")),
 	}
 
 	for peerName, client := range peers {
@@ -156,7 +156,7 @@ func TestUnauthenticatedPeerIsRefused(t *testing.T) {
 // Unimplemented) still proves the interceptor let the call through; Watch has
 // nothing to deliver, so it only has to not be refused before the deadline.
 func TestAuthorizedPeerReachesTheHandler(t *testing.T) {
-	client := dial(t, startGateway(t), auth.DialOption(serverToken))
+	client := dial(t, startGateway(t), callertoken.DialOption(serverToken))
 
 	for rpcName, call := range rpcs {
 		t.Run(rpcName, func(t *testing.T) {
@@ -172,9 +172,9 @@ func TestAuthorizedPeerReachesTheHandler(t *testing.T) {
 // the same metadata key the codefly host uses for agent plugins, so a caller
 // built against that convention interoperates.
 func TestTokenTravelsUnderTheEcosystemKey(t *testing.T) {
-	require.Equal(t, "x-codefly-token", auth.MetadataKey)
+	require.Equal(t, "x-codefly-token", callertoken.MetadataKey)
 
-	client := dial(t, startGateway(t), grpc.WithUnaryInterceptor(withMetadata(auth.MetadataKey, serverToken)))
+	client := dial(t, startGateway(t), grpc.WithUnaryInterceptor(withMetadata(callertoken.MetadataKey, serverToken)))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
@@ -200,8 +200,8 @@ func withMetadata(key, value string) grpc.UnaryClientInterceptor {
 	}
 }
 
-// TestHealthNeedsNoToken pins the one exemption: the standard gRPC health
-// service answers a peer that presents no token. A readiness probe — the
+// TestHealthNeedsNoToken pins the exact exemptions: health Check and Watch
+// answer a peer that presents no token. A readiness probe — the
 // Codefly CLI's, a load balancer's, a mesh's — carries none, and a guarded
 // health service made the gateway look permanently unready to all of them
 // (document-store's integration graph never came up under Codefly 0.1.161,
@@ -223,4 +223,9 @@ func TestHealthNeedsNoToken(t *testing.T) {
 	first, err := stream.Recv()
 	require.NoError(t, err)
 	require.Equal(t, healthv1.HealthCheckResponse_SERVING, first.GetStatus())
+
+	_, err = healthv1.NewHealthClient(conn).List(ctx, &healthv1.HealthListRequest{})
+	require.Equal(t, codes.Unauthenticated, status.Code(err))
+	_, err = healthv1.NewHealthClient(conn).List(metadata.AppendToOutgoingContext(ctx, callertoken.MetadataKey, serverToken), &healthv1.HealthListRequest{})
+	require.NoError(t, err)
 }

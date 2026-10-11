@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codefly-dev/core/callertoken"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/wool"
@@ -204,7 +205,7 @@ func ensureMinIOCustody(root, owner, bucket string, present bool) error {
 		if err = claimEmptyCustodyRoot(root); err != nil {
 			return err
 		}
-		id, genErr := randomSecret()
+		id, genErr := callertoken.Generate()
 		if genErr != nil {
 			return genErr
 		}

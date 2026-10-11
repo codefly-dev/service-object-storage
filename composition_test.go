@@ -15,6 +15,7 @@ import (
 
 	"github.com/codefly-dev/core/agents/services"
 	agenttesting "github.com/codefly-dev/core/agents/testing"
+	"github.com/codefly-dev/core/callertoken"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
@@ -27,7 +28,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
-	"github.com/codefly-dev/service-object-storage/internal/auth"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -159,6 +159,11 @@ func TestResolveGatewayToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveGatewayToken: %v", err)
 	}
+	for _, token := range []string{first, second} {
+		if len(token) != 64 || strings.Trim(token, "0123456789abcdef") != "" {
+			t.Errorf("generated token must be 64 lowercase hex characters")
+		}
+	}
 	if first == "" || first == second {
 		t.Errorf("generated tokens must be non-empty and per-run: %q, %q", first, second)
 	}
@@ -223,8 +228,8 @@ func startAuthenticatedGateway(t *testing.T, token string) string {
 	}
 	hub := events.NewHub()
 	srv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(token)),
-		grpc.ChainStreamInterceptor(auth.StreamInterceptor(token)),
+		grpc.ChainUnaryInterceptor(callertoken.UnaryServerInterceptor(token)),
+		grpc.ChainStreamInterceptor(callertoken.StreamServerInterceptor(token)),
 	)
 	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = srv.Serve(lis) }()

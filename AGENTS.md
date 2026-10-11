@@ -12,19 +12,22 @@ and the local/deployed profiles. This file is how to work in the repo.
 
 - The contract and its stubs: `proto/codefly/storage/v0`, `gen/`.
 - The gateway server: `cmd/service-object-storage` and `internal/**` — the
-  backends, the per-replica Watch event hub, caller auth, the readiness probe,
+  backends, the per-replica Watch event hub, auth configuration, the readiness probe,
   and the normalization of backend errors to gRPC codes.
 - The codefly agent that runs the gateway as a first-class service: the repo
   root (`main.go`, `runtime.go`, `builder.go`, `agent.codefly.yaml`) and
   `templates/`, the Kubernetes manifests the Builder renders.
-- SBOM evidence for the image it ships: `cmd/image-sbom`,
-  `internal/imageevidence`.
+- The evidence command and image declaration: `cmd/image-sbom` and
+  `internal/imageevidence`. Core owns subject derivation, scanning and indexing.
 
 ## What it does not own
 
 - The CLI and the agent framework — `codefly-dev/cli`, and `codefly-dev/core`,
   which is both a `go.mod` dependency and the home of the shared CI workflows
-  this repo calls (pinned here by commit SHA, never `@main`).
+  this repo calls (pinned here by commit SHA, never `@main`). Core also
+  owns `callertoken`, the gateway image-lock parser and shared image evidence.
+  Do not restore service-local copies. Pin dependencies with
+  `codefly agent deps --pin <version>` so every owned lock is checked.
 - The backing stores. Behaviour differences between MinIO, S3, GCS and Azure
   are absorbed in `internal/backend/`, but a broken store is not a bug here.
 - Consumers. They declare a `service-dependency` and dial the endpoint; nothing
@@ -109,14 +112,32 @@ one workflow, in that order. The tag must match `version:` in
 that file resolves the *previous* image, which exists, so nothing fails at run
 time and the evidence describes an image the agent never runs. The shipped
 platform list lives in `internal/imageevidence` and a test asserts it against
-the release workflow.
+the inputs to core's reusable image publisher. Core's agent-release workflow
+accepts only pushed tags whose commits are reachable from the default branch.
 
 Prepare the gateway before publishing the agent: use `codefly publish --dry-run`
 to determine the next version, then dispatch `publish-gateway-image.yml` with
-that explicit `version` (without `v`). Adopt its `gateway-image-lock-<version>`
+that explicit `version` (without `v`). Adopt its `gateway-image.json-<version>`
 artifact as `gateway-image.json` in a reviewed PR. Only then run normal
 `codefly publish`; the tag gate still checks the image label against the bumped
-agent version and refuses a stale lock.
+agent version and refuses a stale lock. The reusable publisher checks out with
+`persist-credentials: false` and refuses a commit outside the default branch's
+history. It changes no release tag or lock in this repository.
+
+The gateway lock accepts only its expected registry/name, a lowercase SHA-256
+digest, and the two known JSON keys; an empty digest means unpublished. MinIO's
+source metadata has its own schema but shares core's digest validation. Registry
+evidence rejects bare tags and declares one subject per shipped platform; local
+evidence reads its image ID and actual platform from Docker.
+
+Caller tokens are 64 hex characters, also used for generated MinIO passwords
+and custody IDs. Only exact health Check/Watch RPCs bypass the token; Health/List
+requires it. An empty interceptor token fails closed, while the gateway's
+explicit anonymous profile continues to install no interceptors.
+
+For an agent checkout, run `codefly agent ci` for source, release builds and
+fresh generated-service conformance. `codefly ci run` needs a service workspace
+and reports `no workspace found` at this repository root.
 
 ## How to behave when something does not work
 

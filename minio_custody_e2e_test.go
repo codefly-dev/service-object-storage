@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codefly-dev/core/callertoken"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/shared"
@@ -28,7 +29,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
-	"github.com/codefly-dev/service-object-storage/internal/auth"
 )
 
 func TestMinIOPersistentCustody(t *testing.T) {
@@ -54,7 +54,7 @@ func TestMinIOPersistentCustody(t *testing.T) {
 		require.NoError(t, err)
 		out, err := exec.Command("docker", "inspect", "-f", `{{(index (index .NetworkSettings.Ports "9464/tcp") 0).HostPort}}`, endpoint).Output()
 		require.NoError(t, err)
-		conn, err := grpc.NewClient("localhost:"+strings.TrimSpace(string(out)), grpc.WithTransportCredentials(insecure.NewCredentials()), auth.DialOption(token))
+		conn, err := grpc.NewClient("localhost:"+strings.TrimSpace(string(out)), grpc.WithTransportCredentials(insecure.NewCredentials()), callertoken.DialOption(token))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
 		return storagev0.NewObjectStorageClient(conn)
@@ -288,7 +288,7 @@ func TestMinIOBootstrapResumesAfterInterruption(t *testing.T) {
 	rt, _, _ := loadedRuntime(t, ctx)
 	defer func() { require.NoError(t, rt.teardown(context.Background())) }()
 	require.NoError(t, rt.LoadConfiguration(ctx, nil))
-	// Exact persisted state when freeHostPort, randomSecret, image fetch or
+	// Exact persisted state when freeHostPort, callertoken.Generate, image fetch or
 	// ContainerStart fails after successful custody preflight.
 	_, release, err := rt.prepareMinIOData(ctx)
 	require.NoError(t, err)

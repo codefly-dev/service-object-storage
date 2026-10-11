@@ -17,8 +17,8 @@ import (
 	grpchealth "google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 
+	"github.com/codefly-dev/core/callertoken"
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
-	"github.com/codefly-dev/service-object-storage/internal/auth"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/config"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -73,8 +73,8 @@ func run() error {
 	if cfg.AuthToken != "" {
 		authMode = "token"
 		options = append(options,
-			grpc.ChainUnaryInterceptor(auth.UnaryInterceptor(cfg.AuthToken)),
-			grpc.ChainStreamInterceptor(auth.StreamInterceptor(cfg.AuthToken)),
+			grpc.ChainUnaryInterceptor(callertoken.UnaryServerInterceptor(cfg.AuthToken)),
+			grpc.ChainStreamInterceptor(callertoken.StreamServerInterceptor(cfg.AuthToken)),
 		)
 	}
 

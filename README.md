@@ -174,7 +174,18 @@ With `SOS_AUTH_TOKEN` set, every RPC — unary and streaming, `Capabilities`
 included — must carry the secret as the `x-codefly-token` gRPC metadata header,
 the same key the codefly host already uses to authenticate agent plugins.
 Anything else is rejected with `UNAUTHENTICATED` before it reaches a backend.
-The token is compared in constant time.
+Core's `callertoken` package compares the token in constant time.
+Only the exact `/grpc.health.v1.Health/Check` and
+`/grpc.health.v1.Health/Watch` RPCs are exempt; `Health/List` requires a token.
+Generated tokens are 64 lowercase hex characters (32 random bytes).
+Operator-provided tokens retain their configured value. The same generator
+supplies local MinIO passwords and custody identifiers.
+
+An empty token passed to a core interceptor fails closed. The gateway installs
+interceptors only when `SOS_AUTH_TOKEN` is nonempty: the explicit anonymous
+profile continues to install none. Core's `CheckListener` preserves the refusal
+of both or neither auth settings; its errors name the configuration and exposure,
+while deployment and migration guidance lives here.
 
 Which layer enforces caller identity, per profile:
 
@@ -322,10 +333,21 @@ The agent runs that image by digest, not by tag: `gateway-image.json` records
 the digest and the agent pins it, so the container a release runs — and reports
 evidence for — is the one that was built for it rather than whatever the tag
 serves now. The digest only exists once the image is built, so the image is
-published ahead of the release tag by `publish-gateway-image.yml`; commit the
-digest it prints, then tag. `release.yml` creates the `:<version>` and `:latest`
-tags from that digest and refuses one that was not built for the version being
-released.
+published ahead of the release tag by `publish-gateway-image.yml`. That caller
+uses core's `publish-service-image.yml`, pinned by commit SHA, with the
+upcoming stable version. It checks out without persisting credentials and
+refuses a commit not reachable from this repository's default branch. Adopt
+its `gateway-image.json-<version>` artifact in a reviewed PR before the
+coordinator runs `codefly publish`; never hand-tag. `release.yml` creates the
+`:<version>` and `:latest` image tags from that digest and refuses one that was
+not built for the version being released.
+
+Core's `resources.ParseImageLock` reads the gateway lock. It requires exactly
+`ghcr.io/codefly-dev/service-object-storage` and `sha256:` followed by 64
+lowercase hexadecimal characters, refuses unknown fields (including `tag`) and
+trailing JSON documents, and reports an empty digest as `ErrImageUnpublished`.
+MinIO retains its separate source/release/revision lock schema and uses core's
+same lowercase SHA-256 validation.
 
 ## Supply chain evidence
 
@@ -347,16 +369,20 @@ claim coverage of something the deployed service does not run.
 `SOS_GATEWAY_IMAGE` is honored. An override is a local build no registry serves,
 so it is inventoried through the Docker daemon — which needs `syft` on PATH —
 and covers the single platform the daemon holds. Its subject carries the image
-ID the daemon resolved the override to: the daemon binds a scan to that ID, so
-an override whose reference the daemon does not hold is refused rather than
-inventoried under an identity nothing named.
+ID and actual platform the daemon resolved the override to. Core scans that
+immutable ID even if a local tag moves after inspection; caller-declared local
+platforms are refused. An override whose reference the daemon does not hold is
+refused rather than inventoried under an identity nothing named.
 
 A failed scan, an unresolvable image, or a digest other than the one requested is
 reported as an error, never as partial or complete coverage.
 
 `cmd/image-sbom` writes that evidence to disk through the same scanner the agent
-uses, so a published document is the agent's own output rather than a second,
-drifting copy of it:
+uses: core's `ImageSubjects` derives registry subjects through
+`ExpectedFromImageReference` (which refuses bare tags), and
+`CollectImageEvidence` / `WriteImageEvidenceIndex` collect and index them.
+The Builder and command both validate explicit expected digests through core's
+`ImageForSubject` path:
 
 ```bash
 # the published multi-architecture image: one document per shipped platform
@@ -372,8 +398,11 @@ so it still names the image it describes once separated from the directory it
 was written in. Every release runs the same command and publishes the documents
 and an `index.txt` naming each digest and platform, as build artifacts of
 `.github/workflows/release.yml`. The platform list lives only in
-`internal/imageevidence`, and a test asserts it against the build step that
-publishes the image.
+`internal/imageevidence`, which now contains only the service declaration and
+calls core. A test asserts the platforms against the reusable publisher's
+inputs. Document filenames include repository, platform and digest; each index
+row contains platform (`-` if unstated), repository plus scanned digest, filename
+and canonical inventory checksum (not the checksum of the formatted file).
 
 ## Develop
 
@@ -400,7 +429,6 @@ proto/codefly/storage/v0/    the uniform API
 gen/                         generated gRPC stubs
 internal/backend/            Backend interface + s3, gcs, azure, minio, mem
 internal/events/             in-process write-event hub behind Watch
-internal/auth/               caller authentication on the gRPC surface
 internal/server/             gRPC ObjectStorage implementation
 internal/config/             env configuration
 cmd/service-object-storage/  the server binary
