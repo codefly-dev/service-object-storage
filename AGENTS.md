@@ -112,23 +112,34 @@ one workflow, in that order. The tag must match `version:` in
 that file resolves the *previous* image, which exists, so nothing fails at run
 time and the evidence describes an image the agent never runs. The shipped
 platform list lives in `internal/imageevidence` and a test asserts it against
-the build step in `publish-gateway-image.yml`. Core's agent-release workflow
-accepts only pushed tags whose commits are reachable from the default branch.
+the `platforms` that `publish-gateway-image.yml` passes to core's publish
+action. Core's agent-release workflow accepts only pushed tags whose commits
+are reachable from the default branch.
 
 Prepare the gateway before publishing the agent: use `codefly publish --dry-run`
 to determine the next version, then dispatch `publish-gateway-image.yml` with
 that explicit `version` (without `v`). Adopt its `gateway-image.json-<version>`
 artifact as `gateway-image.json` in a reviewed PR. Only then run normal
 `codefly publish`; the tag gate still checks the image label against the bumped
-agent version and refuses a stale lock. The publisher checks out with
-`persist-credentials: false` and refuses a commit outside the default branch's
-history. It changes no release tag or lock in this repository.
+agent version and refuses a stale lock. It changes no release tag or lock in
+this repository.
 
-The repository-owned publishing job is an owner-approved stopgap (hack): GHCR
-denied package writes from core's reusable workflow because core defined the
-job. Replace the local copy with the composite action planned for core 0.18.2
-in [core#770](https://github.com/codefly-dev/core/issues/770) once it ships.
-Keep the default-branch refusal and `persist-credentials: false` when adopting it.
+The publishing work is core's `.github/actions/publish-service-image`, called
+as a step and pinned by commit SHA. The *job* stays here, with its
+`packages: write` and its `workflow_dispatch` input, because GHCR authorizes
+the repository that defines the job — core's reusable workflow was denied write
+access to this repository's package, and that reusable publisher no longer
+exists upstream. The action checks out nothing itself, so this repo's checkout
+has to satisfy it: the triggering commit (no `ref`), full history,
+`persist-credentials: false`, and no step between the checkout and the action.
+It then refuses a non-dispatch event, a commit not reachable from this
+repository's own remote default branch, a `HEAD` other than the triggering SHA,
+and any modified, staged, untracked or ignored file — the Docker context must be
+the committed tree, so generated code or a version stamp has to be committed
+first. Those refusals run before the registry login or the build. Do not add a
+local build, login, push or upload step back: a second publishing path without
+those guards is the one that gets used in a hurry, and
+`image_release_preparation_test.go` fails when one appears.
 
 The gateway lock accepts only its expected registry/name, a lowercase SHA-256
 digest, and the two known JSON keys; an empty digest means unpublished. MinIO's

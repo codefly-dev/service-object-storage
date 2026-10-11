@@ -202,7 +202,7 @@ func TestReleaseEvidenceComesFromTheSharedCommand(t *testing.T) {
 		t.Error("the release workflow loops over its own platform list; it must read imageevidence.Platforms through cmd/image-sbom")
 	}
 	if strings.Contains(workflowBody(t, "publish-gateway-image.yml"), "for platform in") {
-		t.Error("the publish workflow loops over its own platform list; read the platforms from its build step")
+		t.Error("the publish workflow loops over its own platform list; it passes platforms to core's publish action")
 	}
 }
 
@@ -223,8 +223,11 @@ func expectedFromReleasePipeline(t *testing.T, reference string) []*builderv0.Im
 	return expected
 }
 
-// publishedPlatforms reads the platforms passed to the image build step,
-// independently of the service declaration used to derive evidence subjects.
+// publishedPlatforms reads the platforms the publish job passes to core's
+// publish-service-image action, independently of the service declaration used
+// to derive evidence subjects. The job states them even though they match the
+// action's default: an unstated list would make the release's actual platforms
+// core's to change, and this assertion unanswerable from here.
 func publishedPlatforms(t *testing.T) []string {
 	t.Helper()
 	var workflow struct {
@@ -236,7 +239,7 @@ func publishedPlatforms(t *testing.T) []string {
 		t.Fatalf("parse publish workflow: %v", err)
 	}
 	for _, step := range workflow.Jobs["publish"].Steps {
-		if strings.HasPrefix(step.Uses, "docker/build-push-action@") && step.With.Platforms != "" {
+		if strings.Contains(step.Uses, "/publish-service-image@") && step.With.Platforms != "" {
 			return strings.Split(step.With.Platforms, ",")
 		}
 	}
