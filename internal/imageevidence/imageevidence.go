@@ -16,7 +16,7 @@ import (
 // Platforms are the platforms the release pipeline publishes the gateway image
 // for, and therefore the platforms evidence has to cover: a multi-architecture
 // image is not inventoried by scanning one of its children. It is asserted
-// against the build step in publish-gateway-image.yml.
+// against the platforms publish-gateway-image.yml passes to core's publish action.
 var Platforms = []string{"linux/amd64", "linux/arm64"}
 
 // Role is the gateway's purpose within the service, carried on every subject.

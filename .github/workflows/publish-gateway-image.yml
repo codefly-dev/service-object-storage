@@ -1,10 +1,5 @@
 name: publish-gateway-image
 
-# STOPGAP (owner-approved hack): keep the job in this repo so GHCR grants its
-# GITHUB_TOKEN package write access; a job defined in core was denied. Replace
-# this copy with core's composite action in 0.18.2 once core#770 ships:
-# https://github.com/codefly-dev/core/issues/770
-
 # Builds the gateway image and pushes it by digest, carrying no tag. Nothing
 # resolves it yet: release.yml creates the tags consumers use, from the digest
 # gateway-image.json records.
@@ -14,6 +9,12 @@ name: publish-gateway-image
 # before the build can never carry it. Publishing here, recording the digest in
 # a commit, and tagging afterwards is what lets the released agent name the
 # image that was actually built for its version.
+#
+# The build, the version check, the default-branch refusal and the lock artifact
+# all come from core's publish-service-image action. The job stays here because
+# GHCR authorizes the repository that *defines* the job: a job defined in core
+# was denied write access to this repository's package, which is why core ships
+# a composite action — a step inside this job — rather than a reusable workflow.
 on:
   workflow_dispatch:
     inputs:
@@ -22,105 +23,45 @@ on:
         required: true
         type: string
 
-env:
-  IMAGE: ghcr.io/codefly-dev/service-object-storage
+permissions:
+  contents: read
 
 jobs:
   publish:
+    # The action refuses any other event, and the caller owns the gate: a
+    # composite action cannot declare job policy.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+      lock: ${{ steps.publish.outputs.lock }}
     steps:
+      # No `ref`: the action requires HEAD to be the triggering commit, so a
+      # ref override cannot publish a tree other than the one dispatched.
+      # Full history for the ancestry proof, and no persisted credential — the
+      # action refuses a checkout that left one in the local git config, since
+      # the build context would otherwise carry it into the image.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: require the commit to be on the default branch, or refuse
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          # Private repositories need authentication for these two remote
-          # reads. Command-scoped config disappears with git; neither the token
-          # nor a credential-bearing config file enters the Docker context.
-          git_remote() {
-            local authorization
-            authorization=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${authorization}" "$@"
-          }
-
-          # The authority is the remote's own HEAD, and there is no input that
-          # can name it. A declaration the caller supplies could be omitted,
-          # defaulted or disagreed with, and each of those is a way for the
-          # caller to choose which history counts as reviewed. Whoever may
-          # approve a publication is this repository's decision, so the only
-          # source is the repository.
-          authority=$(git_remote ls-remote --symref origin HEAD \
-            | awk '$1 == "ref:" && $3 == "HEAD" { sub("refs/heads/", "", $2); print $2 }')
-          if [ -z "$authority" ]; then
-            echo "::error::cannot read this repository's default branch from origin; refusing to publish." >&2
-            exit 1
-          fi
-
-          git_remote fetch --quiet --no-tags --force origin \
-            "+refs/heads/${authority}:refs/remotes/origin/${authority}"
-
-          # Fully qualified: a bare `origin/<branch>` is an ambiguous rev that a tag
-          # of the same name can win.
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/${authority}"; then
-            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not reachable from refs/remotes/origin/${authority}; refusing to publish it." >&2
-            echo "Publishing builds this repository's Dockerfile with a registry credential, so the commit has to be one that was merged." >&2
-            exit 1
-          fi
-
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      # Nothing may run between the checkout and this step: the action proves
+      # the build context is the clean, merged, triggering commit, and any step
+      # that writes a file — generated code, a version stamp, a cache — makes
+      # the tree dirty and is refused.
+      #
+      # platforms is passed explicitly although it matches the action's default:
+      # it is this repository's shipped-platform declaration, asserted against
+      # internal/imageevidence.Platforms by TestShippedPlatformsMatchTheReleasePipeline,
+      # so evidence can never cover fewer platforms than the release ships.
+      - uses: codefly-dev/core/.github/actions/publish-service-image@8e6cff6c6a2c2d815c8bee788248aa9b7d1ec908 # v0.18.3
+        id: publish
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Validate the upcoming agent version
-        id: version
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "version must be a stable semantic version without a v prefix" >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      # The version label is how the release tells this image apart from the one
-      # published for an earlier version: both are digests in the same
-      # repository, and a lock left unrefreshed would otherwise publish the
-      # previous release's bytes under the new tag.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        id: build
-        with:
-          context: .
+          version: ${{ inputs.version }}
           platforms: linux/amd64,linux/arm64
-          labels: org.opencontainers.image.version=${{ steps.version.outputs.version }}
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-      - name: Record the digest
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -euo pipefail
-          mkdir -p release-evidence
-          jq -n --arg name "$IMAGE" --arg digest "$DIGEST" '{name: $name, digest: $digest}' > release-evidence/gateway-image.json
-          {
-            # shellcheck disable=SC2016 # Literal Markdown, not command substitution.
-            echo 'Commit this as `gateway-image.json`, then tag the release:'
-            echo
-            echo '```json'
-            cat release-evidence/gateway-image.json
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: gateway-image.json-${{ steps.version.outputs.version }}
-          path: release-evidence/gateway-image.json
-          if-no-files-found: error
+          registry-token: ${{ secrets.GITHUB_TOKEN }}

@@ -334,17 +334,33 @@ the digest and the agent pins it, so the container a release runs — and report
 evidence for — is the one that was built for it rather than whatever the tag
 serves now. The digest only exists once the image is built, so the image is
 published ahead of the release tag by `publish-gateway-image.yml`, with the
-upcoming stable version. This repository owns the publishing job as an
-owner-approved stopgap (hack): GHCR denied the push from core's reusable
-workflow because the job was defined in core. Replace this copy with the
-composite action planned for core 0.18.2 in
-[core#770](https://github.com/codefly-dev/core/issues/770) once it ships.
-The job checks out without persisting credentials and
-refuses a commit not reachable from this repository's default branch. Adopt
-its `gateway-image.json-<version>` artifact in a reviewed PR before the
-coordinator runs `codefly publish`; never hand-tag. `release.yml` creates the
-`:<version>` and `:latest` image tags from that digest and refuses one that was
-not built for the version being released.
+upcoming stable version.
+
+That workflow builds nothing itself. It is a job in this repository holding
+`packages: write`, whose one substantive step is core's
+`.github/actions/publish-service-image`, pinned by commit SHA. The split is
+GHCR's: it authorizes the repository that *defines* the job, so a job defined
+in core could not write this repository's package — which is why core ships a
+composite action to call rather than a reusable workflow to delegate to. The
+build recipe, the version check, the digest and the lock are therefore one
+implementation shared with every codefly service gateway, while the credential
+and the dispatch stay here.
+
+Before it logs in or builds, the action refuses anything but a
+`workflow_dispatch`, a commit not reachable from this repository's own remote
+default branch, a `HEAD` that is not the triggering commit, and a build context
+that is not the clean committed tree — any modified, staged, untracked or
+ignored file. Its checkout is the caller's: the triggering commit with no `ref`
+override, full history, and `persist-credentials: false`, since a persisted
+credential would otherwise reach the Docker build context.
+
+It pushes by digest with no tag, stamps
+`org.opencontainers.image.version` on every platform, and uploads the two-field
+lock as the artifact `gateway-image.json-<version>`. Adopt that artifact as
+`gateway-image.json` in a reviewed PR before the coordinator runs
+`codefly publish`; never hand-tag. `release.yml` creates the `:<version>` and
+`:latest` image tags from that digest and refuses one that was not built for the
+version being released.
 
 Core's `resources.ParseImageLock` reads the gateway lock. It requires exactly
 `ghcr.io/codefly-dev/service-object-storage` and `sha256:` followed by 64

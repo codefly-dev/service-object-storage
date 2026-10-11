@@ -143,5 +143,5 @@ jobs:
     # carries secrets: inherit, so a mutable ref would hand an upstream change
     # this repo's GH_PAT with no commit here — the risk ci.yml pins against,
     # on the one call that actually inherits the token. Bump deliberately.
-    uses: codefly-dev/core/.github/workflows/go-service-release.yml@ea49e7a968ef5f2fd325b1c41f823a47eb20141c # v0.18.1
+    uses: codefly-dev/core/.github/workflows/go-service-release.yml@8e6cff6c6a2c2d815c8bee788248aa9b7d1ec908 # v0.18.3
     secrets: inherit
