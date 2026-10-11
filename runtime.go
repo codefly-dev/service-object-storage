@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"github.com/codefly-dev/core/callertoken"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 
@@ -29,7 +28,6 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
-	"github.com/codefly-dev/service-object-storage/internal/auth"
 )
 
 // gatewayContainerPort is the port the gateway listens on inside its container
@@ -222,7 +220,7 @@ func (s *Runtime) resolveGatewayToken() (string, error) {
 	if s.conf.authToken != "" {
 		return s.conf.authToken, nil
 	}
-	return randomSecret()
+	return callertoken.Generate()
 }
 
 var errMinIOCustody = errors.New("MinIO custody preflight failed")
@@ -253,7 +251,7 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 	}
 	s.minioHostPort = port
 
-	password, err := randomSecret()
+	password, err := callertoken.Generate()
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot generate minio credentials")
 	}
@@ -569,7 +567,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		auth.DialOption(s.gatewayToken))
+		callertoken.DialOption(s.gatewayToken))
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create gateway client for %s", address)
 	}
@@ -662,15 +660,4 @@ func freeHostPort() (uint16, error) {
 	}
 	defer l.Close()
 	return uint16(l.Addr().(*net.TCPAddr).Port), nil
-}
-
-// randomSecret returns an unguessable hex secret. Both the MinIO root password
-// and the gateway bearer are generated this way, so neither published port is
-// reachable with a well-known credential.
-func randomSecret() (string, error) {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }

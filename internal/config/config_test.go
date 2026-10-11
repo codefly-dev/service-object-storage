@@ -25,14 +25,14 @@ func probeEnv(t *testing.T) {
 
 // TestFromEnv_RefusesUnauthenticatedListener is the startup guard: the gateway
 // must not come up serving bucket-wide read/write/delete to whoever can reach
-// its port, and the refusal has to tell an existing user how to move forward.
+// its port, and the refusal has to name the conflicting configuration and its exposure.
 func TestFromEnv_RefusesUnauthenticatedListener(t *testing.T) {
 	t.Setenv("SOS_BUCKET", "documents")
 	t.Setenv("SOS_ENDPOINT", "127.0.0.1:9000")
 
 	_, err := config.FromEnv()
 	require.Error(t, err)
-	for _, want := range []string{"SOS_AUTH_TOKEN", "x-codefly-token", "SOS_ALLOW_ANONYMOUS"} {
+	for _, want := range []string{"SOS_AUTH_TOKEN", "bucket-wide read/write/delete/presign", "SOS_ALLOW_ANONYMOUS"} {
 		require.Contains(t, err.Error(), want)
 	}
 }

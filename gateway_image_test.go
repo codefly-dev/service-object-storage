@@ -3,13 +3,15 @@ package main
 import (
 	"os"
 	"testing"
+
+	"github.com/codefly-dev/core/resources"
 )
 
 func TestParseGatewayImageLock(t *testing.T) {
-	image, err := parseGatewayImageLock([]byte(`{
+	image, err := resources.ParseImageLock([]byte(`{
 		"name": "ghcr.io/codefly-dev/service-object-storage",
 		"digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"
-	}`))
+	}`), "service-object-storage")
 	if err != nil {
 		t.Fatalf("parseGatewayImageLock: %v", err)
 	}
@@ -25,15 +27,20 @@ func TestParseGatewayImageLock(t *testing.T) {
 // rather than carried into a scan.
 func TestParseGatewayImageLockRejectsAnythingButASHA256Digest(t *testing.T) {
 	for name, lock := range map[string]string{
-		"no name":         `{"digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"}`,
-		"no digest":       `{"name": "ghcr.io/codefly-dev/service-object-storage"}`,
-		"tag as digest":   `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "0.0.3"}`,
-		"other algorithm": `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha512:1205da07"}`,
-		"truncated":       `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha256:1205da07"}`,
-		"not hex":         `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha256:zzzzda0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"}`,
+		"wrong image":      `{"name": "ghcr.io/codefly-dev/another-service", "digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"}`,
+		"wrong registry":   `{"name": "example.org/service-object-storage", "digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"}`,
+		"uppercase digest": `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha256:1205DA0743E56B68C12C754438476E8FDD0F05CDB08CE1C9687DDB8D8F0E1669"}`,
+		"extra tag":        `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669", "tag": "latest"}`,
+		"extra document":   `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"} {}`,
+		"no name":          `{"digest": "sha256:1205da0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"}`,
+		"no digest":        `{"name": "ghcr.io/codefly-dev/service-object-storage"}`,
+		"tag as digest":    `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "0.0.3"}`,
+		"other algorithm":  `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha512:1205da07"}`,
+		"truncated":        `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha256:1205da07"}`,
+		"not hex":          `{"name": "ghcr.io/codefly-dev/service-object-storage", "digest": "sha256:zzzzda0743e56b68c12c754438476e8fdd0f05cdb08ce1c9687ddb8d8f0e1669"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseGatewayImageLock([]byte(lock)); err == nil {
+			if _, err := resources.ParseImageLock([]byte(lock), "service-object-storage"); err == nil {
 				t.Error("accepted a lock that pins no image")
 			}
 		})
@@ -48,7 +55,7 @@ func TestGatewayImageMatchesTheLockOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read gateway-image.json: %v", err)
 	}
-	expected, err := parseGatewayImageLock(lock)
+	expected, err := resources.ParseImageLock(lock, "service-object-storage")
 	if err != nil {
 		t.Fatalf("parseGatewayImageLock: %v", err)
 	}

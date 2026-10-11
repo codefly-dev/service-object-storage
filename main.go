@@ -14,7 +14,6 @@ package main
 import (
 	"context"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -52,36 +51,7 @@ var requirements = builders.NewDependencies(agent.Name,
 // release.yml then creates the consumer-resolvable tags from it and refuses a
 // digest that was not built for the version being released.
 // SOS_GATEWAY_IMAGE overrides it (tests use a locally-built image).
-var gatewayImage = shared.Must(parseGatewayImageLock(gatewayImageLockJSON))
-
-// gatewayImageLock is the recorded identity of the published gateway image. It
-// carries no tag: the tag is the agent version, and a second copy of it is one
-// more thing to disagree with agent.codefly.yaml.
-type gatewayImageLock struct {
-	Name   string `json:"name"`
-	Digest string `json:"digest"`
-}
-
-func parseGatewayImageLock(content []byte) (*resources.DockerImage, error) {
-	var lock gatewayImageLock
-	if err := json.Unmarshal(content, &lock); err != nil {
-		return nil, fmt.Errorf("parse gateway image lock: %w", err)
-	}
-	if lock.Name == "" {
-		return nil, fmt.Errorf("gateway image name is required")
-	}
-	if !isSHA256Digest(lock.Digest) {
-		return nil, fmt.Errorf("gateway image digest %q must be a sha256 digest", lock.Digest)
-	}
-	return &resources.DockerImage{Name: lock.Name, Digest: lock.Digest}, nil
-}
-
-// isSHA256Digest reports whether digest is a complete sha256 image digest.
-func isSHA256Digest(digest string) bool {
-	algorithm, encoded, found := strings.Cut(digest, ":")
-	decoded, err := hex.DecodeString(encoded)
-	return found && algorithm == "sha256" && err == nil && len(decoded) == 32
-}
+var gatewayImage = shared.Must(resources.ParseImageLock(gatewayImageLockJSON, "service-object-storage"))
 
 // gatewayImageOverrideEnv names a locally built gateway image to run instead of
 // the published one.
@@ -132,7 +102,7 @@ func parseMinioImageLock(content []byte) (*resources.DockerImage, error) {
 	if lock.Name == "" {
 		return nil, fmt.Errorf("minio image name is required")
 	}
-	if !isSHA256Digest(lock.Digest) {
+	if !resources.IsSHA256Digest(lock.Digest) {
 		return nil, fmt.Errorf("minio image digest %q must be a sha256 digest", lock.Digest)
 	}
 	if !strings.HasPrefix(lock.Release, "RELEASE.") {

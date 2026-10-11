@@ -50,8 +50,12 @@ func TestImageSBOMInventoriesTheGatewayImage(t *testing.T) {
 	if got := subjects[0].GetReference(); got != os.Getenv(gatewayImageOverrideEnv) {
 		t.Errorf("subject reference = %q, want the override", got)
 	}
-	if got := subjects[0].GetPlatform(); got != "" {
-		t.Errorf("subject platform = %q, want it read from the image rather than assumed", got)
+	platform, err := exec.Command("docker", "image", "inspect", os.Getenv(gatewayImageOverrideEnv), "--format", "{{.Os}}/{{.Architecture}}").Output()
+	if err != nil {
+		t.Fatalf("inspect daemon platform: %v", err)
+	}
+	if got, want := subjects[0].GetPlatform(), strings.TrimSpace(string(platform)); got != want {
+		t.Errorf("subject platform = %q, want the daemon's %q", got, want)
 	}
 	if err := sbom.RequirePinned(subjects[0]); err != nil {
 		t.Errorf("override subject is not pinned: %v", err)
