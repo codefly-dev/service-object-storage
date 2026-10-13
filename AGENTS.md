@@ -101,8 +101,9 @@ exit 1. The `e2e` tag is mixed — without `SOS_GATEWAY_IMAGE` the custody tests
 fail loudly while the Runtime and SBOM tests skip.
 
 `.github/workflows/agent-ci.yml`, the full agent conformance gate, runs only on
-`workflow_dispatch`; the file records why and what must land upstream first. It
-is not a PR gate, so its silence on a PR is not a pass.
+`workflow_dispatch`. The upstream fix it waited on has landed and it passes, but
+making it a PR gate is a separate decision. Until then its silence on a PR is
+not a pass.
 
 ## Releases
 
@@ -160,10 +161,11 @@ and reports `no workspace found` at this repository root.
 
 1. **Never hack. Give the best fix, even when it spans repos.** A fix that
    belongs in `codefly-dev/cli` or `codefly-dev/core` is not a reason to work
-   around it here. `agent-ci.yml` is the worked example: the CLI's pinned
-   source-packager predates this repo's Go 1.27 toolchain, so the workflow is
-   parked on `workflow_dispatch` naming the upstream issue and the order to
-   land it — rather than downgrading the toolchain to make a gate go green.
+   around it here. `agent-ci.yml` is the worked example: when the CLI's pinned
+   source-packager predated this repo's Go 1.27 toolchain, the workflow was
+   parked on `workflow_dispatch` naming the upstream issue (codefly-dev/cli#499)
+   and the order to land it — rather than downgrading the toolchain to make a
+   gate go green.
 2. **A gap in the tooling is a bug in the tooling.** When the capability you
    need does not exist, file it where it belongs and say so. Do not hand-build
    what the missing tool was supposed to produce.
