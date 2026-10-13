@@ -14,7 +14,7 @@ jobs:
     # Pinned to an immutable core commit SHA, not @main: a mutable ref lets an
     # upstream change alter this repo's gate — which runs with this repo's token
     # — with no commit here. Bump deliberately alongside the go.mod core version.
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@8e6cff6c6a2c2d815c8bee788248aa9b7d1ec908 # v0.18.3
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@5b9dbf5d7f03dd048d7b741dc8b79ab2bc407ab3 # v0.19.4
 
   # The shared go-service-ci runs `go test` without the race detector; this
   # repo's events hub, Watch streams and readiness monitor are concurrent, so
