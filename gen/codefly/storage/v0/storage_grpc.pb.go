@@ -29,6 +29,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	ObjectStorage_Stat_FullMethodName         = "/codefly.storage.v0.ObjectStorage/Stat"
 	ObjectStorage_Get_FullMethodName          = "/codefly.storage.v0.ObjectStorage/Get"
+	ObjectStorage_GetMany_FullMethodName      = "/codefly.storage.v0.ObjectStorage/GetMany"
 	ObjectStorage_Put_FullMethodName          = "/codefly.storage.v0.ObjectStorage/Put"
 	ObjectStorage_Delete_FullMethodName       = "/codefly.storage.v0.ObjectStorage/Delete"
 	ObjectStorage_DeleteMany_FullMethodName   = "/codefly.storage.v0.ObjectStorage/DeleteMany"
@@ -52,6 +53,8 @@ const (
 type ObjectStorageClient interface {
 	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*GetHeader, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetResponse], error)
+	// GetMany streams several objects in one call — see GetManyRequest.
+	GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetManyResponse], error)
 	Put(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[PutRequest, PutResult], error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResult, error)
 	DeleteMany(ctx context.Context, in *DeleteManyRequest, opts ...grpc.CallOption) (*DeleteManyResult, error)
@@ -112,9 +115,28 @@ func (c *objectStorageClient) Get(ctx context.Context, in *GetRequest, opts ...g
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ObjectStorage_GetClient = grpc.ServerStreamingClient[GetResponse]
 
+func (c *objectStorageClient) GetMany(ctx context.Context, in *GetManyRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetManyResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ObjectStorage_ServiceDesc.Streams[1], ObjectStorage_GetMany_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[GetManyRequest, GetManyResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ObjectStorage_GetManyClient = grpc.ServerStreamingClient[GetManyResponse]
+
 func (c *objectStorageClient) Put(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[PutRequest, PutResult], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &ObjectStorage_ServiceDesc.Streams[1], ObjectStorage_Put_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &ObjectStorage_ServiceDesc.Streams[2], ObjectStorage_Put_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +199,7 @@ func (c *objectStorageClient) Presign(ctx context.Context, in *PresignRequest, o
 
 func (c *objectStorageClient) Watch(ctx context.Context, in *WatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WriteEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &ObjectStorage_ServiceDesc.Streams[2], ObjectStorage_Watch_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &ObjectStorage_ServiceDesc.Streams[3], ObjectStorage_Watch_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +257,8 @@ func (c *objectStorageClient) Native(ctx context.Context, in *NativeRequest, opt
 type ObjectStorageServer interface {
 	Stat(context.Context, *StatRequest) (*GetHeader, error)
 	Get(*GetRequest, grpc.ServerStreamingServer[GetResponse]) error
+	// GetMany streams several objects in one call — see GetManyRequest.
+	GetMany(*GetManyRequest, grpc.ServerStreamingServer[GetManyResponse]) error
 	Put(grpc.ClientStreamingServer[PutRequest, PutResult]) error
 	Delete(context.Context, *DeleteRequest) (*DeleteResult, error)
 	DeleteMany(context.Context, *DeleteManyRequest) (*DeleteManyResult, error)
@@ -271,6 +295,9 @@ func (UnimplementedObjectStorageServer) Stat(context.Context, *StatRequest) (*Ge
 }
 func (UnimplementedObjectStorageServer) Get(*GetRequest, grpc.ServerStreamingServer[GetResponse]) error {
 	return status.Error(codes.Unimplemented, "method Get not implemented")
+}
+func (UnimplementedObjectStorageServer) GetMany(*GetManyRequest, grpc.ServerStreamingServer[GetManyResponse]) error {
+	return status.Error(codes.Unimplemented, "method GetMany not implemented")
 }
 func (UnimplementedObjectStorageServer) Put(grpc.ClientStreamingServer[PutRequest, PutResult]) error {
 	return status.Error(codes.Unimplemented, "method Put not implemented")
@@ -351,6 +378,17 @@ func _ObjectStorage_Get_Handler(srv interface{}, stream grpc.ServerStream) error
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ObjectStorage_GetServer = grpc.ServerStreamingServer[GetResponse]
+
+func _ObjectStorage_GetMany_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(GetManyRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ObjectStorageServer).GetMany(m, &grpc.GenericServerStream[GetManyRequest, GetManyResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ObjectStorage_GetManyServer = grpc.ServerStreamingServer[GetManyResponse]
 
 func _ObjectStorage_Put_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(ObjectStorageServer).Put(&grpc.GenericServerStream[PutRequest, PutResult]{ServerStream: stream})
@@ -562,6 +600,11 @@ var ObjectStorage_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Get",
 			Handler:       _ObjectStorage_Get_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "GetMany",
+			Handler:       _ObjectStorage_GetMany_Handler,
 			ServerStreams: true,
 		},
 		{

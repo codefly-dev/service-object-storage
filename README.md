@@ -29,6 +29,7 @@ The honest intersection across all four backends (the surface OpenDAL /
 |-----|---------|
 | `Stat` | object metadata (HEAD), conditional |
 | `Get` | streaming read; range + conditional |
+| `GetMany` | several objects in one streamed call, in request order, each at its listed ETag |
 | `Put` | streaming write; multipart hidden in the backend; conditional (create-if-absent / CAS) |
 | `Delete` / `DeleteMany` | delete; batch with per-key results |
 | `List` | prefix + delimiter + opaque page token |
@@ -42,13 +43,13 @@ The honest intersection across all four backends (the surface OpenDAL /
 Errors are normalized to gRPC status codes (`NotFound`, `AlreadyExists`,
 `FailedPrecondition`, `Unimplemented`, …) so clients never parse an S3 XML code.
 
-`Stat`, `Get`, `List` and `Capabilities` can also read a bucket the caller
+`Stat`, `Get`, `GetMany`, `List` and `Capabilities` can also read a bucket the caller
 names, with the caller's credential — see
 [bound calls](#reading-a-callers-own-bucket-bound-calls).
 
 ## Reading a caller's own bucket (bound calls)
 
-`Stat`, `Get`, `List` and `Capabilities` take an optional `Binding`: kind
+`Stat`, `Get`, `GetMany`, `List` and `Capabilities` take an optional `Binding`: kind
 (`s3`, `minio`, `gcs`, `azure`), endpoint, region, bucket, prefix, and the
 credential for that one call. A request that carries a binding runs against the
 bucket it names and never touches the configured one; a request without one is
@@ -99,6 +100,18 @@ ListRequest { prefix: "", limit: 0,
   write or presign.
 - Keys are relative to the binding's `prefix`, exactly as `SOS_PREFIX` works
   for the configured bucket.
+- **Batched reads.** `GetMany` takes up to `max_get_many_items` (1,000) keys,
+  each with the ETag the caller listed as `if_match`, and streams them in
+  request order in one call. Each item gets a header with its `index` and an
+  outcome, followed by data chunks totalling exactly `info.size` when the
+  outcome is `OK`.
+  - `CHANGED` means the ETag no longer matches, `NOT_FOUND` means the key is
+    gone, and `TOO_LARGE` means the object is over the bound cap. None of
+    these is followed by data.
+  - Any failure that isn't about one item (refused credential, unreachable
+    store, guard refusal) ends the stream with its status.
+  - A bound batch opens one guarded client for all its items. It also works
+    without a binding, against the configured bucket.
 
 ### The guard's one exception: composed dependencies
 

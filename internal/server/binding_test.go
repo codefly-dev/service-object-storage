@@ -68,6 +68,7 @@ func TestCapabilitiesReportsTheBoundKindAndCaps(t *testing.T) {
 	require.False(t, bound.GetConditionalPut(), "a bound call cannot write")
 	require.EqualValues(t, 5<<20, bound.GetMaxObjectBytes())
 	require.EqualValues(t, 1000, bound.GetMaxListLimit())
+	require.EqualValues(t, 1000, bound.GetMaxGetManyItems())
 
 	own, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
 	require.NoError(t, err)

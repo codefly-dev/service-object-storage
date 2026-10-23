@@ -95,6 +95,65 @@ func (CacheStatus) EnumDescriptor() ([]byte, []int) {
 	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{0}
 }
 
+// GetManyOutcome is what happened to one item. Only OK is followed by data.
+type GetManyOutcome int32
+
+const (
+	GetManyOutcome_GET_MANY_OUTCOME_UNSPECIFIED GetManyOutcome = 0
+	GetManyOutcome_GET_MANY_OUTCOME_OK          GetManyOutcome = 1
+	// CHANGED: the object no longer has the if_match ETag.
+	GetManyOutcome_GET_MANY_OUTCOME_CHANGED GetManyOutcome = 2
+	// NOT_FOUND: the key does not exist (deleted since it was listed).
+	GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND GetManyOutcome = 3
+	// TOO_LARGE: a bound read of an object over max_object_bytes.
+	GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE GetManyOutcome = 4
+)
+
+// Enum value maps for GetManyOutcome.
+var (
+	GetManyOutcome_name = map[int32]string{
+		0: "GET_MANY_OUTCOME_UNSPECIFIED",
+		1: "GET_MANY_OUTCOME_OK",
+		2: "GET_MANY_OUTCOME_CHANGED",
+		3: "GET_MANY_OUTCOME_NOT_FOUND",
+		4: "GET_MANY_OUTCOME_TOO_LARGE",
+	}
+	GetManyOutcome_value = map[string]int32{
+		"GET_MANY_OUTCOME_UNSPECIFIED": 0,
+		"GET_MANY_OUTCOME_OK":          1,
+		"GET_MANY_OUTCOME_CHANGED":     2,
+		"GET_MANY_OUTCOME_NOT_FOUND":   3,
+		"GET_MANY_OUTCOME_TOO_LARGE":   4,
+	}
+)
+
+func (x GetManyOutcome) Enum() *GetManyOutcome {
+	p := new(GetManyOutcome)
+	*p = x
+	return p
+}
+
+func (x GetManyOutcome) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (GetManyOutcome) Descriptor() protoreflect.EnumDescriptor {
+	return file_codefly_storage_v0_storage_proto_enumTypes[1].Descriptor()
+}
+
+func (GetManyOutcome) Type() protoreflect.EnumType {
+	return &file_codefly_storage_v0_storage_proto_enumTypes[1]
+}
+
+func (x GetManyOutcome) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use GetManyOutcome.Descriptor instead.
+func (GetManyOutcome) EnumDescriptor() ([]byte, []int) {
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{1}
+}
+
 type PresignMethod int32
 
 const (
@@ -128,11 +187,11 @@ func (x PresignMethod) String() string {
 }
 
 func (PresignMethod) Descriptor() protoreflect.EnumDescriptor {
-	return file_codefly_storage_v0_storage_proto_enumTypes[1].Descriptor()
+	return file_codefly_storage_v0_storage_proto_enumTypes[2].Descriptor()
 }
 
 func (PresignMethod) Type() protoreflect.EnumType {
-	return &file_codefly_storage_v0_storage_proto_enumTypes[1]
+	return &file_codefly_storage_v0_storage_proto_enumTypes[2]
 }
 
 func (x PresignMethod) Number() protoreflect.EnumNumber {
@@ -141,7 +200,7 @@ func (x PresignMethod) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use PresignMethod.Descriptor instead.
 func (PresignMethod) EnumDescriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{1}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{2}
 }
 
 // WriteOp is the mutating operation a WriteEvent reports.
@@ -178,11 +237,11 @@ func (x WriteOp) String() string {
 }
 
 func (WriteOp) Descriptor() protoreflect.EnumDescriptor {
-	return file_codefly_storage_v0_storage_proto_enumTypes[2].Descriptor()
+	return file_codefly_storage_v0_storage_proto_enumTypes[3].Descriptor()
 }
 
 func (WriteOp) Type() protoreflect.EnumType {
-	return &file_codefly_storage_v0_storage_proto_enumTypes[2]
+	return &file_codefly_storage_v0_storage_proto_enumTypes[3]
 }
 
 func (x WriteOp) Number() protoreflect.EnumNumber {
@@ -191,7 +250,7 @@ func (x WriteOp) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WriteOp.Descriptor instead.
 func (WriteOp) EnumDescriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{2}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{3}
 }
 
 // ObjectInfo is the object's metadata, including the validators a consumer
@@ -389,8 +448,8 @@ func (x *ByteRange) GetLength() int64 {
 // Binding names a bucket the gateway is NOT configured for: a store the caller
 // reaches with its own credential, for this one call. A request that carries a
 // binding runs against it and never touches the gateway's configured bucket;
-// a request without one is unchanged. Only Stat, Get, List and Capabilities
-// take a binding — the reads a datasource pull needs.
+// a request without one is unchanged. Only Stat, Get, GetMany, List and
+// Capabilities take a binding — the reads a datasource pull needs.
 //
 // The binding is an argument, not a configuration: the gateway opens a client
 // for the call, drops it when the call returns, and never stores, logs or
@@ -956,6 +1015,267 @@ func (x *GetHeader) GetCacheStatus() CacheStatus {
 	return CacheStatus_CACHE_STATUS_UNSPECIFIED
 }
 
+// GetManyRequest reads several objects in one call: in request order, each
+// only at the ETag the caller listed. It exists so a caller that syncs a
+// listing (a datasource pull) pays one call per batch rather than one per
+// object. At most BackendCapabilities.max_get_many_items items per call.
+type GetManyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Items []*GetManyItem         `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	// binding, when set, reads a bucket named by the caller — see Binding. The
+	// bound caps apply to every item.
+	Binding       *Binding `protobuf:"bytes,2,opt,name=binding,proto3" json:"binding,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetManyRequest) Reset() {
+	*x = GetManyRequest{}
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetManyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetManyRequest) ProtoMessage() {}
+
+func (x *GetManyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetManyRequest.ProtoReflect.Descriptor instead.
+func (*GetManyRequest) Descriptor() ([]byte, []int) {
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *GetManyRequest) GetItems() []*GetManyItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *GetManyRequest) GetBinding() *Binding {
+	if x != nil {
+		return x.Binding
+	}
+	return nil
+}
+
+type GetManyItem struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Key   string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	// if_match is the ETag the caller listed; the object is read only if it
+	// still has it. Empty reads whatever version is current.
+	IfMatch       string `protobuf:"bytes,2,opt,name=if_match,json=ifMatch,proto3" json:"if_match,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetManyItem) Reset() {
+	*x = GetManyItem{}
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetManyItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetManyItem) ProtoMessage() {}
+
+func (x *GetManyItem) ProtoReflect() protoreflect.Message {
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetManyItem.ProtoReflect.Descriptor instead.
+func (*GetManyItem) Descriptor() ([]byte, []int) {
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *GetManyItem) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *GetManyItem) GetIfMatch() string {
+	if x != nil {
+		return x.IfMatch
+	}
+	return ""
+}
+
+// GetManyResponse streams, per item in request order: one header, then — when
+// the outcome is OK — data chunks whose total is exactly header.info.size. A
+// header for the next item starts the next object. An error that is not about
+// one item (credentials refused, store unreachable, guard refusal) ends the
+// stream with its status instead.
+type GetManyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*GetManyResponse_Header
+	//	*GetManyResponse_Data
+	Kind          isGetManyResponse_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetManyResponse) Reset() {
+	*x = GetManyResponse{}
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetManyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetManyResponse) ProtoMessage() {}
+
+func (x *GetManyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetManyResponse.ProtoReflect.Descriptor instead.
+func (*GetManyResponse) Descriptor() ([]byte, []int) {
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *GetManyResponse) GetKind() isGetManyResponse_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *GetManyResponse) GetHeader() *GetManyHeader {
+	if x != nil {
+		if x, ok := x.Kind.(*GetManyResponse_Header); ok {
+			return x.Header
+		}
+	}
+	return nil
+}
+
+func (x *GetManyResponse) GetData() []byte {
+	if x != nil {
+		if x, ok := x.Kind.(*GetManyResponse_Data); ok {
+			return x.Data
+		}
+	}
+	return nil
+}
+
+type isGetManyResponse_Kind interface {
+	isGetManyResponse_Kind()
+}
+
+type GetManyResponse_Header struct {
+	Header *GetManyHeader `protobuf:"bytes,1,opt,name=header,proto3,oneof"`
+}
+
+type GetManyResponse_Data struct {
+	Data []byte `protobuf:"bytes,2,opt,name=data,proto3,oneof"`
+}
+
+func (*GetManyResponse_Header) isGetManyResponse_Kind() {}
+
+func (*GetManyResponse_Data) isGetManyResponse_Kind() {}
+
+type GetManyHeader struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// index is the item's position in GetManyRequest.items.
+	Index   int32          `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Outcome GetManyOutcome `protobuf:"varint,2,opt,name=outcome,proto3,enum=codefly.storage.v0.GetManyOutcome" json:"outcome,omitempty"`
+	// info is set when outcome is OK.
+	Info          *ObjectInfo `protobuf:"bytes,3,opt,name=info,proto3" json:"info,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetManyHeader) Reset() {
+	*x = GetManyHeader{}
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetManyHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetManyHeader) ProtoMessage() {}
+
+func (x *GetManyHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetManyHeader.ProtoReflect.Descriptor instead.
+func (*GetManyHeader) Descriptor() ([]byte, []int) {
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GetManyHeader) GetIndex() int32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *GetManyHeader) GetOutcome() GetManyOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return GetManyOutcome_GET_MANY_OUTCOME_UNSPECIFIED
+}
+
+func (x *GetManyHeader) GetInfo() *ObjectInfo {
+	if x != nil {
+		return x.Info
+	}
+	return nil
+}
+
 // PutRequest streams: the first message MUST be the header, every following
 // message a data chunk. The server transparently uses multipart when needed;
 // the client never sees parts.
@@ -972,7 +1292,7 @@ type PutRequest struct {
 
 func (x *PutRequest) Reset() {
 	*x = PutRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[9]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -984,7 +1304,7 @@ func (x *PutRequest) String() string {
 func (*PutRequest) ProtoMessage() {}
 
 func (x *PutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[9]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -997,7 +1317,7 @@ func (x *PutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutRequest.ProtoReflect.Descriptor instead.
 func (*PutRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{9}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PutRequest) GetKind() isPutRequest_Kind {
@@ -1060,7 +1380,7 @@ type PutHeader struct {
 
 func (x *PutHeader) Reset() {
 	*x = PutHeader{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[10]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1072,7 +1392,7 @@ func (x *PutHeader) String() string {
 func (*PutHeader) ProtoMessage() {}
 
 func (x *PutHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[10]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1085,7 +1405,7 @@ func (x *PutHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutHeader.ProtoReflect.Descriptor instead.
 func (*PutHeader) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{10}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PutHeader) GetKey() string {
@@ -1155,7 +1475,7 @@ type PutResult struct {
 
 func (x *PutResult) Reset() {
 	*x = PutResult{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[11]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1167,7 +1487,7 @@ func (x *PutResult) String() string {
 func (*PutResult) ProtoMessage() {}
 
 func (x *PutResult) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[11]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1180,7 +1500,7 @@ func (x *PutResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutResult.ProtoReflect.Descriptor instead.
 func (*PutResult) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{11}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PutResult) GetEtag() string {
@@ -1215,7 +1535,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[12]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1227,7 +1547,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[12]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1240,7 +1560,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{12}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DeleteRequest) GetKey() string {
@@ -1272,7 +1592,7 @@ type DeleteResult struct {
 
 func (x *DeleteResult) Reset() {
 	*x = DeleteResult{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[13]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1284,7 +1604,7 @@ func (x *DeleteResult) String() string {
 func (*DeleteResult) ProtoMessage() {}
 
 func (x *DeleteResult) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[13]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1297,7 +1617,7 @@ func (x *DeleteResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteResult.ProtoReflect.Descriptor instead.
 func (*DeleteResult) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{13}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{17}
 }
 
 type DeleteManyRequest struct {
@@ -1309,7 +1629,7 @@ type DeleteManyRequest struct {
 
 func (x *DeleteManyRequest) Reset() {
 	*x = DeleteManyRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[14]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1321,7 +1641,7 @@ func (x *DeleteManyRequest) String() string {
 func (*DeleteManyRequest) ProtoMessage() {}
 
 func (x *DeleteManyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[14]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1334,7 +1654,7 @@ func (x *DeleteManyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteManyRequest.ProtoReflect.Descriptor instead.
 func (*DeleteManyRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{14}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *DeleteManyRequest) GetKeys() []string {
@@ -1355,7 +1675,7 @@ type DeleteManyResult struct {
 
 func (x *DeleteManyResult) Reset() {
 	*x = DeleteManyResult{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[15]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1367,7 +1687,7 @@ func (x *DeleteManyResult) String() string {
 func (*DeleteManyResult) ProtoMessage() {}
 
 func (x *DeleteManyResult) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[15]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1380,7 +1700,7 @@ func (x *DeleteManyResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteManyResult.ProtoReflect.Descriptor instead.
 func (*DeleteManyResult) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{15}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DeleteManyResult) GetEntries() []*DeleteEntry {
@@ -1401,7 +1721,7 @@ type DeleteEntry struct {
 
 func (x *DeleteEntry) Reset() {
 	*x = DeleteEntry{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[16]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1413,7 +1733,7 @@ func (x *DeleteEntry) String() string {
 func (*DeleteEntry) ProtoMessage() {}
 
 func (x *DeleteEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[16]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1426,7 +1746,7 @@ func (x *DeleteEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteEntry.ProtoReflect.Descriptor instead.
 func (*DeleteEntry) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{16}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *DeleteEntry) GetKey() string {
@@ -1457,7 +1777,7 @@ type ListRequest struct {
 
 func (x *ListRequest) Reset() {
 	*x = ListRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[17]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1469,7 +1789,7 @@ func (x *ListRequest) String() string {
 func (*ListRequest) ProtoMessage() {}
 
 func (x *ListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[17]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1482,7 +1802,7 @@ func (x *ListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRequest.ProtoReflect.Descriptor instead.
 func (*ListRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{17}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ListRequest) GetPrefix() string {
@@ -1533,7 +1853,7 @@ type ListResult struct {
 
 func (x *ListResult) Reset() {
 	*x = ListResult{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[18]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1545,7 +1865,7 @@ func (x *ListResult) String() string {
 func (*ListResult) ProtoMessage() {}
 
 func (x *ListResult) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[18]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1558,7 +1878,7 @@ func (x *ListResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResult.ProtoReflect.Descriptor instead.
 func (*ListResult) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{18}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ListResult) GetObjects() []*ObjectInfo {
@@ -1594,7 +1914,7 @@ type CopyRequest struct {
 
 func (x *CopyRequest) Reset() {
 	*x = CopyRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[19]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1606,7 +1926,7 @@ func (x *CopyRequest) String() string {
 func (*CopyRequest) ProtoMessage() {}
 
 func (x *CopyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[19]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1619,7 +1939,7 @@ func (x *CopyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyRequest.ProtoReflect.Descriptor instead.
 func (*CopyRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{19}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CopyRequest) GetSourceKey() string {
@@ -1653,7 +1973,7 @@ type CopyResult struct {
 
 func (x *CopyResult) Reset() {
 	*x = CopyResult{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[20]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1665,7 +1985,7 @@ func (x *CopyResult) String() string {
 func (*CopyResult) ProtoMessage() {}
 
 func (x *CopyResult) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[20]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1678,7 +1998,7 @@ func (x *CopyResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CopyResult.ProtoReflect.Descriptor instead.
 func (*CopyResult) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{20}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CopyResult) GetEtag() string {
@@ -1706,7 +2026,7 @@ type PresignRequest struct {
 
 func (x *PresignRequest) Reset() {
 	*x = PresignRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[21]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1718,7 +2038,7 @@ func (x *PresignRequest) String() string {
 func (*PresignRequest) ProtoMessage() {}
 
 func (x *PresignRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[21]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1731,7 +2051,7 @@ func (x *PresignRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresignRequest.ProtoReflect.Descriptor instead.
 func (*PresignRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{21}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *PresignRequest) GetKey() string {
@@ -1769,7 +2089,7 @@ type PresignResult struct {
 
 func (x *PresignResult) Reset() {
 	*x = PresignResult{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[22]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1781,7 +2101,7 @@ func (x *PresignResult) String() string {
 func (*PresignResult) ProtoMessage() {}
 
 func (x *PresignResult) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[22]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1794,7 +2114,7 @@ func (x *PresignResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresignResult.ProtoReflect.Descriptor instead.
 func (*PresignResult) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{22}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *PresignResult) GetMethod() PresignMethod {
@@ -1835,7 +2155,7 @@ type WatchRequest struct {
 
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[23]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1847,7 +2167,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[23]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1860,7 +2180,7 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{23}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *WatchRequest) GetPrefix() string {
@@ -1908,7 +2228,7 @@ type WriteEvent struct {
 
 func (x *WriteEvent) Reset() {
 	*x = WriteEvent{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[24]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1920,7 +2240,7 @@ func (x *WriteEvent) String() string {
 func (*WriteEvent) ProtoMessage() {}
 
 func (x *WriteEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[24]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1933,7 +2253,7 @@ func (x *WriteEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteEvent.ProtoReflect.Descriptor instead.
 func (*WriteEvent) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{24}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *WriteEvent) GetKey() string {
@@ -1976,7 +2296,7 @@ type CapabilitiesRequest struct {
 	// binding, when set, asks what a bound call honors — see Binding. Only the
 	// read surface is reported for it: backend, versions and the two caps; every
 	// write, presign and native field is unset, because a bound call can reach
-	// only Stat, Get and List.
+	// only Stat, Get, GetMany and List.
 	Binding       *Binding `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1984,7 +2304,7 @@ type CapabilitiesRequest struct {
 
 func (x *CapabilitiesRequest) Reset() {
 	*x = CapabilitiesRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[25]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1996,7 +2316,7 @@ func (x *CapabilitiesRequest) String() string {
 func (*CapabilitiesRequest) ProtoMessage() {}
 
 func (x *CapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[25]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2009,7 +2329,7 @@ func (x *CapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*CapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{25}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *CapabilitiesRequest) GetBinding() *Binding {
@@ -2041,14 +2361,17 @@ type BackendCapabilities struct {
 	// max_list_limit is the most objects one bound List page returns; a larger
 	// or zero ListRequest.limit is clamped to it. Page with next_page_token for
 	// more. 0 means the gateway sets no cap.
-	MaxListLimit  int32 `protobuf:"varint,13,opt,name=max_list_limit,json=maxListLimit,proto3" json:"max_list_limit,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MaxListLimit int32 `protobuf:"varint,13,opt,name=max_list_limit,json=maxListLimit,proto3" json:"max_list_limit,omitempty"`
+	// max_get_many_items is the most items one GetManyRequest may carry; more is
+	// INVALID_ARGUMENT. It applies with or without a binding.
+	MaxGetManyItems int32 `protobuf:"varint,14,opt,name=max_get_many_items,json=maxGetManyItems,proto3" json:"max_get_many_items,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *BackendCapabilities) Reset() {
 	*x = BackendCapabilities{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[26]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2060,7 +2383,7 @@ func (x *BackendCapabilities) String() string {
 func (*BackendCapabilities) ProtoMessage() {}
 
 func (x *BackendCapabilities) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[26]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2073,7 +2396,7 @@ func (x *BackendCapabilities) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendCapabilities.ProtoReflect.Descriptor instead.
 func (*BackendCapabilities) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{26}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *BackendCapabilities) GetBackend() string {
@@ -2167,6 +2490,13 @@ func (x *BackendCapabilities) GetMaxListLimit() int32 {
 	return 0
 }
 
+func (x *BackendCapabilities) GetMaxGetManyItems() int32 {
+	if x != nil {
+		return x.MaxGetManyItems
+	}
+	return 0
+}
+
 type ReadyRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -2175,7 +2505,7 @@ type ReadyRequest struct {
 
 func (x *ReadyRequest) Reset() {
 	*x = ReadyRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[27]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2187,7 +2517,7 @@ func (x *ReadyRequest) String() string {
 func (*ReadyRequest) ProtoMessage() {}
 
 func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[27]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2200,7 +2530,7 @@ func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadyRequest.ProtoReflect.Descriptor instead.
 func (*ReadyRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{27}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{31}
 }
 
 // Readiness is the gateway's live view of ACCESS to the configured
@@ -2234,7 +2564,7 @@ type Readiness struct {
 
 func (x *Readiness) Reset() {
 	*x = Readiness{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[28]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2246,7 +2576,7 @@ func (x *Readiness) String() string {
 func (*Readiness) ProtoMessage() {}
 
 func (x *Readiness) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[28]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2259,7 +2589,7 @@ func (x *Readiness) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Readiness.ProtoReflect.Descriptor instead.
 func (*Readiness) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{28}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Readiness) GetReady() bool {
@@ -2307,7 +2637,7 @@ type NativeRequest struct {
 
 func (x *NativeRequest) Reset() {
 	*x = NativeRequest{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[29]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2319,7 +2649,7 @@ func (x *NativeRequest) String() string {
 func (*NativeRequest) ProtoMessage() {}
 
 func (x *NativeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[29]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2332,7 +2662,7 @@ func (x *NativeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NativeRequest.ProtoReflect.Descriptor instead.
 func (*NativeRequest) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{29}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *NativeRequest) GetVerb() string {
@@ -2360,7 +2690,7 @@ type NativeResult struct {
 
 func (x *NativeResult) Reset() {
 	*x = NativeResult{}
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[30]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2372,7 +2702,7 @@ func (x *NativeResult) String() string {
 func (*NativeResult) ProtoMessage() {}
 
 func (x *NativeResult) ProtoReflect() protoreflect.Message {
-	mi := &file_codefly_storage_v0_storage_proto_msgTypes[30]
+	mi := &file_codefly_storage_v0_storage_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2385,7 +2715,7 @@ func (x *NativeResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NativeResult.ProtoReflect.Descriptor instead.
 func (*NativeResult) Descriptor() ([]byte, []int) {
-	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{30}
+	return file_codefly_storage_v0_storage_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *NativeResult) GetValues() map[string]string {
@@ -2466,7 +2796,21 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\tGetHeader\x122\n" +
 	"\x04info\x18\x01 \x01(\v2\x1e.codefly.storage.v0.ObjectInfoR\x04info\x12!\n" +
 	"\fnot_modified\x18\x02 \x01(\bR\vnotModified\x12F\n" +
-	"\fcache_status\x18\x03 \x01(\x0e2\x1f.codefly.storage.v0.CacheStatusB\x02\x18\x01R\vcacheStatus\"c\n" +
+	"\fcache_status\x18\x03 \x01(\x0e2\x1f.codefly.storage.v0.CacheStatusB\x02\x18\x01R\vcacheStatus\"~\n" +
+	"\x0eGetManyRequest\x125\n" +
+	"\x05items\x18\x01 \x03(\v2\x1f.codefly.storage.v0.GetManyItemR\x05items\x125\n" +
+	"\abinding\x18\x02 \x01(\v2\x1b.codefly.storage.v0.BindingR\abinding\":\n" +
+	"\vGetManyItem\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x19\n" +
+	"\bif_match\x18\x02 \x01(\tR\aifMatch\"l\n" +
+	"\x0fGetManyResponse\x12;\n" +
+	"\x06header\x18\x01 \x01(\v2!.codefly.storage.v0.GetManyHeaderH\x00R\x06header\x12\x14\n" +
+	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x06\n" +
+	"\x04kind\"\x97\x01\n" +
+	"\rGetManyHeader\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x05R\x05index\x12<\n" +
+	"\aoutcome\x18\x02 \x01(\x0e2\".codefly.storage.v0.GetManyOutcomeR\aoutcome\x122\n" +
+	"\x04info\x18\x03 \x01(\v2\x1e.codefly.storage.v0.ObjectInfoR\x04info\"c\n" +
 	"\n" +
 	"PutRequest\x127\n" +
 	"\x06header\x18\x01 \x01(\v2\x1d.codefly.storage.v0.PutHeaderH\x00R\x06header\x12\x14\n" +
@@ -2551,7 +2895,7 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\ftime_unix_ms\x18\x05 \x01(\x03R\n" +
 	"timeUnixMs\"L\n" +
 	"\x13CapabilitiesRequest\x125\n" +
-	"\abinding\x18\x01 \x01(\v2\x1b.codefly.storage.v0.BindingR\abinding\"\x80\x04\n" +
+	"\abinding\x18\x01 \x01(\v2\x1b.codefly.storage.v0.BindingR\abinding\"\xad\x04\n" +
 	"\x13BackendCapabilities\x12\x18\n" +
 	"\abackend\x18\x01 \x01(\tR\abackend\x12'\n" +
 	"\x0fconditional_put\x18\x02 \x01(\bR\x0econditionalPut\x12)\n" +
@@ -2566,7 +2910,8 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	" \x01(\x05R\x0ebatchDeleteMax\x12!\n" +
 	"\fnative_verbs\x18\v \x03(\tR\vnativeVerbs\x12(\n" +
 	"\x10max_object_bytes\x18\f \x01(\x03R\x0emaxObjectBytes\x12$\n" +
-	"\x0emax_list_limit\x18\r \x01(\x05R\fmaxListLimit\"\x0e\n" +
+	"\x0emax_list_limit\x18\r \x01(\x05R\fmaxListLimit\x12+\n" +
+	"\x12max_get_many_items\x18\x0e \x01(\x05R\x0fmaxGetManyItems\"\x0e\n" +
 	"\fReadyRequest\"\x94\x01\n" +
 	"\tReadiness\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x18\n" +
@@ -2592,7 +2937,13 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\x13CACHE_STATUS_HIT_L2\x10\x03\x12\x1c\n" +
 	"\x18CACHE_STATUS_REVALIDATED\x10\x04\x12\x19\n" +
 	"\x15CACHE_STATUS_NEGATIVE\x10\x05\x12\x19\n" +
-	"\x15CACHE_STATUS_NO_STORE\x10\x06\x1a\x02\x18\x01*_\n" +
+	"\x15CACHE_STATUS_NO_STORE\x10\x06\x1a\x02\x18\x01*\xa9\x01\n" +
+	"\x0eGetManyOutcome\x12 \n" +
+	"\x1cGET_MANY_OUTCOME_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13GET_MANY_OUTCOME_OK\x10\x01\x12\x1c\n" +
+	"\x18GET_MANY_OUTCOME_CHANGED\x10\x02\x12\x1e\n" +
+	"\x1aGET_MANY_OUTCOME_NOT_FOUND\x10\x03\x12\x1e\n" +
+	"\x1aGET_MANY_OUTCOME_TOO_LARGE\x10\x04*_\n" +
 	"\rPresignMethod\x12\x1e\n" +
 	"\x1aPRESIGN_METHOD_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12PRESIGN_METHOD_GET\x10\x01\x12\x16\n" +
@@ -2600,10 +2951,11 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\aWriteOp\x12\x18\n" +
 	"\x14WRITE_OP_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fWRITE_OP_PUT\x10\x01\x12\x13\n" +
-	"\x0fWRITE_OP_DELETE\x10\x022\xbf\a\n" +
+	"\x0fWRITE_OP_DELETE\x10\x022\x95\b\n" +
 	"\rObjectStorage\x12F\n" +
 	"\x04Stat\x12\x1f.codefly.storage.v0.StatRequest\x1a\x1d.codefly.storage.v0.GetHeader\x12H\n" +
-	"\x03Get\x12\x1e.codefly.storage.v0.GetRequest\x1a\x1f.codefly.storage.v0.GetResponse0\x01\x12F\n" +
+	"\x03Get\x12\x1e.codefly.storage.v0.GetRequest\x1a\x1f.codefly.storage.v0.GetResponse0\x01\x12T\n" +
+	"\aGetMany\x12\".codefly.storage.v0.GetManyRequest\x1a#.codefly.storage.v0.GetManyResponse0\x01\x12F\n" +
 	"\x03Put\x12\x1e.codefly.storage.v0.PutRequest\x1a\x1d.codefly.storage.v0.PutResult(\x01\x12M\n" +
 	"\x06Delete\x12!.codefly.storage.v0.DeleteRequest\x1a .codefly.storage.v0.DeleteResult\x12Y\n" +
 	"\n" +
@@ -2628,100 +2980,112 @@ func file_codefly_storage_v0_storage_proto_rawDescGZIP() []byte {
 	return file_codefly_storage_v0_storage_proto_rawDescData
 }
 
-var file_codefly_storage_v0_storage_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_codefly_storage_v0_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
+var file_codefly_storage_v0_storage_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_codefly_storage_v0_storage_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_codefly_storage_v0_storage_proto_goTypes = []any{
 	(CacheStatus)(0),            // 0: codefly.storage.v0.CacheStatus
-	(PresignMethod)(0),          // 1: codefly.storage.v0.PresignMethod
-	(WriteOp)(0),                // 2: codefly.storage.v0.WriteOp
-	(*ObjectInfo)(nil),          // 3: codefly.storage.v0.ObjectInfo
-	(*ByteRange)(nil),           // 4: codefly.storage.v0.ByteRange
-	(*Binding)(nil),             // 5: codefly.storage.v0.Binding
-	(*Credential)(nil),          // 6: codefly.storage.v0.Credential
-	(*AccessKey)(nil),           // 7: codefly.storage.v0.AccessKey
-	(*StatRequest)(nil),         // 8: codefly.storage.v0.StatRequest
-	(*GetRequest)(nil),          // 9: codefly.storage.v0.GetRequest
-	(*GetResponse)(nil),         // 10: codefly.storage.v0.GetResponse
-	(*GetHeader)(nil),           // 11: codefly.storage.v0.GetHeader
-	(*PutRequest)(nil),          // 12: codefly.storage.v0.PutRequest
-	(*PutHeader)(nil),           // 13: codefly.storage.v0.PutHeader
-	(*PutResult)(nil),           // 14: codefly.storage.v0.PutResult
-	(*DeleteRequest)(nil),       // 15: codefly.storage.v0.DeleteRequest
-	(*DeleteResult)(nil),        // 16: codefly.storage.v0.DeleteResult
-	(*DeleteManyRequest)(nil),   // 17: codefly.storage.v0.DeleteManyRequest
-	(*DeleteManyResult)(nil),    // 18: codefly.storage.v0.DeleteManyResult
-	(*DeleteEntry)(nil),         // 19: codefly.storage.v0.DeleteEntry
-	(*ListRequest)(nil),         // 20: codefly.storage.v0.ListRequest
-	(*ListResult)(nil),          // 21: codefly.storage.v0.ListResult
-	(*CopyRequest)(nil),         // 22: codefly.storage.v0.CopyRequest
-	(*CopyResult)(nil),          // 23: codefly.storage.v0.CopyResult
-	(*PresignRequest)(nil),      // 24: codefly.storage.v0.PresignRequest
-	(*PresignResult)(nil),       // 25: codefly.storage.v0.PresignResult
-	(*WatchRequest)(nil),        // 26: codefly.storage.v0.WatchRequest
-	(*WriteEvent)(nil),          // 27: codefly.storage.v0.WriteEvent
-	(*CapabilitiesRequest)(nil), // 28: codefly.storage.v0.CapabilitiesRequest
-	(*BackendCapabilities)(nil), // 29: codefly.storage.v0.BackendCapabilities
-	(*ReadyRequest)(nil),        // 30: codefly.storage.v0.ReadyRequest
-	(*Readiness)(nil),           // 31: codefly.storage.v0.Readiness
-	(*NativeRequest)(nil),       // 32: codefly.storage.v0.NativeRequest
-	(*NativeResult)(nil),        // 33: codefly.storage.v0.NativeResult
-	nil,                         // 34: codefly.storage.v0.ObjectInfo.UserMetadataEntry
-	nil,                         // 35: codefly.storage.v0.PutHeader.UserMetadataEntry
-	nil,                         // 36: codefly.storage.v0.PresignResult.HeadersEntry
-	nil,                         // 37: codefly.storage.v0.NativeRequest.ParamsEntry
-	nil,                         // 38: codefly.storage.v0.NativeResult.ValuesEntry
+	(GetManyOutcome)(0),         // 1: codefly.storage.v0.GetManyOutcome
+	(PresignMethod)(0),          // 2: codefly.storage.v0.PresignMethod
+	(WriteOp)(0),                // 3: codefly.storage.v0.WriteOp
+	(*ObjectInfo)(nil),          // 4: codefly.storage.v0.ObjectInfo
+	(*ByteRange)(nil),           // 5: codefly.storage.v0.ByteRange
+	(*Binding)(nil),             // 6: codefly.storage.v0.Binding
+	(*Credential)(nil),          // 7: codefly.storage.v0.Credential
+	(*AccessKey)(nil),           // 8: codefly.storage.v0.AccessKey
+	(*StatRequest)(nil),         // 9: codefly.storage.v0.StatRequest
+	(*GetRequest)(nil),          // 10: codefly.storage.v0.GetRequest
+	(*GetResponse)(nil),         // 11: codefly.storage.v0.GetResponse
+	(*GetHeader)(nil),           // 12: codefly.storage.v0.GetHeader
+	(*GetManyRequest)(nil),      // 13: codefly.storage.v0.GetManyRequest
+	(*GetManyItem)(nil),         // 14: codefly.storage.v0.GetManyItem
+	(*GetManyResponse)(nil),     // 15: codefly.storage.v0.GetManyResponse
+	(*GetManyHeader)(nil),       // 16: codefly.storage.v0.GetManyHeader
+	(*PutRequest)(nil),          // 17: codefly.storage.v0.PutRequest
+	(*PutHeader)(nil),           // 18: codefly.storage.v0.PutHeader
+	(*PutResult)(nil),           // 19: codefly.storage.v0.PutResult
+	(*DeleteRequest)(nil),       // 20: codefly.storage.v0.DeleteRequest
+	(*DeleteResult)(nil),        // 21: codefly.storage.v0.DeleteResult
+	(*DeleteManyRequest)(nil),   // 22: codefly.storage.v0.DeleteManyRequest
+	(*DeleteManyResult)(nil),    // 23: codefly.storage.v0.DeleteManyResult
+	(*DeleteEntry)(nil),         // 24: codefly.storage.v0.DeleteEntry
+	(*ListRequest)(nil),         // 25: codefly.storage.v0.ListRequest
+	(*ListResult)(nil),          // 26: codefly.storage.v0.ListResult
+	(*CopyRequest)(nil),         // 27: codefly.storage.v0.CopyRequest
+	(*CopyResult)(nil),          // 28: codefly.storage.v0.CopyResult
+	(*PresignRequest)(nil),      // 29: codefly.storage.v0.PresignRequest
+	(*PresignResult)(nil),       // 30: codefly.storage.v0.PresignResult
+	(*WatchRequest)(nil),        // 31: codefly.storage.v0.WatchRequest
+	(*WriteEvent)(nil),          // 32: codefly.storage.v0.WriteEvent
+	(*CapabilitiesRequest)(nil), // 33: codefly.storage.v0.CapabilitiesRequest
+	(*BackendCapabilities)(nil), // 34: codefly.storage.v0.BackendCapabilities
+	(*ReadyRequest)(nil),        // 35: codefly.storage.v0.ReadyRequest
+	(*Readiness)(nil),           // 36: codefly.storage.v0.Readiness
+	(*NativeRequest)(nil),       // 37: codefly.storage.v0.NativeRequest
+	(*NativeResult)(nil),        // 38: codefly.storage.v0.NativeResult
+	nil,                         // 39: codefly.storage.v0.ObjectInfo.UserMetadataEntry
+	nil,                         // 40: codefly.storage.v0.PutHeader.UserMetadataEntry
+	nil,                         // 41: codefly.storage.v0.PresignResult.HeadersEntry
+	nil,                         // 42: codefly.storage.v0.NativeRequest.ParamsEntry
+	nil,                         // 43: codefly.storage.v0.NativeResult.ValuesEntry
 }
 var file_codefly_storage_v0_storage_proto_depIdxs = []int32{
-	34, // 0: codefly.storage.v0.ObjectInfo.user_metadata:type_name -> codefly.storage.v0.ObjectInfo.UserMetadataEntry
-	6,  // 1: codefly.storage.v0.Binding.credential:type_name -> codefly.storage.v0.Credential
-	7,  // 2: codefly.storage.v0.Credential.access_key:type_name -> codefly.storage.v0.AccessKey
-	5,  // 3: codefly.storage.v0.StatRequest.binding:type_name -> codefly.storage.v0.Binding
-	4,  // 4: codefly.storage.v0.GetRequest.range:type_name -> codefly.storage.v0.ByteRange
-	5,  // 5: codefly.storage.v0.GetRequest.binding:type_name -> codefly.storage.v0.Binding
-	11, // 6: codefly.storage.v0.GetResponse.header:type_name -> codefly.storage.v0.GetHeader
-	3,  // 7: codefly.storage.v0.GetHeader.info:type_name -> codefly.storage.v0.ObjectInfo
+	39, // 0: codefly.storage.v0.ObjectInfo.user_metadata:type_name -> codefly.storage.v0.ObjectInfo.UserMetadataEntry
+	7,  // 1: codefly.storage.v0.Binding.credential:type_name -> codefly.storage.v0.Credential
+	8,  // 2: codefly.storage.v0.Credential.access_key:type_name -> codefly.storage.v0.AccessKey
+	6,  // 3: codefly.storage.v0.StatRequest.binding:type_name -> codefly.storage.v0.Binding
+	5,  // 4: codefly.storage.v0.GetRequest.range:type_name -> codefly.storage.v0.ByteRange
+	6,  // 5: codefly.storage.v0.GetRequest.binding:type_name -> codefly.storage.v0.Binding
+	12, // 6: codefly.storage.v0.GetResponse.header:type_name -> codefly.storage.v0.GetHeader
+	4,  // 7: codefly.storage.v0.GetHeader.info:type_name -> codefly.storage.v0.ObjectInfo
 	0,  // 8: codefly.storage.v0.GetHeader.cache_status:type_name -> codefly.storage.v0.CacheStatus
-	13, // 9: codefly.storage.v0.PutRequest.header:type_name -> codefly.storage.v0.PutHeader
-	35, // 10: codefly.storage.v0.PutHeader.user_metadata:type_name -> codefly.storage.v0.PutHeader.UserMetadataEntry
-	19, // 11: codefly.storage.v0.DeleteManyResult.entries:type_name -> codefly.storage.v0.DeleteEntry
-	5,  // 12: codefly.storage.v0.ListRequest.binding:type_name -> codefly.storage.v0.Binding
-	3,  // 13: codefly.storage.v0.ListResult.objects:type_name -> codefly.storage.v0.ObjectInfo
-	1,  // 14: codefly.storage.v0.PresignRequest.method:type_name -> codefly.storage.v0.PresignMethod
-	1,  // 15: codefly.storage.v0.PresignResult.method:type_name -> codefly.storage.v0.PresignMethod
-	36, // 16: codefly.storage.v0.PresignResult.headers:type_name -> codefly.storage.v0.PresignResult.HeadersEntry
-	2,  // 17: codefly.storage.v0.WriteEvent.op:type_name -> codefly.storage.v0.WriteOp
-	5,  // 18: codefly.storage.v0.CapabilitiesRequest.binding:type_name -> codefly.storage.v0.Binding
-	37, // 19: codefly.storage.v0.NativeRequest.params:type_name -> codefly.storage.v0.NativeRequest.ParamsEntry
-	38, // 20: codefly.storage.v0.NativeResult.values:type_name -> codefly.storage.v0.NativeResult.ValuesEntry
-	8,  // 21: codefly.storage.v0.ObjectStorage.Stat:input_type -> codefly.storage.v0.StatRequest
-	9,  // 22: codefly.storage.v0.ObjectStorage.Get:input_type -> codefly.storage.v0.GetRequest
-	12, // 23: codefly.storage.v0.ObjectStorage.Put:input_type -> codefly.storage.v0.PutRequest
-	15, // 24: codefly.storage.v0.ObjectStorage.Delete:input_type -> codefly.storage.v0.DeleteRequest
-	17, // 25: codefly.storage.v0.ObjectStorage.DeleteMany:input_type -> codefly.storage.v0.DeleteManyRequest
-	20, // 26: codefly.storage.v0.ObjectStorage.List:input_type -> codefly.storage.v0.ListRequest
-	22, // 27: codefly.storage.v0.ObjectStorage.Copy:input_type -> codefly.storage.v0.CopyRequest
-	24, // 28: codefly.storage.v0.ObjectStorage.Presign:input_type -> codefly.storage.v0.PresignRequest
-	26, // 29: codefly.storage.v0.ObjectStorage.Watch:input_type -> codefly.storage.v0.WatchRequest
-	28, // 30: codefly.storage.v0.ObjectStorage.Capabilities:input_type -> codefly.storage.v0.CapabilitiesRequest
-	30, // 31: codefly.storage.v0.ObjectStorage.Ready:input_type -> codefly.storage.v0.ReadyRequest
-	32, // 32: codefly.storage.v0.ObjectStorage.Native:input_type -> codefly.storage.v0.NativeRequest
-	11, // 33: codefly.storage.v0.ObjectStorage.Stat:output_type -> codefly.storage.v0.GetHeader
-	10, // 34: codefly.storage.v0.ObjectStorage.Get:output_type -> codefly.storage.v0.GetResponse
-	14, // 35: codefly.storage.v0.ObjectStorage.Put:output_type -> codefly.storage.v0.PutResult
-	16, // 36: codefly.storage.v0.ObjectStorage.Delete:output_type -> codefly.storage.v0.DeleteResult
-	18, // 37: codefly.storage.v0.ObjectStorage.DeleteMany:output_type -> codefly.storage.v0.DeleteManyResult
-	21, // 38: codefly.storage.v0.ObjectStorage.List:output_type -> codefly.storage.v0.ListResult
-	23, // 39: codefly.storage.v0.ObjectStorage.Copy:output_type -> codefly.storage.v0.CopyResult
-	25, // 40: codefly.storage.v0.ObjectStorage.Presign:output_type -> codefly.storage.v0.PresignResult
-	27, // 41: codefly.storage.v0.ObjectStorage.Watch:output_type -> codefly.storage.v0.WriteEvent
-	29, // 42: codefly.storage.v0.ObjectStorage.Capabilities:output_type -> codefly.storage.v0.BackendCapabilities
-	31, // 43: codefly.storage.v0.ObjectStorage.Ready:output_type -> codefly.storage.v0.Readiness
-	33, // 44: codefly.storage.v0.ObjectStorage.Native:output_type -> codefly.storage.v0.NativeResult
-	33, // [33:45] is the sub-list for method output_type
-	21, // [21:33] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	14, // 9: codefly.storage.v0.GetManyRequest.items:type_name -> codefly.storage.v0.GetManyItem
+	6,  // 10: codefly.storage.v0.GetManyRequest.binding:type_name -> codefly.storage.v0.Binding
+	16, // 11: codefly.storage.v0.GetManyResponse.header:type_name -> codefly.storage.v0.GetManyHeader
+	1,  // 12: codefly.storage.v0.GetManyHeader.outcome:type_name -> codefly.storage.v0.GetManyOutcome
+	4,  // 13: codefly.storage.v0.GetManyHeader.info:type_name -> codefly.storage.v0.ObjectInfo
+	18, // 14: codefly.storage.v0.PutRequest.header:type_name -> codefly.storage.v0.PutHeader
+	40, // 15: codefly.storage.v0.PutHeader.user_metadata:type_name -> codefly.storage.v0.PutHeader.UserMetadataEntry
+	24, // 16: codefly.storage.v0.DeleteManyResult.entries:type_name -> codefly.storage.v0.DeleteEntry
+	6,  // 17: codefly.storage.v0.ListRequest.binding:type_name -> codefly.storage.v0.Binding
+	4,  // 18: codefly.storage.v0.ListResult.objects:type_name -> codefly.storage.v0.ObjectInfo
+	2,  // 19: codefly.storage.v0.PresignRequest.method:type_name -> codefly.storage.v0.PresignMethod
+	2,  // 20: codefly.storage.v0.PresignResult.method:type_name -> codefly.storage.v0.PresignMethod
+	41, // 21: codefly.storage.v0.PresignResult.headers:type_name -> codefly.storage.v0.PresignResult.HeadersEntry
+	3,  // 22: codefly.storage.v0.WriteEvent.op:type_name -> codefly.storage.v0.WriteOp
+	6,  // 23: codefly.storage.v0.CapabilitiesRequest.binding:type_name -> codefly.storage.v0.Binding
+	42, // 24: codefly.storage.v0.NativeRequest.params:type_name -> codefly.storage.v0.NativeRequest.ParamsEntry
+	43, // 25: codefly.storage.v0.NativeResult.values:type_name -> codefly.storage.v0.NativeResult.ValuesEntry
+	9,  // 26: codefly.storage.v0.ObjectStorage.Stat:input_type -> codefly.storage.v0.StatRequest
+	10, // 27: codefly.storage.v0.ObjectStorage.Get:input_type -> codefly.storage.v0.GetRequest
+	13, // 28: codefly.storage.v0.ObjectStorage.GetMany:input_type -> codefly.storage.v0.GetManyRequest
+	17, // 29: codefly.storage.v0.ObjectStorage.Put:input_type -> codefly.storage.v0.PutRequest
+	20, // 30: codefly.storage.v0.ObjectStorage.Delete:input_type -> codefly.storage.v0.DeleteRequest
+	22, // 31: codefly.storage.v0.ObjectStorage.DeleteMany:input_type -> codefly.storage.v0.DeleteManyRequest
+	25, // 32: codefly.storage.v0.ObjectStorage.List:input_type -> codefly.storage.v0.ListRequest
+	27, // 33: codefly.storage.v0.ObjectStorage.Copy:input_type -> codefly.storage.v0.CopyRequest
+	29, // 34: codefly.storage.v0.ObjectStorage.Presign:input_type -> codefly.storage.v0.PresignRequest
+	31, // 35: codefly.storage.v0.ObjectStorage.Watch:input_type -> codefly.storage.v0.WatchRequest
+	33, // 36: codefly.storage.v0.ObjectStorage.Capabilities:input_type -> codefly.storage.v0.CapabilitiesRequest
+	35, // 37: codefly.storage.v0.ObjectStorage.Ready:input_type -> codefly.storage.v0.ReadyRequest
+	37, // 38: codefly.storage.v0.ObjectStorage.Native:input_type -> codefly.storage.v0.NativeRequest
+	12, // 39: codefly.storage.v0.ObjectStorage.Stat:output_type -> codefly.storage.v0.GetHeader
+	11, // 40: codefly.storage.v0.ObjectStorage.Get:output_type -> codefly.storage.v0.GetResponse
+	15, // 41: codefly.storage.v0.ObjectStorage.GetMany:output_type -> codefly.storage.v0.GetManyResponse
+	19, // 42: codefly.storage.v0.ObjectStorage.Put:output_type -> codefly.storage.v0.PutResult
+	21, // 43: codefly.storage.v0.ObjectStorage.Delete:output_type -> codefly.storage.v0.DeleteResult
+	23, // 44: codefly.storage.v0.ObjectStorage.DeleteMany:output_type -> codefly.storage.v0.DeleteManyResult
+	26, // 45: codefly.storage.v0.ObjectStorage.List:output_type -> codefly.storage.v0.ListResult
+	28, // 46: codefly.storage.v0.ObjectStorage.Copy:output_type -> codefly.storage.v0.CopyResult
+	30, // 47: codefly.storage.v0.ObjectStorage.Presign:output_type -> codefly.storage.v0.PresignResult
+	32, // 48: codefly.storage.v0.ObjectStorage.Watch:output_type -> codefly.storage.v0.WriteEvent
+	34, // 49: codefly.storage.v0.ObjectStorage.Capabilities:output_type -> codefly.storage.v0.BackendCapabilities
+	36, // 50: codefly.storage.v0.ObjectStorage.Ready:output_type -> codefly.storage.v0.Readiness
+	38, // 51: codefly.storage.v0.ObjectStorage.Native:output_type -> codefly.storage.v0.NativeResult
+	39, // [39:52] is the sub-list for method output_type
+	26, // [26:39] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_codefly_storage_v0_storage_proto_init() }
@@ -2737,7 +3101,11 @@ func file_codefly_storage_v0_storage_proto_init() {
 		(*GetResponse_Header)(nil),
 		(*GetResponse_Data)(nil),
 	}
-	file_codefly_storage_v0_storage_proto_msgTypes[9].OneofWrappers = []any{
+	file_codefly_storage_v0_storage_proto_msgTypes[11].OneofWrappers = []any{
+		(*GetManyResponse_Header)(nil),
+		(*GetManyResponse_Data)(nil),
+	}
+	file_codefly_storage_v0_storage_proto_msgTypes[13].OneofWrappers = []any{
 		(*PutRequest_Header)(nil),
 		(*PutRequest_Data)(nil),
 	}
@@ -2746,8 +3114,8 @@ func file_codefly_storage_v0_storage_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_codefly_storage_v0_storage_proto_rawDesc), len(file_codefly_storage_v0_storage_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   36,
+			NumEnums:      4,
+			NumMessages:   40,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -22,6 +22,9 @@ import (
 // chunkSize bounds each streamed data frame on Get.
 const chunkSize = 256 * 1024
 
+// maxGetManyItems bounds one GetMany request, with or without a binding.
+const maxGetManyItems = 1000
+
 // Readiness is the last-probe view Ready reports. The background monitor
 // implements it, so Ready and the orchestrator's health check answer from one
 // probe rather than each running their own.
@@ -106,15 +109,77 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 	}); err != nil {
 		return err
 	}
+	return streamBody(res.Body, func(chunk []byte) error {
+		return stream.Send(&storagev0.GetResponse{Kind: &storagev0.GetResponse_Data{Data: chunk}})
+	})
+}
 
+// GetMany streams several objects in one call, in request order: each item is
+// a Get at its if_match ETag against one backend, so a bound batch shares one
+// guarded client. What happens to one item — changed since it was listed,
+// gone, over the bound cap — is that item's header outcome and the stream
+// moves on; any other failure ends the stream with its status.
+func (s *Server) GetMany(req *storagev0.GetManyRequest, stream storagev0.ObjectStorage_GetManyServer) error {
+	if n := len(req.GetItems()); n > maxGetManyItems {
+		return status.Errorf(codes.InvalidArgument, "get-many: %d items, at most %d per call", n, maxGetManyItems)
+	}
+	be, release, err := s.backendFor(stream.Context(), req.GetBinding())
+	if err != nil {
+		return toStatus(err)
+	}
+	defer release()
+	for i, item := range req.GetItems() {
+		if err := getManyItem(stream, be, int32(i), item, req.GetBinding() != nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getManyItem(stream storagev0.ObjectStorage_GetManyServer, be backend.Backend, index int32, item *storagev0.GetManyItem, bound bool) error {
+	header := &storagev0.GetManyHeader{Index: index}
+	sendHeader := func() error {
+		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Header{Header: header}})
+	}
+	res, err := be.Get(stream.Context(), item.GetKey(), backend.GetOptions{IfMatch: item.GetIfMatch()})
+	if err != nil {
+		switch serr.CodeOf(err) {
+		case serr.PreconditionFailed:
+			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED
+		case serr.NotFound:
+			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND
+		default:
+			return toStatus(boundErr(err))
+		}
+		return sendHeader()
+	}
+	defer res.Body.Close()
+	body := io.Reader(res.Body)
+	if bound {
+		if res.Info.Size > maxBoundObjectBytes {
+			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE
+			return sendHeader()
+		}
+		body = &capReader{ReadCloser: res.Body, left: maxBoundObjectBytes}
+	}
+	header.Outcome, header.Info = storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK, toProtoInfo(&res.Info)
+	if err := sendHeader(); err != nil {
+		return err
+	}
+	return streamBody(body, func(chunk []byte) error {
+		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Data{Data: chunk}})
+	})
+}
+
+// streamBody relays body in chunkSize frames through send until EOF. A bound
+// body that runs past its cap ends the stream with RESOURCE_EXHAUSTED.
+func streamBody(body io.Reader, send func([]byte) error) error {
 	buf := make([]byte, chunkSize)
 	for {
-		n, rerr := res.Body.Read(buf)
+		n, rerr := body.Read(buf)
 		if n > 0 {
-			if sendErr := stream.Send(&storagev0.GetResponse{
-				Kind: &storagev0.GetResponse_Data{Data: buf[:n]},
-			}); sendErr != nil {
-				return sendErr
+			if err := send(buf[:n]); err != nil {
+				return err
 			}
 		}
 		if rerr == io.EOF {
@@ -315,11 +380,14 @@ func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRe
 		return &storagev0.BackendCapabilities{
 			Backend:        caps.Backend,
 			Versions:       caps.Versions,
-			MaxObjectBytes: maxBoundObjectBytes,
-			MaxListLimit:   maxBoundListLimit,
+			MaxObjectBytes:  maxBoundObjectBytes,
+			MaxListLimit:    maxBoundListLimit,
+			MaxGetManyItems: maxGetManyItems,
 		}, nil
 	}
-	return toProtoCapabilities(caps), nil
+	out := toProtoCapabilities(caps)
+	out.MaxGetManyItems = maxGetManyItems
+	return out, nil
 }
 
 // Ready reports the most recent background probe, and deliberately does not
