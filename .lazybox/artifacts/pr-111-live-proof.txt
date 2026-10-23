@@ -1,0 +1,163 @@
+# commit under test: 122071b2bf864852a4ace2e9e4af1facceb0e8c3
+# store gateway image: sha256:d0d50c9f35961e13ffa8ab1a3d5dec0c07b65b606ca2eb25ec029795e4b20b19
+codefly-sos108b-store-gateway 0.0.0.0:56813->9464/tcp
+codefly-sos108b-store-minio 127.0.0.1:65306->9000/tcp
+codefly-sos108b-tenant-gateway 0.0.0.0:49773->9464/tcp
+codefly-sos108b-tenant-minio 0.0.0.0:41040->9000/tcp
+store gateway env: SOS_COMPOSED_ENDPOINTS=host.docker.internal:49773,host.docker.internal:41040
+
+# seed the tenant through its own gateway Put (tenant token, :49773)
+Put docs/a.md (40 B) -> {"etag":"87e41dd94f8391cd64bb588c0145da25"}
+Put docs/b.md (40 B) -> {"etag":"5d158c9bd37ddfc7b3ffc0d18ceb8b42"}
+Put docs/sub/c.md (44 B) -> {"etag":"23e81a38b98b028584965bf4e724793b"}
+Put other.txt (40 B) -> {"etag":"271a5c5c61d09c89c9c4cfc46f8714ae"}
+Put docs/big.bin (6000000 B) -> {"etag":"75c6f06ec40f8063da34fcd7fc2bf17f"}
+
+$ List {B}
+{
+  "objects": [
+    {
+      "key": "a.md",
+      "etag": "87e41dd94f8391cd64bb588c0145da25",
+      "size": "40",
+      "lastModifiedUnixMs": "…"
+    },
+    {
+      "key": "b.md",
+      "etag": "5d158c9bd37ddfc7b3ffc0d18ceb8b42",
+      "size": "40",
+      "lastModifiedUnixMs": "…"
+    },
+    {
+      "key": "big.bin",
+      "etag": "75c6f06ec40f8063da34fcd7fc2bf17f",
+      "size": "6000000",
+      "lastModifiedUnixMs": "…"
+    },
+    {
+      "key": "sub/c.md",
+      "etag": "23e81a38b98b028584965bf4e724793b",
+      "size": "44",
+      "lastModifiedUnixMs": "…"
+    }
+  ]
+}
+
+$ Stat {key:b.md, B}
+{
+  "info": {
+    "key": "b.md",
+    "etag": "5d158c9bd37ddfc7b3ffc0d18ceb8b42",
+    "size": "40",
+    "lastModifiedUnixMs": "…",
+    "contentType": "text/markdown"
+  }
+}
+
+$ Get {key:sub/c.md, B}
+{
+  "header": {
+    "info": {
+      "key": "sub/c.md",
+      "etag": "23e81a38b98b028584965bf4e724793b",
+      "size": "44",
+      "lastModifiedUnixMs": "…",
+      "contentType": "text/markdown"
+    }
+  }
+}
+{
+  "data": "IyBkb2NzL3N1Yi9jLm1kCmlzc3VlLTEwOCB0ZW5hbnQgc3RvcmUgcHJvb2Y="
+}
+
+$ GetMany {[sub/c.md@listed, a.md@stale, gone.md, big.bin, a.md@listed], B}
+{
+  "header": {
+    "outcome": "GET_MANY_OUTCOME_OK",
+    "info": {
+      "key": "sub/c.md",
+      "etag": "23e81a38b98b028584965bf4e724793b",
+      "size": "44",
+      "lastModifiedUnixMs": "…",
+      "contentType": "text/markdown"
+    }
+  }
+}
+{
+  "data": "IyBkb2NzL3N1Yi9jLm1kCmlzc3VlLTEwOCB0ZW5hbnQgc3RvcmUgcHJvb2Y="
+}
+{
+  "header": {
+    "index": 1,
+    "outcome": "GET_MANY_OUTCOME_CHANGED"
+  }
+}
+{
+  "header": {
+    "index": 2,
+    "outcome": "GET_MANY_OUTCOME_NOT_FOUND"
+  }
+}
+{
+  "header": {
+    "index": 3,
+    "outcome": "GET_MANY_OUTCOME_TOO_LARGE"
+  }
+}
+{
+  "header": {
+    "index": 4,
+    "outcome": "GET_MANY_OUTCOME_OK",
+    "info": {
+      "key": "a.md",
+      "etag": "87e41dd94f8391cd64bb588c0145da25",
+      "size": "40",
+      "lastModifiedUnixMs": "…",
+      "contentType": "text/markdown"
+    }
+  }
+}
+{
+  "data": "IyBkb2NzL2EubWQKaXNzdWUtMTA4IHRlbmFudCBzdG9yZSBwcm9vZg=="
+}
+
+$ Get {key:big.bin, B}
+  Code: ResourceExhausted
+  Message: object exceeds the bound-read cap of 5242880 bytes
+
+$ List {B, prefix "/docs/" — literal: no key begins with a slash}
+{}
+
+$ List {bucket no-such-bucket}
+  Code: NotFound
+  Message: minio.List: NotFound: bucket or container does not exist: The specified bucket does not exist
+
+$ GetMany {[a.md, b.md], bucket no-such-bucket}
+  Code: NotFound
+  Message: minio.Get: NotFound: bucket or container does not exist: The specified bucket does not exist
+
+$ List {endpoint http://localhost:41040}
+  Code: PermissionDenied
+  Message: binding: PermissionDenied: binding endpoint "localhost": destination is not a public address
+
+$ List {endpoint http://127.0.0.1:41040}
+  Code: PermissionDenied
+  Message: binding: PermissionDenied: binding endpoint "127.0.0.1": destination is not a public address
+
+$ List {endpoint http://host.docker.internal:65306}
+  Code: PermissionDenied
+  Message: binding: PermissionDenied: binding endpoint "host.docker.internal": destination is not a public address
+
+$ List {endpoint http://host.docker.internal:41041}
+  Code: PermissionDenied
+  Message: binding: PermissionDenied: binding endpoint "host.docker.internal": destination is not a public address
+
+$ List {B, wrong secret}
+  Code: PermissionDenied
+  Message: minio.List: PermissionDenied: The request signature we calculated does not match the signature you provided. Check your key and signing method.
+
+# credentials in both gateways' logs: fixed-string matches, one credential at a time
+log lines: 6
+control, a string the logs do contain (object-storage gateway listening on): 2
+tenant secret: 0
+wrong-secret: 0

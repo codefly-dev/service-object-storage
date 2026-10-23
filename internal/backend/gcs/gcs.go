@@ -16,10 +16,15 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -53,7 +58,13 @@ type Backend struct {
 // New opens a GCS backend bound to cfg.Bucket.
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	var opts []option.ClientOption
-	if cfg.GCSCredentialsFile != "" {
+	if cfg.HTTPClient != nil {
+		bound, err := boundOptions(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		opts = bound
+	} else if cfg.GCSCredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(cfg.GCSCredentialsFile))
 	}
 	client, err := storage.NewClient(ctx, opts...)
@@ -66,6 +77,53 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		name:   "gcs",
 		cfg:    cfg,
 	}, nil
+}
+
+// boundOptions authenticates one bound call with the caller's service-account
+// key and nothing else. JWTConfigFromJSON accepts only the service_account
+// type: an external-account key names a local file or command as its token
+// source, which would let a caller read the gateway's filesystem. The token
+// exchange runs through cfg.HTTPClient too, because the key names its own
+// token endpoint.
+//
+// An access token is the bearer as is: a static source, so nothing refreshes or
+// exchanges it, over the same guarded transport.
+func boundOptions(ctx context.Context, cfg backend.Config) ([]option.ClientOption, error) {
+	var client *http.Client
+	if cfg.GCSAccessToken != "" {
+		client = &http.Client{Transport: &oauth2.Transport{
+			Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.GCSAccessToken, TokenType: "Bearer"}),
+			Base:   cfg.HTTPClient.Transport,
+		}}
+	} else {
+		jwt, err := google.JWTConfigFromJSON(cfg.GCSCredentialsJSON, storage.ScopeReadOnly)
+		if err != nil {
+			return nil, serr.Wrap(serr.InvalidArgument, "gcs.New", err).WithReason(serr.ReasonBindingInvalid, nil)
+		}
+		client = jwt.Client(context.WithValue(ctx, oauth2.HTTPClient, cfg.HTTPClient))
+	}
+	// WithoutAuthentication: the caller's credential is already in client's
+	// transport, and without it the SDK still runs default credential
+	// discovery (GOOGLE_APPLICATION_CREDENTIALS, gcloud's ADC, the metadata
+	// server) — the gateway's own identity. The discarding logger keeps
+	// GOOGLE_SDK_GO_LOGGING_LEVEL from writing a bound call's traffic, which
+	// can echo the credential, to the gateway's stderr.
+	// WithDisabledClientMetrics: GCP_STORAGE_GO_ENABLE_OTEL_METRICS=true would
+	// otherwise start a Cloud Monitoring exporter and a resource detector, which
+	// run default credential discovery and query the metadata server outside
+	// client's transport. The option is checked before the variable.
+	opts := []option.ClientOption{
+		option.WithHTTPClient(client),
+		option.WithoutAuthentication(),
+		option.WithLogger(slog.New(slog.DiscardHandler)),
+		storage.WithDisabledClientMetrics(),
+	}
+	if cfg.Endpoint != "" {
+		// A binding's endpoint is a bare origin; the JSON API lives under
+		// /storage/v1/ on it, as it does on storage.googleapis.com.
+		opts = append(opts, option.WithEndpoint(strings.TrimSuffix(cfg.Endpoint, "/")+"/storage/v1/"))
+	}
+	return opts, nil
 }
 
 // Name reports the backend kind.
@@ -147,7 +205,7 @@ func (b *Backend) Get(ctx context.Context, key string, opts backend.GetOptions) 
 
 	a, err := o.Attrs(ctx)
 	if err != nil {
-		return nil, mapErr(op, err)
+		return nil, b.objectErr(ctx, op, err)
 	}
 	info := infoFromAttrs(key, a)
 
@@ -171,11 +229,32 @@ func (b *Backend) Get(ctx context.Context, key string, opts backend.GetOptions) 
 			length = opts.Range.Length
 		}
 	}
+	// The checks above judged the generation Attrs observed; read exactly that
+	// one. A replacement in between then fails the read with 412
+	// (PreconditionFailed) instead of streaming new bytes under the old ETag
+	// and size. A version-pinned handle already reads one immutable generation.
+	if opts.VersionID == "" {
+		o = o.If(storage.Conditions{GenerationMatch: a.Generation})
+	}
 	rc, err := o.NewRangeReader(ctx, offset, length)
 	if err != nil {
-		return nil, mapErr(op, err)
+		return nil, b.objectErr(ctx, op, err)
 	}
 	return &backend.GetResult{Info: info, Body: rc}, nil
+}
+
+// objectErr maps an object read's error. The SDK maps every 404 to
+// ErrObjectNotExist, a missing bucket included, so a not-found object is
+// followed by a one-item listing of the bucket: only a bucket that does not
+// exist turns it into ErrBucketNotFound. A caller treating a missing object as
+// deleted must not read a missing bucket as every object deleted.
+func (b *Backend) objectErr(ctx context.Context, op string, err error) error {
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		if _, lerr := b.bucket.Objects(ctx, &storage.Query{}).Next(); errors.Is(lerr, storage.ErrBucketNotExist) {
+			return serr.BucketNotFound(op, lerr)
+		}
+	}
+	return mapErr(op, err)
 }
 
 // Put writes an object, honoring create-if-absent and compare-and-swap intent.
@@ -410,7 +489,10 @@ func mapErr(op string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, storage.ErrObjectNotExist) || errors.Is(err, storage.ErrBucketNotExist) {
+	if errors.Is(err, storage.ErrBucketNotExist) {
+		return serr.BucketNotFound(op, err)
+	}
+	if errors.Is(err, storage.ErrObjectNotExist) {
 		return serr.Wrap(serr.NotFound, op, err)
 	}
 	var gerr *googleapi.Error
@@ -418,7 +500,7 @@ func mapErr(op string, err error) error {
 		switch gerr.Code {
 		case 304:
 			return serr.Wrap(serr.NotModified, op, err)
-		case 403:
+		case 401, 403: // 401: a bearer the store does not accept (expired, revoked)
 			return serr.Wrap(serr.PermissionDenied, op, err)
 		case 404:
 			return serr.Wrap(serr.NotFound, op, err)

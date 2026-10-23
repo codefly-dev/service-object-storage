@@ -24,12 +24,12 @@ docker run -d --name minio -p 9000:9000 \
   ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
 docker run -d --name fake-gcs -p 4443:4443 \
   fsouza/fake-gcs-server@sha256:d47b4cf8b87006cab8fbbecfa5f06a2a3c5722e464abddc0d107729663d40ec4 \
-  -scheme http -public-host 127.0.0.1:4443
+  -scheme http -public-host localhost:4443
 for i in $(seq 1 30); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
 
 MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
-STORAGE_EMULATOR_HOST=127.0.0.1:4443 GCS_BUCKET=sos-test \
+STORAGE_EMULATOR_HOST=localhost:4443 GCS_BUCKET=sos-test \
   go test -tags integration -count=1 -v ./internal/integration/...
 
 docker rm -f minio fake-gcs
@@ -40,12 +40,19 @@ repo, because Docker Hub and quay.io no longer serve MinIO anonymously. It is
 the image the agent's Runtime pins, so the suite and the Runtime exercise one
 MinIO version.
 
-Six tests run: `TestMinIOFullStack`, `TestMinIOConditionalDelete`,
-`TestProbeAgainstLiveMinIO` (whose subtests cover granted access, a missing
-bucket and refused credentials for both probe strategies), and against
-fake-gcs-server `TestGCSFullStack`, `TestGCSPrefixConfinesKeys` and
-`TestGCSProbe`. The emulator accepts any caller, so the GCS tests prove the
-keyless client path and the prefix, never Workload Identity or a bucket grant.
+Eight tests run:
+- Against MinIO: `TestMinIOFullStack`, `TestMinIOConditionalDelete`,
+  `TestMinIOBoundGetMany` (a per-call binding to the same MinIO, admitted as a
+  composed endpoint), and `TestProbeAgainstLiveMinIO`. The probe test's
+  subtests cover granted access, a missing bucket and refused credentials for
+  both probe strategies.
+- Against fake-gcs-server: `TestGCSFullStack`, `TestGCSPrefixConfinesKeys`,
+  `TestGCSProbe` and `TestGCSBoundAccessToken` (bound List/Stat/Get/GetMany
+  with an access-token credential).
+
+The emulator accepts any caller, so the GCS tests prove the keyless client
+path, the prefix and that a bearer-token binding reaches the store. They never
+prove Workload Identity, a bucket grant or token validity.
 
 ## Proving the run happened
 
@@ -60,7 +67,7 @@ ok  	github.com/codefly-dev/service-object-storage/internal/integration	0.391s  
 So `ok` is not a result. Count what passed:
 
 ```bash
-go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 6
+go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 8
 go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- SKIP'   # expect 0
 ```
 

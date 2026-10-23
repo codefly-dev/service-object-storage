@@ -63,12 +63,18 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		probeKey:  cfg.ProbeKey,
 	}
 
-	if cfg.AzureKey != "" {
+	if cfg.AzureKey != "" || cfg.HTTPClient != nil {
+		// A bound call always takes this branch: it authenticates with the
+		// caller's shared key, never the process's default credential.
 		cred, err := azblob.NewSharedKeyCredential(cfg.AzureAccount, cfg.AzureKey)
 		if err != nil {
 			return nil, serr.Wrap(serr.InvalidArgument, op, err)
 		}
-		client, err := azblob.NewClientWithSharedKeyCredential(serviceURL, cred, nil)
+		var opts *azblob.ClientOptions
+		if cfg.HTTPClient != nil {
+			opts = &azblob.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: cfg.HTTPClient}}
+		}
+		client, err := azblob.NewClientWithSharedKeyCredential(serviceURL, cred, opts)
 		if err != nil {
 			return nil, serr.Wrap(serr.Internal, op, err)
 		}
@@ -472,11 +478,11 @@ func accessConditions(ifNoneMatch, ifMatch string, ifModifiedSince time.Time, cr
 		mac.IfNoneMatch = to.Ptr(azcore.ETagAny)
 		set = true
 	} else if ifNoneMatch != "" {
-		mac.IfNoneMatch = to.Ptr(azcore.ETag(ifNoneMatch))
+		mac.IfNoneMatch = to.Ptr(wireETag(ifNoneMatch))
 		set = true
 	}
 	if ifMatch != "" {
-		mac.IfMatch = to.Ptr(azcore.ETag(ifMatch))
+		mac.IfMatch = to.Ptr(wireETag(ifMatch))
 		set = true
 	}
 	if !ifModifiedSince.IsZero() {
@@ -535,7 +541,9 @@ func mapErr(op string, err error) error {
 		return nil
 	}
 	switch {
-	case bloberror.HasCode(err, bloberror.BlobNotFound, bloberror.ContainerNotFound):
+	case bloberror.HasCode(err, bloberror.ContainerNotFound):
+		return serr.BucketNotFound(op, err)
+	case bloberror.HasCode(err, bloberror.BlobNotFound):
 		return serr.Wrap(serr.NotFound, op, err)
 	case bloberror.HasCode(err, bloberror.BlobAlreadyExists):
 		return serr.Wrap(serr.AlreadyExists, op, err)
@@ -584,6 +592,17 @@ func blobItemInfo(item *container.BlobItem) backend.ObjectInfo {
 		info.CacheControl = derefStr(p.CacheControl)
 	}
 	return info
+}
+
+// wireETag restores the quotes etagStr strips: the gateway reports Azure ETags
+// unquoted, and a caller hands one back as is, but an If-Match or
+// If-None-Match header carries an HTTP entity tag, which is quoted. The
+// wildcard and an already-quoted tag pass through.
+func wireETag(etag string) azcore.ETag {
+	if etag == "*" || strings.HasPrefix(etag, `"`) || strings.HasPrefix(etag, `W/"`) {
+		return azcore.ETag(etag)
+	}
+	return azcore.ETag(`"` + etag + `"`)
 }
 
 func etagStr(e *azcore.ETag) string {

@@ -67,11 +67,18 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 		region = "us-east-1"
 	}
 
-	client, err := minio.New(endpoint, &minio.Options{
+	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: secure,
 		Region: region,
-	})
+	}
+	if cfg.UsePathStyle {
+		opts.BucketLookup = minio.BucketLookupPath
+	}
+	if cfg.HTTPClient != nil {
+		opts.Transport = cfg.HTTPClient.Transport
+	}
+	client, err := minio.New(endpoint, opts)
 	if err != nil {
 		return nil, serr.Wrap(serr.InvalidArgument, op, err)
 	}
@@ -163,7 +170,9 @@ func mapErr(op string, err error) error {
 	}
 	resp := minio.ToErrorResponse(err)
 	switch {
-	case resp.StatusCode == 404, resp.Code == "NoSuchKey", resp.Code == "NoSuchBucket":
+	case resp.Code == "NoSuchBucket":
+		return serr.BucketNotFound(op, err)
+	case resp.StatusCode == 404, resp.Code == "NoSuchKey":
 		return serr.Wrap(serr.NotFound, op, err)
 	case resp.StatusCode == 304:
 		return serr.Wrap(serr.NotModified, op, err)
@@ -424,6 +433,13 @@ func (b *Backend) List(ctx context.Context, opts backend.ListOptions) (*backend.
 	count := 0
 	for obj := range b.client.ListObjects(lctx, b.bucket, mopts) {
 		if obj.Err != nil {
+			// minio-go refuses a page marked truncated with no continuation
+			// token, an incomplete listing, as NotImplemented — a code too
+			// generic to classify by, so its own message identifies it.
+			if resp := minio.ToErrorResponse(obj.Err); resp.Code == minio.NotImplemented &&
+				resp.Message == "Truncated response should have continuation token set" {
+				return nil, serr.Wrap(serr.Internal, op, obj.Err).WithReason(serr.ReasonListingIncomplete, nil)
+			}
 			return nil, mapErr(op, obj.Err)
 		}
 		if opts.Delimiter != "" && strings.HasSuffix(obj.Key, "/") {

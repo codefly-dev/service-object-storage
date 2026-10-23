@@ -277,3 +277,19 @@ func TestFromEnv_SelectsBackend(t *testing.T) {
 		})
 	}
 }
+
+// A directly launched gateway cannot be given an address as a composed
+// endpoint: the metadata address, or any other, is refused at startup, naming
+// the variable (review r1/r3).
+func TestFromEnv_RefusesAnAddressAsComposedEndpoint(t *testing.T) {
+	probeEnv(t)
+	for _, value := range []string{"169.254.169.254:80", "10.0.0.5:9000", "[fe80::1]:80"} {
+		t.Setenv("SOS_COMPOSED_ENDPOINTS", value)
+		_, err := config.FromEnv()
+		require.ErrorContains(t, err, "SOS_COMPOSED_ENDPOINTS", value)
+	}
+	t.Setenv("SOS_COMPOSED_ENDPOINTS", "host.docker.internal:45420")
+	cfg, err := config.FromEnv()
+	require.NoError(t, err)
+	require.True(t, cfg.Composed["host.docker.internal:45420"])
+}

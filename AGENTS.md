@@ -60,7 +60,7 @@ MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
 ```
 
 The gcs backend's integration tests in the same package run against
-fake-gcs-server when `STORAGE_EMULATOR_HOST` (e.g. `127.0.0.1:4443`) and
+fake-gcs-server when `STORAGE_EMULATOR_HOST` (e.g. `localhost:4443`, matching its `-public-host`) and
 `GCS_BUCKET` are set, and skip otherwise; the skill below has the command. The
 emulator accepts any caller, so it proves the keyless client path and
 `SOS_PREFIX`, never Workload Identity or a bucket IAM grant.

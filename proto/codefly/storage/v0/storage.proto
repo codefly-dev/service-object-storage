@@ -52,12 +52,87 @@ enum CacheStatus {
   CACHE_STATUS_NO_STORE = 6;
 }
 
+// Binding names a bucket the gateway is NOT configured for: a store the caller
+// reaches with its own credential, for this one call. A request that carries a
+// binding runs against it and never touches the gateway's configured bucket;
+// a request without one is unchanged. Only Stat, Get, GetMany, List and
+// Capabilities take a binding — the reads a datasource pull needs.
+//
+// The binding is an argument, not a configuration: the gateway opens a client
+// for the call, drops it when the call returns, and never stores, logs or
+// returns the credential: bound error messages are scrubbed of it, and so are
+// the responses the SDKs see. (The debug_redact marks below are honoured by
+// the runtimes that implement the option; protobuf-go does not.) Every dial a bound call makes is checked against the
+// concrete address being connected to — on the first request and on every
+// redirect — and an address that is not on the public internet is refused
+// with PERMISSION_DENIED. A named endpoint is resolved and judged before the
+// first dial as well, so the refusal names it. Bound reads are capped: see
+// BackendCapabilities.max_object_bytes and max_list_limit; every response a
+// store sends a bound call is bounded to max_object_bytes. Each bound
+// operation (a List, Stat, Get, Capabilities, or GetMany item) must complete
+// within 30 seconds, body included, and a whole GetMany within 10 minutes, or
+// the call fails UNAVAILABLE; both deadlines start before the endpoint is
+// qualified, so its DNS resolution is inside them.
+//
+// A bound List never answers an incomplete listing as complete: a page the
+// store marks truncated without a continuation token, or one with more
+// entries than the page asked for, fails the call. An empty next_page_token
+// on a successful page means the listing is complete.
+message Binding {
+  // kind is a registered remote backend: "s3", "minio", "gcs" or "azure".
+  string kind = 1;
+  // endpoint is an http(s) origin with no path, query or userinfo. Empty means
+  // the kind's public service: AWS S3 for "s3", Cloud Storage for "gcs",
+  // https://<account>.blob.core.windows.net for "azure". "minio" requires one.
+  // S3-style stores ("s3", "minio") are addressed path-style.
+  string endpoint = 2;
+  // region signs S3-style requests; empty means "us-east-1".
+  string region = 3;
+  // bucket is the bucket (S3, MinIO, GCS) or container (Azure).
+  string bucket = 4;
+  // prefix confines the call to keys under it, and keys in requests and
+  // results are relative to it. It is a literal key prefix, used exactly as
+  // written: "/reports/" lists keys beginning "/reports/", "/" is not the
+  // whole bucket, "reports" also matches "reports-2024/…". (Unlike SOS_PREFIX,
+  // which the gateway normalizes for its own bucket, a bound read's scope is
+  // never rewritten: its result can authorize deletions.)
+  string prefix = 5;
+  // credential authenticates this call. It is required: a bound call never
+  // falls back to the gateway's own identity.
+  Credential credential = 6;
+}
+
+// Credential is the caller's credential for one bound call.
+message Credential {
+  oneof kind {
+    // access_key authenticates "s3" and "minio" (access key id and secret
+    // access key) and "azure" (storage account name and shared account key).
+    AccessKey access_key = 1;
+    // service_account_key is a Google service-account JSON key, for "gcs".
+    // No other Google credential type is accepted.
+    bytes service_account_key = 2 [debug_redact = true];
+    // access_token is a short-lived OAuth2 access token, for "gcs": the
+    // bearer for this one call, minted by the caller (for example by service
+    // account impersonation) where keys are forbidden. The gateway sends it
+    // as is — no refresh, no exchange — so an expired token is refused by the
+    // store, with the store's answer, as PERMISSION_DENIED.
+    string access_token = 3 [debug_redact = true];
+  }
+}
+
+message AccessKey {
+  string id = 1;
+  string secret = 2 [debug_redact = true];
+}
+
 message StatRequest {
   string key = 1;
   string version_id = 2;
   // Conditional stat: empty means unconditional.
   string if_none_match = 3;
   string if_match = 4;
+  // binding, when set, reads a bucket named by the caller — see Binding.
+  Binding binding = 5;
 }
 
 message GetRequest {
@@ -67,6 +142,8 @@ message GetRequest {
   string if_none_match = 4;
   string if_match = 5;
   int64 if_modified_since_unix_ms = 6;
+  // binding, when set, reads a bucket named by the caller — see Binding.
+  Binding binding = 7;
 }
 
 // GetResponse streams: the first message carries the header (info +
@@ -86,6 +163,58 @@ message GetHeader {
   // gateway no longer caches and always leaves it unset
   // (CACHE_STATUS_UNSPECIFIED).
   CacheStatus cache_status = 3 [deprecated = true];
+}
+
+// GetManyRequest reads several objects in one call: in request order, each
+// only at the ETag the caller listed. It exists so a caller that syncs a
+// listing (a datasource pull) pays one call per batch rather than one per
+// object. At most BackendCapabilities.max_get_many_items items per call.
+message GetManyRequest {
+  repeated GetManyItem items = 1;
+  // binding, when set, reads a bucket named by the caller — see Binding. The
+  // bound caps apply to every item.
+  Binding binding = 2;
+}
+
+message GetManyItem {
+  string key = 1;
+  // if_match is the ETag the caller listed; the object is read only if it
+  // still has it. Empty reads whatever version is current.
+  string if_match = 2;
+}
+
+// GetManyResponse streams, per item in request order: one header, then — when
+// the outcome is OK — data chunks whose total is exactly header.info.size. A
+// header for the next item starts the next object. An error that is not about
+// one item (credentials refused, store unreachable, guard refusal, a missing
+// bucket or container) ends the stream with its status instead. The size is
+// enforced: a body that runs longer or shorter ends the stream with ABORTED,
+// and a stream that ends with an error leaves its current item incomplete.
+message GetManyResponse {
+  oneof kind {
+    GetManyHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message GetManyHeader {
+  // index is the item's position in GetManyRequest.items.
+  int32 index = 1;
+  GetManyOutcome outcome = 2;
+  // info is set when outcome is OK.
+  ObjectInfo info = 3;
+}
+
+// GetManyOutcome is what happened to one item. Only OK is followed by data.
+enum GetManyOutcome {
+  GET_MANY_OUTCOME_UNSPECIFIED = 0;
+  GET_MANY_OUTCOME_OK = 1;
+  // CHANGED: the object no longer has the if_match ETag.
+  GET_MANY_OUTCOME_CHANGED = 2;
+  // NOT_FOUND: the key does not exist (deleted since it was listed).
+  GET_MANY_OUTCOME_NOT_FOUND = 3;
+  // TOO_LARGE: a bound read of an object over max_object_bytes.
+  GET_MANY_OUTCOME_TOO_LARGE = 4;
 }
 
 // PutRequest streams: the first message MUST be the header, every following
@@ -147,6 +276,8 @@ message ListRequest {
   string delimiter = 2;
   string page_token = 3;
   int32 limit = 4;
+  // binding, when set, lists a bucket named by the caller — see Binding.
+  Binding binding = 5;
 }
 
 // ListResult — objects plus synthetic common_prefixes ("directories"). Ordering
@@ -234,7 +365,13 @@ message WriteEvent {
   int64 time_unix_ms = 5;
 }
 
-message CapabilitiesRequest {}
+message CapabilitiesRequest {
+  // binding, when set, asks what a bound call honors — see Binding. Only the
+  // read surface is reported for it: backend, versions and the two caps; every
+  // write, presign and native field is unset, because a bound call can reach
+  // only Stat, Get, GetMany and List.
+  Binding binding = 1;
+}
 
 // Capabilities is the OpenDAL-style introspection surface: a client asks what
 // this backend honors before it calls, instead of discovering by failure.
@@ -250,6 +387,17 @@ message BackendCapabilities {
   bool presign_ambient_creds = 9;
   int32 batch_delete_max = 10;
   repeated string native_verbs = 11;
+  // max_object_bytes is the largest object a bound Get streams; a larger one
+  // is refused with RESOURCE_EXHAUSTED. 0 means the gateway sets no cap, which
+  // is the case for its configured bucket.
+  int64 max_object_bytes = 12;
+  // max_list_limit is the most objects one bound List page returns; a larger
+  // or zero ListRequest.limit is clamped to it. Page with next_page_token for
+  // more. 0 means the gateway sets no cap.
+  int32 max_list_limit = 13;
+  // max_get_many_items is the most items one GetManyRequest may carry; more is
+  // INVALID_ARGUMENT. It applies with or without a binding.
+  int32 max_get_many_items = 14;
 }
 
 message ReadyRequest {}
@@ -294,10 +442,35 @@ message NativeResult {
 // ObjectStorage is the generic data plane. Errors are returned as gRPC status
 // codes normalized across backends: NOT_FOUND, ALREADY_EXISTS,
 // FAILED_PRECONDITION (conditional/CAS), UNIMPLEMENTED (unsupported),
-// PERMISSION_DENIED, RESOURCE_EXHAUSTED (throttled), INTERNAL.
+// PERMISSION_DENIED, RESOURCE_EXHAUSTED, ABORTED, UNAVAILABLE, INTERNAL.
+//
+// Every refusal also names its reason: a google.rpc.ErrorInfo in the status
+// details, domain "object-storage.codefly.dev", beside the unchanged message.
+// Act on the reason, not the code — one code covers refusals that call for
+// different actions:
+//   PERMISSION_DENIED   DESTINATION_REFUSED (the guard: refuse the source),
+//                       CREDENTIAL_REJECTED (the store: re-authorise)
+//   RESOURCE_EXHAUSTED  STORE_THROTTLED (back off; carries a
+//                       google.rpc.RetryInfo — the store's Retry-After, or a
+//                       1 s default, metadata retry_delay_source=store|default),
+//                       OBJECT_TOO_LARGE (skip the object; max_bytes),
+//                       RESPONSE_TOO_LARGE (max_bytes),
+//                       LISTING_TOO_LONG (entries, max_entries),
+//                       WATCH_CONSUMER_BEHIND (reconcile, then re-watch)
+//   NOT_FOUND           OBJECT_NOT_FOUND, BUCKET_NOT_FOUND
+//   INVALID_ARGUMENT    BINDING_INVALID, TOO_MANY_ITEMS (max_items),
+//                       INVALID_ARGUMENT
+//   UNAVAILABLE         OPERATION_DEADLINE (per_operation, per_get_many),
+//                       ENDPOINT_UNRESOLVED, STORE_UNAVAILABLE
+//   ABORTED             BODY_SIZE_MISMATCH (declared_bytes, sent_bytes)
+//   INTERNAL            LISTING_INCOMPLETE, INTERNAL
+//   FAILED_PRECONDITION PRECONDITION_FAILED;  ALREADY_EXISTS ALREADY_EXISTS;
+//   UNIMPLEMENTED       UNSUPPORTED
 service ObjectStorage {
   rpc Stat(StatRequest) returns (GetHeader);
   rpc Get(GetRequest) returns (stream GetResponse);
+  // GetMany streams several objects in one call — see GetManyRequest.
+  rpc GetMany(GetManyRequest) returns (stream GetManyResponse);
   rpc Put(stream PutRequest) returns (PutResult);
   rpc Delete(DeleteRequest) returns (DeleteResult);
   rpc DeleteMany(DeleteManyRequest) returns (DeleteManyResult);

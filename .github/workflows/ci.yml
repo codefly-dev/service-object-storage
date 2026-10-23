@@ -57,7 +57,7 @@ jobs:
         run: |
           docker run -d --name fake-gcs -p 4443:4443 \
             fsouza/fake-gcs-server@sha256:d47b4cf8b87006cab8fbbecfa5f06a2a3c5722e464abddc0d107729663d40ec4 \
-            -scheme http -public-host 127.0.0.1:4443
+            -scheme http -public-host localhost:4443
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:4443/storage/v1/b && break
             sleep 1
@@ -69,7 +69,7 @@ jobs:
           MINIO_ACCESS_KEY: minioadmin
           MINIO_SECRET_KEY: minioadmin
           MINIO_BUCKET: sos-test
-          STORAGE_EMULATOR_HOST: 127.0.0.1:4443
+          STORAGE_EMULATOR_HOST: localhost:4443
           GCS_BUCKET: sos-test
         run: go test -tags integration ./internal/integration/...
 

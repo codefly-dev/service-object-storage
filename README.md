@@ -29,6 +29,7 @@ The honest intersection across all four backends (the surface OpenDAL /
 |-----|---------|
 | `Stat` | object metadata (HEAD), conditional |
 | `Get` | streaming read; range + conditional |
+| `GetMany` | several objects in one streamed call, in request order, each at its listed ETag |
 | `Put` | streaming write; multipart hidden in the backend; conditional (create-if-absent / CAS) |
 | `Delete` / `DeleteMany` | delete; batch with per-key results |
 | `List` | prefix + delimiter + opaque page token |
@@ -41,6 +42,240 @@ The honest intersection across all four backends (the surface OpenDAL /
 
 Errors are normalized to gRPC status codes (`NotFound`, `AlreadyExists`,
 `FailedPrecondition`, `Unimplemented`, …) so clients never parse an S3 XML code.
+
+**Every refusal names its reason.** Beside the unchanged message, the status
+carries a `google.rpc.ErrorInfo` in domain `object-storage.codefly.dev`. Act on
+the reason, not the code, because one code covers refusals that need different
+actions:
+
+| Code | Reason | What it means, and what to do |
+|------|--------|-------------------------------|
+| `PERMISSION_DENIED` | `DESTINATION_REFUSED` | The guard refused the endpoint. Refuse the source. |
+| `PERMISSION_DENIED` | `CREDENTIAL_REJECTED` | The store refused the credential. Re-authorise. |
+| `RESOURCE_EXHAUSTED` | `STORE_THROTTLED` | The store throttled. Back off. Carries a `google.rpc.RetryInfo`: the store's `Retry-After` when it sent one, else 1 s; metadata `retry_delay_source` is `store` or `default`. |
+| `RESOURCE_EXHAUSTED` | `OBJECT_TOO_LARGE` | Over the bound object cap (`max_bytes`). Skip the object. |
+| `RESOURCE_EXHAUSTED` | `RESPONSE_TOO_LARGE` | A store response exceeded the bound (`max_bytes`). |
+| `RESOURCE_EXHAUSTED` | `LISTING_TOO_LONG` | A page had more entries than asked for (`entries`, `max_entries`). |
+| `RESOURCE_EXHAUSTED` | `WATCH_CONSUMER_BEHIND` | A Watch consumer fell behind. Reconcile, then re-watch. |
+| `NOT_FOUND` | `OBJECT_NOT_FOUND` | The object does not exist. |
+| `NOT_FOUND` | `BUCKET_NOT_FOUND` | The bucket or container does not exist. |
+| `INVALID_ARGUMENT` | `BINDING_INVALID` | The binding is unusable as given: kind, bucket, endpoint, or credential. |
+| `INVALID_ARGUMENT` | `TOO_MANY_ITEMS` | Too many `GetMany` items (`max_items`). |
+| `INVALID_ARGUMENT` | `INVALID_ARGUMENT` | Any other invalid request. |
+| `UNAVAILABLE` | `OPERATION_DEADLINE` | A bound operation or `GetMany` ran out of time (`per_operation`, `per_get_many`). |
+| `UNAVAILABLE` | `ENDPOINT_UNRESOLVED` | The endpoint's name did not resolve. |
+| `UNAVAILABLE` | `STORE_UNAVAILABLE` | The store did not answer. |
+| `ABORTED` | `BODY_SIZE_MISMATCH` | A `GetMany` body disagreed with its declared size (`declared_bytes`, `sent_bytes`). |
+| `INTERNAL` | `LISTING_INCOMPLETE` | The store marked a page truncated without a continuation token. |
+| `INTERNAL` | `INTERNAL` | Unclassified. |
+| `FAILED_PRECONDITION`, `ALREADY_EXISTS`, `UNIMPLEMENTED` | `PRECONDITION_FAILED`, `ALREADY_EXISTS`, `UNSUPPORTED` | The conditional, create-if-absent and unsupported-operation refusals. |
+
+`Stat`, `Get`, `GetMany`, `List` and `Capabilities` can also read a bucket the caller
+names, with the caller's credential — see
+[bound calls](#reading-a-callers-own-bucket-bound-calls).
+
+## Reading a caller's own bucket (bound calls)
+
+`Stat`, `Get`, `GetMany`, `List` and `Capabilities` take an optional `Binding`: kind
+(`s3`, `minio`, `gcs`, `azure`), endpoint, region, bucket, prefix, and the
+credential for that one call. A request that carries a binding runs against the
+bucket it names and never touches the configured one; a request without one is
+unchanged. It is how a host reads a tenant's own bucket — its datasource — over
+every backend this gateway has, without a store client of its own.
+
+```text
+ListRequest { prefix: "", limit: 0,
+  binding: { kind: "s3", endpoint: "https://s3.eu-west-1.amazonaws.com",
+             region: "eu-west-1", bucket: "acme-docs", prefix: "kb/",
+             credential: { access_key: { id: "AKIA…", secret: "…" } } } }
+```
+
+- **The binding is an argument, not a configuration.** The gateway opens a
+  client for the call and closes it, and its connections, when the call
+  returns. It does not store, log or return the credential. The caller
+  decrypts the credential for the call, as it would for an in-process client.
+- **Only the binding's credential is used.** Each kind takes one credential,
+  set in `Credential`:
+
+  | Kind | Credential | Notes |
+  |------|------------|-------|
+  | `s3`, `minio` | `access_key` { `id`, `secret` } | access key id and secret access key; SigV4, path-style |
+  | `azure` | `access_key` { `id`, `secret` } | storage account name and shared account key |
+  | `gcs` | `service_account_key` | a Google service-account JSON key, type `service_account` only. An external-account key is refused, because it names a local file or command as its token source. |
+  | `gcs` | `access_token` | a short-lived OAuth2 access token, for organisations that forbid service-account keys (`constraints/iam.disableServiceAccountKeyCreation`). The caller mints it outside the gateway, for example `gcloud auth print-access-token --impersonate-service-account=…` (1-hour lifetime). The gateway sends it as the bearer for that one call, as is: no refresh and no exchange. An expired or revoked token gets the store's own 401 back as `PERMISSION_DENIED`. |
+
+  A missing credential is `INVALID_ARGUMENT` and nothing is dialed. The call
+  never falls back to the gateway's own identity (AWS default chain, ADC,
+  `DefaultAzureCredential`), which would lend the caller the gateway's grants.
+- **No credential leaves in what the gateway emits.** A store may echo what it
+  was sent, so:
+  - Every bound error message has the binding's credentials scrubbed, and so
+    is every `Authorization` value the call put on the wire, including a token
+    minted from a service-account key.
+  - The bound client removes those values from every response header and from
+    error bodies, before the SDK parses or logs them. This matters because
+    `GOOGLE_SDK_GO_LOGGING_LEVEL=debug` writes response headers and error
+    bodies to stderr, and the storage SDK ignores a logger passed to it.
+  - `secret`, `service_account_key` and `access_token` are marked
+    `debug_redact`, but protobuf-go does not implement that option: `String()`,
+    prototext and protojson print the field. The gateway never formats a
+    request, so the error policy above is the protection, not the
+    annotation.
+- **The public-destination guard.** A binding's endpoint is supplied by the
+  caller, so it is an egress the gateway must not let reach its own network.
+  Every dial a bound call makes, including the token exchange of a GCS key, is
+  judged against the concrete IP being connected to. That covers the first
+  request and every redirect, so neither DNS rebinding nor a redirect gets
+  past it. Any address outside the public internet is refused: loopback,
+  RFC 1918, link-local (cloud metadata included), CGNAT, documentation,
+  benchmarking, reserved, NAT64, 6to4 and Teredo, read from the IANA
+  special-purpose registries. The client never uses a proxy. A named endpoint
+  is also resolved and judged before the first dial, so the refusal is
+  immediate and names it:
+  `PERMISSION_DENIED: binding endpoint "localhost": destination is not a public address`.
+  The endpoint must be a bare `http(s)` origin with no path, query or userinfo.
+  If it is empty, the kind's public service is used. S3-style stores are
+  addressed path-style.
+- **Caps.** A bound `Get` streams at most 5 MiB per object; a larger object is
+  refused with `RESOURCE_EXHAUSTED`, and so is a store that sends more than the
+  size it declared. A bound `List` returns at most 1,000 objects per page, and
+  a zero or larger `limit` is clamped to that; page with `next_page_token` for
+  more. `Capabilities` with the same binding reports both caps
+  (`max_object_bytes`, `max_list_limit`), the bound kind and whether it has
+  `versions`. It reports only the read surface, because a bound call cannot
+  write or presign.
+- **Prefix.** Keys are relative to the binding's `prefix`, which is a
+  **literal key prefix**, used exactly as written: `/reports/` lists keys
+  beginning `/reports/`, `/` is not the whole bucket, and `reports` also
+  matches `reports-2024/…`. `SOS_PREFIX` normalizes the gateway's own prefix;
+  a bound read's scope is never rewritten, because its result can authorize
+  deletions.
+- **Complete listings only.** A bound `List` never answers an incomplete
+  listing as complete:
+  - A page the store marks truncated without a continuation token fails the
+    call, saying the listing is incomplete.
+  - So does a page with more entries than it asked for.
+  - An empty `next_page_token` on a successful page means the listing is
+    complete.
+- **Bounds.**
+  - Every response a store sends a bound call is bounded to 5 MiB; a longer
+    one, a listing included, fails with `RESOURCE_EXHAUSTED`.
+  - Each bound operation (a `List`, `Stat`, `Get`, `Capabilities`, or each
+    `GetMany` item) must complete within 30 seconds, body included. A whole
+    `GetMany` must complete within 10 minutes, however many items it carries.
+    Either failing is `UNAVAILABLE`.
+  - Both deadlines start before the endpoint is qualified, so its DNS
+    resolution is inside them. A store that sends headers and then stalls
+    cannot hold the caller.
+- **Batched reads.** `GetMany` takes up to `max_get_many_items` (1,000) keys,
+  each with the ETag the caller listed as `if_match`, and streams them in
+  request order in one call. Each item gets a header with its `index` and an
+  outcome, followed by data chunks totalling exactly `info.size` when the
+  outcome is `OK`.
+  - The size is enforced. A body that runs longer or ends shorter than the
+    size its header declared ends the stream with `ABORTED`.
+  - A store that sends no length has the object read, within the 5 MiB cap,
+    to learn its size before the header is sent.
+  - A GCS read is pinned to the generation its metadata observed, so a
+    replacement in between is `CHANGED`, never new bytes under the old ETag.
+  - When a stream ends with an error, the item it was in is incomplete:
+    discard it.
+  - `CHANGED` means the ETag no longer matches, `NOT_FOUND` means the key is
+    gone, and `TOO_LARGE` means the object is over the bound cap. None of
+    these is followed by data.
+  - Any failure that isn't about one item (refused credential, unreachable
+    store, guard refusal) ends the stream with its status. A **missing bucket
+    or container** is one of those: it ends the stream with `NOT_FOUND`, never
+    a `NOT_FOUND` outcome per item, which would read as every object deleted.
+    A bound `List` of a missing bucket fails with `NOT_FOUND` on every kind.
+  - A bound batch opens one guarded client for all its items. It also works
+    without a binding, against the configured bucket.
+
+### The guard's one exception: composed dependencies
+
+A binding may name a non-public endpoint in exactly one case: it is the
+endpoint of a service this gateway's service declares as a
+`service-dependency`, as codefly resolved it. The agent's Runtime reads the
+dependency network mappings codefly hands it, takes each one's container
+address (the gateway runs in a container), and delivers them to the gateway as
+`SOS_COMPOSED_ENDPOINTS` (`host:port`, comma-separated). The admission is exact:
+
+- the binding's endpoint must match a composed endpoint by host **and** port —
+  the same address under another name, or another port on the same host, is
+  refused;
+- the exception holds only while the call talks to that authority: a redirect
+  or a token request to any other name is judged by the public-only rule,
+  even one that resolves to the very same address and port;
+- within it, the gateway dials only the addresses that name resolved to, on
+  that port;
+- a composed endpoint is a name, as codefly's mappings are: an address literal
+  is refused, and a name resolving to a link-local (the cloud metadata
+  service), multicast or unspecified address is never admitted;
+- every other loopback, private, link-local or reserved destination is refused
+  as before, and a public endpoint is admitted as before.
+
+There is no switch that widens this: no "allow private" setting, no flag that
+disables the guard, no local-versus-hosted mode. A service with no dependency
+admits nothing beyond the public internet, and that is every environment's rule
+— a deployed gateway is given no composed endpoints today, so it binds only
+public stores.
+
+`SOS_COMPOSED_ENDPOINTS` is the Runtime's output. The gateway reads it from its
+environment, so whoever launches the gateway process can set it, exactly as
+they can set `SOS_ENDPOINT` or the backend's credentials. The guard protects
+the cell from callers' bindings, not from the gateway's launcher. What the
+variable cannot do, whoever sets it, is admit an address literal, the metadata
+service, or any authority other than the exact names it lists.
+
+The MinIO a local run starts as this gateway's own backend is not a dependency
+and stays unbindable.
+
+### A tenant store for a local proof: this service itself
+
+A local proof of a bound read needs no other agent. Its store is a **second
+object-storage service** with no backend set, which runs its own MinIO. It
+offers that MinIO to the services that depend on it when it declares a
+`minio` endpoint:
+
+```yaml
+# services/tenant/service.codefly.yaml
+endpoints:
+    - name: grpc
+    - name: minio
+      api: tcp
+      visibility: internal
+
+# services/<reader>/service.codefly.yaml (the object-storage service that binds it)
+service-dependencies:
+    - name: tenant
+      kind: runtime
+      endpoints:
+        - name: grpc
+          api: grpc
+        - name: minio
+          api: tcp
+```
+
+- **Port and reach.** On a local run, the tenant's MinIO is published on the
+  port codefly allocated to `minio`. The reader's mapping therefore names the
+  store itself, and its gateway admits exactly that address as a composed
+  endpoint. The port is published on all interfaces, as the gateway's is, so a
+  container can reach it through `host.docker.internal`. The per-run root key
+  guards it.
+- **What a dependent receives.** The tenant's `object-storage` configuration
+  group adds:
+  - `minio_endpoint`: the http origin, for the dependent's access view.
+  - `minio_access_key`.
+  - `minio_secret_key`: the per-run root key of this throwaway store, marked
+    secret. It grants nothing a dependent's gateway `token` does not already
+    grant on the same store.
+- **The binding** is `kind: "minio"`, with `endpoint` set to `minio_endpoint`
+  as the reader's gateway reaches it.
+- **Without the endpoint** the MinIO stays private, exactly as before.
+- **Refusals.**
+  - Declaring `minio` with a backend that runs no local MinIO fails at init.
+  - The Builder refuses to deploy a service that declares it, because a
+    deployment starts no MinIO.
 
 ## Byte path
 
@@ -80,6 +315,7 @@ notifications, Azure Event Grid) instead.
 | `SOS_PROBE_KEY` | — | required for `stat`; the object headed (need not exist) |
 | `SOS_PROBE_INTERVAL` | `10s` | how often readiness is re-probed |
 | `SOS_PROBE_TIMEOUT` | `5s` | per-probe deadline |
+| `SOS_COMPOSED_ENDPOINTS` | — | written by the agent's Runtime, not an operator: the composed dependencies a binding may name although not public (see [the guard's exception](#the-guards-one-exception-composed-dependencies)) |
 
 ## Readiness
 
@@ -427,8 +663,8 @@ and canonical inventory checksum (not the checksum of the formatted file).
 ## Develop
 
 ```bash
-# regenerate stubs from proto (requires buf + protoc-gen-go/-grpc)
-buf generate
+# regenerate stubs from proto (runs buf in codefly's pinned proto companion image)
+codefly generate proto --proto proto --output . --template buf.gen.yaml
 
 go build ./...
 go vet ./...
@@ -449,7 +685,8 @@ proto/codefly/storage/v0/    the uniform API
 gen/                         generated gRPC stubs
 internal/backend/            Backend interface + s3, gcs, azure, minio, mem
 internal/events/             in-process write-event hub behind Watch
-internal/server/             gRPC ObjectStorage implementation
+internal/server/             gRPC ObjectStorage implementation (binding.go: bound calls)
+internal/egress/             public-destination guard for bound calls
 internal/config/             env configuration
 cmd/service-object-storage/  the server binary
 ```

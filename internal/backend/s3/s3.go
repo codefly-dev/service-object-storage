@@ -60,6 +60,9 @@ type Backend struct {
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	const op = "s3.New"
 
+	if cfg.HTTPClient != nil {
+		return newBound(cfg), nil
+	}
 	optFns := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 	}
@@ -92,6 +95,35 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		probe:      cfg.Strategy(),
 		probeKey:   cfg.ProbeKey,
 	}, nil
+}
+
+// newBound opens an S3 backend for one bound call. It is built from explicit
+// options, not LoadDefaultConfig, so no shared config file, environment
+// variable or ambient credential of the gateway's reaches the caller's store.
+func newBound(cfg backend.Config) *Backend {
+	creds := credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")
+	client := s3.New(s3.Options{
+		Region:       cfg.Region,
+		Credentials:  creds,
+		HTTPClient:   cfg.HTTPClient,
+		UsePathStyle: cfg.UsePathStyle,
+		BaseEndpoint: func() *string {
+			if cfg.Endpoint == "" {
+				return nil
+			}
+			return aws.String(cfg.Endpoint)
+		}(),
+	})
+	return &Backend{
+		client:   client,
+		uploader: manager.NewUploader(client),
+		presign:  s3.NewPresignClient(client),
+		creds:    creds,
+		bucket:   cfg.Bucket,
+		endpoint: cfg.Endpoint,
+		probe:    cfg.Strategy(),
+		probeKey: cfg.ProbeKey,
+	}
 }
 
 // Name reports the backend kind.
@@ -174,6 +206,15 @@ func mapErr(op string, err error) error {
 		return nil
 	}
 
+	var apiErr smithy.APIError
+	code := ""
+	if errors.As(err, &apiErr) {
+		code = apiErr.ErrorCode()
+	}
+	if code == "NoSuchBucket" {
+		return serr.BucketNotFound(op, err)
+	}
+
 	var nsk *types.NoSuchKey
 	var nf *types.NotFound
 	if errors.As(err, &nsk) || errors.As(err, &nf) {
@@ -183,14 +224,8 @@ func mapErr(op string, err error) error {
 	// HTTP status, when available, is the most reliable signal for conditionals.
 	status := httpStatus(err)
 
-	var apiErr smithy.APIError
-	code := ""
-	if errors.As(err, &apiErr) {
-		code = apiErr.ErrorCode()
-	}
-
 	switch {
-	case code == "NoSuchKey", code == "NoSuchBucket", code == "NotFound", status == 404:
+	case code == "NoSuchKey", code == "NotFound", status == 404:
 		return serr.Wrap(serr.NotFound, op, err)
 	case status == 304, code == "NotModified":
 		return serr.Wrap(serr.NotModified, op, err)
@@ -433,6 +468,13 @@ func (b *Backend) List(ctx context.Context, opts backend.ListOptions) (*backend.
 	out, err := b.client.ListObjectsV2(ctx, in)
 	if err != nil {
 		return nil, mapErr(op, err)
+	}
+	// A page the store marks truncated but gives no way to continue is an
+	// incomplete listing. Read as a last page it would make every key past it
+	// look absent — deleted, to a caller that diffs listings — so it is refused.
+	if aws.ToBool(out.IsTruncated) && aws.ToString(out.NextContinuationToken) == "" {
+		return nil, serr.New(serr.Internal, op, "incomplete listing: the store marked the page truncated but sent no continuation token").
+			WithReason(serr.ReasonListingIncomplete, nil)
 	}
 
 	res := &backend.ListResult{}

@@ -86,6 +86,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 				return err
 			}
 			s.GrpcEndpoint = endpoint
+			s.TenantStoreEndpoint = resolveTenantStoreEndpoint(ctx, endpoints)
 			return nil
 		},
 	})
@@ -135,6 +136,11 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	s.Base.SetDockerImage(gatewayImage)
+	// The tenant-store endpoint is the local MinIO, and a deployment starts
+	// none: rendering it would publish an address nothing serves.
+	if s.TenantStoreEndpoint != nil {
+		return s.Builder.DeployError(fmt.Errorf("endpoint %q serves the MinIO a local run starts; a deployment runs none, so a service declaring it cannot be deployed", tenantStoreEndpointName))
+	}
 
 	// Resolve the effective backend and credentials from the deployment
 	// configuration; without this the template only ever sees the zero-value
