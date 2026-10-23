@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"time"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
@@ -23,9 +24,24 @@ const (
 	maxBoundListLimit   = 1000
 )
 
+// boundOperationTimeout bounds each bound operation end to end — a List, a
+// Stat, a Get, a Capabilities, each GetMany item — body included, so a store
+// that sends headers and then stalls cannot hold the caller. A variable only
+// so a test can shorten it.
+var boundOperationTimeout = 30 * time.Second
+
 // bindableKinds are the backends a binding may name: every registered kind
 // that reaches a remote store. "mem" holds nothing a caller could bind to.
 var bindableKinds = map[string]bool{"s3": true, "minio": true, "gcs": true, "azure": true}
+
+// operation returns the context one operation of the call runs under: a
+// bound call's carries boundOperationTimeout; an unbound call's is ctx.
+func (c *call) operation(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.secrets == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, boundOperationTimeout)
+}
 
 // call is the backend one RPC runs against, and how that RPC's errors leave
 // the gateway. Release closes a bound backend and its connections, so neither
@@ -76,13 +92,20 @@ func (c *call) err(err error) error {
 		return err
 	}
 	code := serr.CodeOf(err)
-	if errors.Is(err, egress.ErrNonPublicDestination) || (c.guard != nil && c.guard.Refused()) {
-		code = serr.PermissionDenied
-	}
 	op, msg := "binding", err.Error()
 	var coded *serr.Error
 	if errors.As(err, &coded) && coded.Err != nil {
 		op, msg = coded.Op, coded.Err.Error()
+	}
+	switch {
+	case errors.Is(err, egress.ErrNonPublicDestination) || (c.guard != nil && c.guard.Refused()):
+		code = serr.PermissionDenied
+	case errors.Is(err, egress.ErrResponseTooLarge) || (c.guard != nil && c.guard.TooLarge()):
+		code = serr.TooLarge
+		msg = fmt.Sprintf("a response from the store exceeded %d bytes; refused: %s", maxBoundObjectBytes, msg)
+	case errors.Is(err, context.DeadlineExceeded):
+		code = serr.Unavailable
+		msg = fmt.Sprintf("the store did not complete the operation within %s: %s", boundOperationTimeout, msg)
 	}
 	secrets := c.secrets
 	if c.guard != nil {
@@ -174,7 +197,7 @@ func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Comp
 			}
 		}
 	}
-	guard := egress.NewGuard(admission)
+	guard := egress.NewGuard(admission, maxBoundObjectBytes+1)
 	cfg.HTTPClient = guard.Client
 	return cfg, guard, nil
 }

@@ -104,7 +104,7 @@ func TestGuardRefusesEveryNonPublicDialAndRecordsIt(t *testing.T) {
 	}
 	t.Cleanup(func() { dialGuard = saved })
 
-	guard := NewGuard(Admission{})
+	guard := NewGuard(Admission{}, 0)
 	if _, err := guard.Client.Get(srv.URL); !errors.Is(err, ErrNonPublicDestination) {
 		t.Fatalf("dial to %s = %v, want ErrNonPublicDestination", srv.URL, err)
 	}
@@ -130,7 +130,7 @@ func TestComposedRedirectToAnotherPortIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Qualify(composed %s) = %v", name, err)
 	}
-	if _, err := NewGuard(admission).Client.Get("http://" + name); !errors.Is(err, ErrNonPublicDestination) {
+	if _, err := NewGuard(admission, 0).Client.Get("http://" + name); !errors.Is(err, ErrNonPublicDestination) {
 		t.Fatalf("redirect to %s = %v, want ErrNonPublicDestination", target.URL, err)
 	}
 	if redirected.Load() != 1 {
@@ -160,7 +160,7 @@ func TestReviewRedirectAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	guard := NewGuard(admission)
+	guard := NewGuard(admission, 0)
 	defer guard.Client.CloseIdleConnections()
 	if _, err := guard.Client.Get("http://" + name); !errors.Is(err, ErrNonPublicDestination) {
 		t.Fatalf("redirect to the alias = %v, want ErrNonPublicDestination", err)
@@ -186,7 +186,7 @@ func TestComposedEndpointIsTheOnlyNonPublicAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Qualify(composed %s) = %v", name, err)
 	}
-	resp, err := NewGuard(admission).Client.Get("http://" + name)
+	resp, err := NewGuard(admission, 0).Client.Get("http://" + name)
 	if err != nil {
 		t.Fatalf("composed %s: %v", name, err)
 	}

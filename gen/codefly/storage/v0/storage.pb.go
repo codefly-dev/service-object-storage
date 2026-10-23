@@ -460,7 +460,15 @@ func (x *ByteRange) GetLength() int64 {
 // redirect — and an address that is not on the public internet is refused
 // with PERMISSION_DENIED. A named endpoint is resolved and judged before the
 // first dial as well, so the refusal names it. Bound reads are capped: see
-// BackendCapabilities.max_object_bytes and max_list_limit.
+// BackendCapabilities.max_object_bytes and max_list_limit; every response a
+// store sends a bound call is bounded to max_object_bytes, and each bound
+// operation (a List, Stat, Get, or GetMany item) must complete within 30
+// seconds, body included, or fails UNAVAILABLE.
+//
+// A bound List never answers an incomplete listing as complete: a page the
+// store marks truncated without a continuation token, or one with more
+// entries than the page asked for, fails the call. An empty next_page_token
+// on a successful page means the listing is complete.
 type Binding struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// kind is a registered remote backend: "s3", "minio", "gcs" or "azure".
@@ -474,8 +482,12 @@ type Binding struct {
 	Region string `protobuf:"bytes,3,opt,name=region,proto3" json:"region,omitempty"`
 	// bucket is the bucket (S3, MinIO, GCS) or container (Azure).
 	Bucket string `protobuf:"bytes,4,opt,name=bucket,proto3" json:"bucket,omitempty"`
-	// prefix confines the call to keys under it, exactly as SOS_PREFIX does for
-	// the configured bucket: keys in requests and results are relative to it.
+	// prefix confines the call to keys under it, and keys in requests and
+	// results are relative to it. It is a literal key prefix, used exactly as
+	// written: "/reports/" lists keys beginning "/reports/", "/" is not the
+	// whole bucket, "reports" also matches "reports-2024/…". (Unlike SOS_PREFIX,
+	// which the gateway normalizes for its own bucket, a bound read's scope is
+	// never rewritten: its result can authorize deletions.)
 	Prefix string `protobuf:"bytes,5,opt,name=prefix,proto3" json:"prefix,omitempty"`
 	// credential authenticates this call. It is required: a bound call never
 	// falls back to the gateway's own identity.

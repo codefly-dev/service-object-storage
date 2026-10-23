@@ -40,6 +40,9 @@ const (
 	// "no answer", which is what a caller branches on; the message distinguishes
 	// them.
 	Unavailable
+	// TooLarge means a response or object exceeds a bound the gateway holds a
+	// store to. Unlike Throttled, retrying does not help.
+	TooLarge
 )
 
 func (c Code) String() string {
@@ -60,6 +63,8 @@ func (c Code) String() string {
 		return "Throttled"
 	case InvalidArgument:
 		return "InvalidArgument"
+	case TooLarge:
+		return "TooLarge"
 	case Unavailable:
 		return "Unavailable"
 	default:

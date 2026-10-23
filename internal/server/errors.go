@@ -32,6 +32,8 @@ func toStatus(err error) error {
 		c = codes.InvalidArgument
 	case serr.Unavailable:
 		c = codes.Unavailable
+	case serr.TooLarge:
+		c = codes.ResourceExhausted
 	default:
 		c = codes.Internal
 	}

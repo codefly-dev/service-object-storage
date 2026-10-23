@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -64,6 +65,8 @@ func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storage
 		return nil, toStatus(err)
 	}
 	defer c.Release()
+	ctx, cancel := c.operation(ctx)
+	defer cancel()
 	info, err := c.Stat(ctx, req.GetKey(), req.GetVersionId())
 	if err != nil {
 		return nil, toStatus(c.err(err))
@@ -86,7 +89,9 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 		return toStatus(err)
 	}
 	defer c.Release()
-	res, err := c.Get(stream.Context(), req.GetKey(), toBackendGetOptions(req))
+	ctx, cancel := c.operation(stream.Context())
+	defer cancel()
+	res, err := c.Get(ctx, req.GetKey(), toBackendGetOptions(req))
 	if err != nil {
 		return toStatus(c.err(err))
 	}
@@ -143,7 +148,9 @@ func getManyItem(stream storagev0.ObjectStorage_GetManyServer, c *call, index in
 	sendHeader := func() error {
 		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Header{Header: header}})
 	}
-	res, err := c.Get(stream.Context(), item.GetKey(), backend.GetOptions{IfMatch: item.GetIfMatch()})
+	ctx, cancel := c.operation(stream.Context())
+	defer cancel()
+	res, err := c.Get(ctx, item.GetKey(), backend.GetOptions{IfMatch: item.GetIfMatch()})
 	if err != nil {
 		switch {
 		case errors.Is(err, serr.ErrBucketNotFound):
@@ -313,6 +320,8 @@ func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storage
 		return nil, toStatus(err)
 	}
 	defer c.Release()
+	ctx, cancel := c.operation(ctx)
+	defer cancel()
 	limit := req.GetLimit()
 	if req.GetBinding() != nil && (limit <= 0 || limit > maxBoundListLimit) {
 		limit = maxBoundListLimit
@@ -325,6 +334,12 @@ func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storage
 	})
 	if err != nil {
 		return nil, toStatus(c.err(err))
+	}
+	// A store that answers more than it was asked for is not trusted to have
+	// answered the page it was asked for.
+	if n := len(res.Objects) + len(res.CommonPrefixes); req.GetBinding() != nil && n > int(limit) {
+		return nil, toStatus(serr.New(serr.TooLarge, "binding",
+			fmt.Sprintf("the store returned %d entries for a page of at most %d; refusing the over-long listing", n, limit)))
 	}
 	out := &storagev0.ListResult{
 		CommonPrefixes: res.CommonPrefixes,

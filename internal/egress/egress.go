@@ -184,8 +184,10 @@ type Admission struct {
 // SDK in between reported it — some format the dial error into text and drop
 // its identity.
 type Guard struct {
-	Client  *http.Client
-	refused atomic.Bool
+	Client   *http.Client
+	refused  atomic.Bool
+	tooLarge atomic.Bool
+	maxBody  int64
 
 	mu   sync.Mutex
 	sent []string
@@ -193,6 +195,39 @@ type Guard struct {
 
 // Refused reports whether any dial this guard judged was refused.
 func (g *Guard) Refused() bool { return g.refused.Load() }
+
+// TooLarge reports whether any response body ran past the guard's bound.
+func (g *Guard) TooLarge() bool { return g.tooLarge.Load() }
+
+// ErrResponseTooLarge fails the read of a response body that runs past the
+// guard's bound.
+var ErrResponseTooLarge = errors.New("the store's response exceeds the bound")
+
+// boundedBody fails a response body past max bytes. The guard records it,
+// because an SDK decoding the body (a listing's XML) may report the read
+// error as text.
+type boundedBody struct {
+	io.ReadCloser
+	left  int64
+	guard *Guard
+}
+
+func (b *boundedBody) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		var probe [1]byte
+		if n, err := b.ReadCloser.Read(probe[:]); n == 0 {
+			return 0, err
+		}
+		b.guard.tooLarge.Store(true)
+		return 0, ErrResponseTooLarge
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
 
 // Sent is every credential this call put on the wire — the Authorization
 // values, a bearer minted from a key included, which no field of the binding
@@ -235,6 +270,9 @@ func (t *redacting) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil || resp == nil {
 		return resp, err
 	}
+	if t.guard.maxBody > 0 && resp.Body != nil {
+		resp.Body = &boundedBody{ReadCloser: resp.Body, left: t.guard.maxBody, guard: t.guard}
+	}
 	sent := t.guard.Sent()
 	if len(sent) == 0 {
 		return resp, nil
@@ -267,15 +305,17 @@ func Redact(text string, secrets []string) string {
 	return text
 }
 
-// NewGuard returns the guarded client for one bound call. Every dial is judged
+// NewGuard returns the guarded client for one bound call. Every response body
+// it reads is bounded to maxBody bytes (0 means unbounded): a store cannot make
+// the gateway hold more than that, whatever it sends. Every dial is judged
 // against the concrete address being connected to. The composed exception
 // applies only to a dial for the admitted authority — the host:port the
 // transport was asked to reach — and only at its admitted addresses; any other
 // dial must reach a public address. The client never uses a proxy: a proxy
 // would make the guard judge the proxy's address instead of the destination's.
 // The caller closes idle connections when the call returns.
-func NewGuard(admission Admission) *Guard {
-	g := &Guard{}
+func NewGuard(admission Admission, maxBody int64) *Guard {
+	g := &Guard{maxBody: maxBody}
 	dial := func(ctx context.Context, network, authority string) (net.Conn, error) {
 		exception := admission.authority != "" && canonicalAuthority(authority) == admission.authority
 		dialer := &net.Dialer{

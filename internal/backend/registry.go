@@ -26,6 +26,12 @@ func Register(kind string, c Constructor) {
 // Open constructs the backend named by cfg.Kind. A configured cfg.Prefix is
 // applied here, once, for every kind: the backend implementation sees full
 // object keys and the caller sees keys relative to the prefix.
+//
+// The gateway's own SOS_PREFIX is normalized (see NormalizePrefix). A bound
+// call's prefix (cfg.HTTPClient set) is a literal key prefix, exactly as the
+// caller wrote it: "/reports/" lists keys beginning "/reports/", and "/" is
+// not the whole bucket. A bound read's result can authorize deletions, so its
+// scope is never rewritten.
 func Open(ctx context.Context, cfg Config) (Backend, error) {
 	mu.RLock()
 	c, ok := registry[cfg.Kind]
@@ -33,9 +39,12 @@ func Open(ctx context.Context, cfg Config) (Backend, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown backend kind %q (registered: %v)", cfg.Kind, Registered())
 	}
-	prefix, err := NormalizePrefix(cfg.Prefix)
-	if err != nil {
-		return nil, err
+	prefix := cfg.Prefix
+	if cfg.HTTPClient == nil {
+		var err error
+		if prefix, err = NormalizePrefix(cfg.Prefix); err != nil {
+			return nil, err
+		}
 	}
 	if prefix != "" && cfg.ProbeKey != "" {
 		// The stat probe heads a real object key; keep it inside the prefix so

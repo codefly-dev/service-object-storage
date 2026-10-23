@@ -117,8 +117,26 @@ ListRequest { prefix: "", limit: 0,
   (`max_object_bytes`, `max_list_limit`), the bound kind and whether it has
   `versions`. It reports only the read surface, because a bound call cannot
   write or presign.
-- Keys are relative to the binding's `prefix`, exactly as `SOS_PREFIX` works
-  for the configured bucket.
+- **Prefix.** Keys are relative to the binding's `prefix`, which is a
+  **literal key prefix**, used exactly as written: `/reports/` lists keys
+  beginning `/reports/`, `/` is not the whole bucket, and `reports` also
+  matches `reports-2024/…`. `SOS_PREFIX` normalizes the gateway's own prefix;
+  a bound read's scope is never rewritten, because its result can authorize
+  deletions.
+- **Complete listings only.** A bound `List` never answers an incomplete
+  listing as complete:
+  - A page the store marks truncated without a continuation token fails the
+    call, saying the listing is incomplete.
+  - So does a page with more entries than it asked for.
+  - An empty `next_page_token` on a successful page means the listing is
+    complete.
+- **Bounds.**
+  - Every response a store sends a bound call is bounded to 5 MiB; a longer
+    one, a listing included, fails with `RESOURCE_EXHAUSTED`.
+  - Each bound operation (a `List`, `Stat`, `Get`, or each `GetMany` item)
+    must complete within 30 seconds, body included, or fails with
+    `UNAVAILABLE`. A store that sends headers and then stalls cannot hold the
+    caller.
 - **Batched reads.** `GetMany` takes up to `max_get_many_items` (1,000) keys,
   each with the ETag the caller listed as `if_match`, and streams them in
   request order in one call. Each item gets a header with its `index` and an

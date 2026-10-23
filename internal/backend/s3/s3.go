@@ -469,6 +469,12 @@ func (b *Backend) List(ctx context.Context, opts backend.ListOptions) (*backend.
 	if err != nil {
 		return nil, mapErr(op, err)
 	}
+	// A page the store marks truncated but gives no way to continue is an
+	// incomplete listing. Read as a last page it would make every key past it
+	// look absent — deleted, to a caller that diffs listings — so it is refused.
+	if aws.ToBool(out.IsTruncated) && aws.ToString(out.NextContinuationToken) == "" {
+		return nil, serr.New(serr.Internal, op, "incomplete listing: the store marked the page truncated but sent no continuation token")
+	}
 
 	res := &backend.ListResult{}
 	for _, o := range out.Contents {
