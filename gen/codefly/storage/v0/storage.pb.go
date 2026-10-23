@@ -561,6 +561,7 @@ type Credential struct {
 	//
 	//	*Credential_AccessKey
 	//	*Credential_ServiceAccountKey
+	//	*Credential_AccessToken
 	Kind          isCredential_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -621,6 +622,15 @@ func (x *Credential) GetServiceAccountKey() []byte {
 	return nil
 }
 
+func (x *Credential) GetAccessToken() string {
+	if x != nil {
+		if x, ok := x.Kind.(*Credential_AccessToken); ok {
+			return x.AccessToken
+		}
+	}
+	return ""
+}
+
 type isCredential_Kind interface {
 	isCredential_Kind()
 }
@@ -637,9 +647,20 @@ type Credential_ServiceAccountKey struct {
 	ServiceAccountKey []byte `protobuf:"bytes,2,opt,name=service_account_key,json=serviceAccountKey,proto3,oneof"`
 }
 
+type Credential_AccessToken struct {
+	// access_token is a short-lived OAuth2 access token, for "gcs": the
+	// bearer for this one call, minted by the caller (for example by service
+	// account impersonation) where keys are forbidden. The gateway sends it
+	// as is — no refresh, no exchange — so an expired token is refused by the
+	// store, with the store's answer, as PERMISSION_DENIED.
+	AccessToken string `protobuf:"bytes,3,opt,name=access_token,json=accessToken,proto3,oneof"`
+}
+
 func (*Credential_AccessKey) isCredential_Kind() {}
 
 func (*Credential_ServiceAccountKey) isCredential_Kind() {}
+
+func (*Credential_AccessToken) isCredential_Kind() {}
 
 type AccessKey struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2762,12 +2783,13 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"\x06prefix\x18\x05 \x01(\tR\x06prefix\x12>\n" +
 	"\n" +
 	"credential\x18\x06 \x01(\v2\x1e.codefly.storage.v0.CredentialR\n" +
-	"credential\"\x8b\x01\n" +
+	"credential\"\xb5\x01\n" +
 	"\n" +
 	"Credential\x12>\n" +
 	"\n" +
 	"access_key\x18\x01 \x01(\v2\x1d.codefly.storage.v0.AccessKeyH\x00R\taccessKey\x125\n" +
-	"\x13service_account_key\x18\x02 \x01(\fB\x03\x80\x01\x01H\x00R\x11serviceAccountKeyB\x06\n" +
+	"\x13service_account_key\x18\x02 \x01(\fB\x03\x80\x01\x01H\x00R\x11serviceAccountKey\x12(\n" +
+	"\faccess_token\x18\x03 \x01(\tB\x03\x80\x01\x01H\x00R\vaccessTokenB\x06\n" +
 	"\x04kind\"8\n" +
 	"\tAccessKey\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
@@ -3096,6 +3118,7 @@ func file_codefly_storage_v0_storage_proto_init() {
 	file_codefly_storage_v0_storage_proto_msgTypes[3].OneofWrappers = []any{
 		(*Credential_AccessKey)(nil),
 		(*Credential_ServiceAccountKey)(nil),
+		(*Credential_AccessToken)(nil),
 	}
 	file_codefly_storage_v0_storage_proto_msgTypes[7].OneofWrappers = []any{
 		(*GetResponse_Header)(nil),

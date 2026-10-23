@@ -63,7 +63,7 @@ func TestEveryBindableBackendSendsThroughTheBoundClient(t *testing.T) {
 		{Kind: "s3", Endpoint: "https://s3.tenant.example", AccessKey: "id", SecretKey: "secret"},
 		{Kind: "minio", Endpoint: "https://minio.tenant.example", AccessKey: "id", SecretKey: "secret"},
 		{Kind: "azure", Endpoint: "https://azure.tenant.example/", AzureAccount: "acct", AzureKey: "c2VjcmV0"},
-		{Kind: "gcs", Endpoint: "https://gcs.tenant.example/storage/v1/", GCSCredentialsJSON: serviceAccountKey(t, "https://token.tenant.example/token")},
+		{Kind: "gcs", Endpoint: "https://gcs.tenant.example", GCSCredentialsJSON: serviceAccountKey(t, "https://token.tenant.example/token")},
 	}
 	require.Len(t, cases, len(bindableKinds))
 	for _, cfg := range cases {

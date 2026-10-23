@@ -18,7 +18,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"testing"
+	"time"
 
 	miniogo "github.com/minio/minio-go/v7"
 	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
@@ -31,6 +33,7 @@ import (
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/egress"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
@@ -79,10 +82,14 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 	})
 	require.NoError(t, err)
 	hub := events.NewHub()
+	// The MinIO is on loopback, so a bound call can reach it only as a
+	// composed endpoint; the configured-bucket tests never consult this.
+	composed, err := egress.ParseComposed(endpoint)
+	require.NoError(t, err)
 
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)).AdmitComposed(composed))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
@@ -196,4 +203,56 @@ func TestMinIOConditionalDelete(t *testing.T) {
 	require.NoError(t, err)
 	_, rerr := st.Recv()
 	require.Equal(t, codes.NotFound, status.Code(rerr), "object must be gone after a matching conditional delete")
+}
+
+// TestMinIOBoundGetMany lists and batch-reads the same MinIO through a
+// per-call binding: the ETags MinIO lists are accepted back as if_match, the
+// batch comes back in request order, and a stale ETag is CHANGED.
+func TestMinIOBoundGetMany(t *testing.T) {
+	c := newStack(t)
+	ctx := context.Background()
+	prefix := "bound-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "/"
+	for _, key := range []string{"a.md", "b.md"} {
+		_, err := put(t, c, prefix+key, []byte("# "+key), nil)
+		require.NoError(t, err)
+	}
+	binding := &storagev0.Binding{Kind: "minio", Endpoint: "http://" + mustEnv(t, "MINIO_ENDPOINT"),
+		Bucket: mustEnv(t, "MINIO_BUCKET"), Prefix: prefix,
+		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{
+			Id: mustEnv(t, "MINIO_ACCESS_KEY"), Secret: mustEnv(t, "MINIO_SECRET_KEY")}}}}
+
+	lr, err := c.List(ctx, &storagev0.ListRequest{Binding: binding})
+	require.NoError(t, err)
+	etags := map[string]string{}
+	for _, o := range lr.GetObjects() {
+		etags[o.GetKey()] = o.GetEtag()
+	}
+	require.Len(t, etags, 2)
+
+	ms, err := c.GetMany(ctx, &storagev0.GetManyRequest{Binding: binding, Items: []*storagev0.GetManyItem{
+		{Key: "b.md", IfMatch: etags["b.md"]},
+		{Key: "a.md", IfMatch: "stale"},
+		{Key: "a.md", IfMatch: etags["a.md"]},
+	}})
+	require.NoError(t, err)
+	var outcomes []storagev0.GetManyOutcome
+	var payloads []string
+	for {
+		msg, rerr := ms.Recv()
+		if rerr == io.EOF {
+			break
+		}
+		require.NoError(t, rerr)
+		if h := msg.GetHeader(); h != nil {
+			outcomes, payloads = append(outcomes, h.GetOutcome()), append(payloads, "")
+			continue
+		}
+		payloads[len(payloads)-1] += string(msg.GetData())
+	}
+	require.Equal(t, []storagev0.GetManyOutcome{
+		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
+		storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED,
+		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
+	}, outcomes)
+	require.Equal(t, []string{"# b.md", "", "# a.md"}, payloads)
 }

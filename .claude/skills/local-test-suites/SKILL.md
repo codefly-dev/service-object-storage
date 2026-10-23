@@ -40,12 +40,19 @@ repo, because Docker Hub and quay.io no longer serve MinIO anonymously. It is
 the image the agent's Runtime pins, so the suite and the Runtime exercise one
 MinIO version.
 
-Six tests run: `TestMinIOFullStack`, `TestMinIOConditionalDelete`,
-`TestProbeAgainstLiveMinIO` (whose subtests cover granted access, a missing
-bucket and refused credentials for both probe strategies), and against
-fake-gcs-server `TestGCSFullStack`, `TestGCSPrefixConfinesKeys` and
-`TestGCSProbe`. The emulator accepts any caller, so the GCS tests prove the
-keyless client path and the prefix, never Workload Identity or a bucket grant.
+Eight tests run:
+- Against MinIO: `TestMinIOFullStack`, `TestMinIOConditionalDelete`,
+  `TestMinIOBoundGetMany` (a per-call binding to the same MinIO, admitted as a
+  composed endpoint), and `TestProbeAgainstLiveMinIO`. The probe test's
+  subtests cover granted access, a missing bucket and refused credentials for
+  both probe strategies.
+- Against fake-gcs-server: `TestGCSFullStack`, `TestGCSPrefixConfinesKeys`,
+  `TestGCSProbe` and `TestGCSBoundAccessToken` (bound List/Stat/Get/GetMany
+  with an access-token credential).
+
+The emulator accepts any caller, so the GCS tests prove the keyless client
+path, the prefix and that a bearer-token binding reaches the store. They never
+prove Workload Identity, a bucket grant or token validity.
 
 ## Proving the run happened
 
@@ -60,7 +67,7 @@ ok  	github.com/codefly-dev/service-object-storage/internal/integration	0.391s  
 So `ok` is not a result. Count what passed:
 
 ```bash
-go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 6
+go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- PASS'   # expect 8
 go test -tags integration -count=1 -v ./internal/integration/... 2>&1 | grep -c '^--- SKIP'   # expect 0
 ```
 

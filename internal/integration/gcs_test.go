@@ -20,6 +20,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"testing"
@@ -35,6 +36,8 @@ import (
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
+	"github.com/codefly-dev/service-object-storage/internal/egress"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/probetest"
 	"github.com/codefly-dev/service-object-storage/internal/server"
@@ -174,4 +177,104 @@ func TestGCSProbe(t *testing.T) {
 		t.Cleanup(func() { _ = be.Close() })
 		require.Error(t, be.Probe(ctx))
 	})
+}
+
+// TestGCSBoundAccessToken reads a bucket through a per-call binding whose
+// credential is an OAuth2 access token — the kind a deployment that forbids
+// service-account keys mints by impersonation. The emulator is admitted as a
+// composed endpoint (it is on loopback), and STORAGE_EMULATOR_HOST is cleared
+// for the bound calls so the binding alone decides where the client goes.
+// What it cannot prove: the emulator accepts any bearer, so token validity is
+// exercised by the server package's 401 test, not here.
+func TestGCSBoundAccessToken(t *testing.T) {
+	raw, bucket := gcsEmulator(t)
+	ctx := context.Background()
+	host := os.Getenv("STORAGE_EMULATOR_HOST")
+	prefix := "bound-" + time.Now().Format("150405.000000") + "/"
+	for _, key := range []string{"a.md", "sub/b.md"} {
+		w := raw.Bucket(bucket).Object(prefix + key).NewWriter(ctx)
+		w.ContentType = "text/markdown"
+		_, err := w.Write([]byte("# " + key))
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		t.Cleanup(func() { _ = raw.Bucket(bucket).Object(prefix + key).Delete(context.Background()) })
+	}
+	t.Setenv("STORAGE_EMULATOR_HOST", "")
+
+	composed, err := egress.ParseComposed(host)
+	require.NoError(t, err)
+	be, err := mem.New(ctx, backend.Config{})
+	require.NoError(t, err)
+	hub := events.NewHub()
+	lis := bufconn.Listen(1 << 20)
+	s := grpc.NewServer()
+	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)).AdmitComposed(composed))
+	go func() { _ = s.Serve(lis) }()
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close() })
+	c := storagev0.NewObjectStorageClient(conn)
+
+	binding := &storagev0.Binding{Kind: "gcs", Endpoint: "http://" + host, Bucket: bucket, Prefix: prefix,
+		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessToken{AccessToken: "ya29.impersonated"}}}
+
+	lr, err := c.List(ctx, &storagev0.ListRequest{Binding: binding})
+	require.NoError(t, err)
+	var keys []string
+	for _, o := range lr.GetObjects() {
+		keys = append(keys, o.GetKey())
+	}
+	require.ElementsMatch(t, []string{"a.md", "sub/b.md"}, keys)
+
+	hdr, err := c.Stat(ctx, &storagev0.StatRequest{Key: "sub/b.md", Binding: binding})
+	require.NoError(t, err)
+	require.EqualValues(t, len("# sub/b.md"), hdr.GetInfo().GetSize())
+
+	st, err := c.Get(ctx, &storagev0.GetRequest{Key: "a.md", Binding: binding})
+	require.NoError(t, err)
+	var body []byte
+	for {
+		msg, rerr := st.Recv()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		require.NoError(t, rerr)
+		body = append(body, msg.GetData()...)
+	}
+	require.Equal(t, "# a.md", string(body))
+
+	// GetMany at the listed ETags: both delivered, in request order; a stale
+	// ETag is CHANGED on GCS too.
+	etags := map[string]string{}
+	for _, o := range lr.GetObjects() {
+		etags[o.GetKey()] = o.GetEtag()
+	}
+	ms, err := c.GetMany(ctx, &storagev0.GetManyRequest{Binding: binding, Items: []*storagev0.GetManyItem{
+		{Key: "sub/b.md", IfMatch: etags["sub/b.md"]},
+		{Key: "a.md", IfMatch: "stale"},
+		{Key: "a.md", IfMatch: etags["a.md"]},
+	}})
+	require.NoError(t, err)
+	var outcomes []storagev0.GetManyOutcome
+	var payloads []string
+	for {
+		msg, rerr := ms.Recv()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		require.NoError(t, rerr)
+		if h := msg.GetHeader(); h != nil {
+			outcomes, payloads = append(outcomes, h.GetOutcome()), append(payloads, "")
+			continue
+		}
+		payloads[len(payloads)-1] += string(msg.GetData())
+	}
+	require.Equal(t, []storagev0.GetManyOutcome{
+		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
+		storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED,
+		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
+	}, outcomes)
+	require.Equal(t, []string{"# sub/b.md", "", "# a.md"}, payloads)
 }

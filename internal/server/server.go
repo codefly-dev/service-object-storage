@@ -375,11 +375,11 @@ func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRe
 	defer release()
 	caps := be.Capabilities()
 	if req.GetBinding() != nil {
-		// A bound call reaches only Stat, Get and List, so only the read
+		// A bound call reaches only Stat, Get, GetMany and List, so only the read
 		// surface is reported: no write, presign or native verb is reachable.
 		return &storagev0.BackendCapabilities{
-			Backend:        caps.Backend,
-			Versions:       caps.Versions,
+			Backend:         caps.Backend,
+			Versions:        caps.Versions,
 			MaxObjectBytes:  maxBoundObjectBytes,
 			MaxListLimit:    maxBoundListLimit,
 			MaxGetManyItems: maxGetManyItems,

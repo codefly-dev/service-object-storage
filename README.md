@@ -68,13 +68,21 @@ ListRequest { prefix: "", limit: 0,
   returns. It does not store, log or return the credential, and the credential
   fields are marked `debug_redact`. The caller decrypts the credential for the
   call, as it would for an in-process client.
-- **Only the binding's credential is used.** `s3`/`minio` take an access key,
-  `azure` takes the account name and shared key in the same `access_key`, and
-  `gcs` takes a service-account JSON key. Google keys of any other type are
-  refused, because an external-account key names a local file or command as
-  its token source. A missing credential is `INVALID_ARGUMENT`. The call never
-  falls back to the gateway's own identity, which would lend the caller the
-  gateway's grants.
+- **Only the binding's credential is used.** Each kind takes one credential,
+  set in `Credential`:
+
+  | Kind | Credential | Notes |
+  |------|------------|-------|
+  | `s3`, `minio` | `access_key` { `id`, `secret` } | access key id and secret access key; SigV4, path-style |
+  | `azure` | `access_key` { `id`, `secret` } | storage account name and shared account key |
+  | `gcs` | `service_account_key` | a Google service-account JSON key, type `service_account` only. An external-account key is refused, because it names a local file or command as its token source. |
+  | `gcs` | `access_token` | a short-lived OAuth2 access token, for organisations that forbid service-account keys (`constraints/iam.disableServiceAccountKeyCreation`). The caller mints it outside the gateway, for example `gcloud auth print-access-token --impersonate-service-account=…` (1-hour lifetime). The gateway sends it as the bearer for that one call, as is: no refresh and no exchange. An expired or revoked token gets the store's own 401 back as `PERMISSION_DENIED`. |
+
+  A missing credential is `INVALID_ARGUMENT` and nothing is dialed. The call
+  never falls back to the gateway's own identity (AWS default chain, ADC,
+  `DefaultAzureCredential`), which would lend the caller the gateway's grants.
+  `secret`, `service_account_key` and `access_token` are marked `debug_redact`
+  and never logged.
 - **The public-destination guard.** A binding's endpoint is supplied by the
   caller, so it is an egress the gateway must not let reach its own network.
   Every dial a bound call makes, including the token exchange of a GCS key, is

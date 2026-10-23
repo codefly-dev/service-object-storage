@@ -16,14 +16,16 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
-	"google.golang.org/api/googleapi"
-	"google.golang.org/api/iterator"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
 	"github.com/codefly-dev/service-object-storage/internal/backend"
@@ -82,15 +84,28 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // source, which would let a caller read the gateway's filesystem. The token
 // exchange runs through cfg.HTTPClient too, because the key names its own
 // token endpoint.
+//
+// An access token is the bearer as is: a static source, so nothing refreshes or
+// exchanges it, over the same guarded transport.
 func boundOptions(ctx context.Context, cfg backend.Config) ([]option.ClientOption, error) {
-	jwt, err := google.JWTConfigFromJSON(cfg.GCSCredentialsJSON, storage.ScopeReadOnly)
-	if err != nil {
-		return nil, serr.Wrap(serr.InvalidArgument, "gcs.New", err)
+	var client *http.Client
+	if cfg.GCSAccessToken != "" {
+		client = &http.Client{Transport: &oauth2.Transport{
+			Source: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.GCSAccessToken, TokenType: "Bearer"}),
+			Base:   cfg.HTTPClient.Transport,
+		}}
+	} else {
+		jwt, err := google.JWTConfigFromJSON(cfg.GCSCredentialsJSON, storage.ScopeReadOnly)
+		if err != nil {
+			return nil, serr.Wrap(serr.InvalidArgument, "gcs.New", err)
+		}
+		client = jwt.Client(context.WithValue(ctx, oauth2.HTTPClient, cfg.HTTPClient))
 	}
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, cfg.HTTPClient)
-	opts := []option.ClientOption{option.WithHTTPClient(jwt.Client(ctx))}
+	opts := []option.ClientOption{option.WithHTTPClient(client)}
 	if cfg.Endpoint != "" {
-		opts = append(opts, option.WithEndpoint(cfg.Endpoint))
+		// A binding's endpoint is a bare origin; the JSON API lives under
+		// /storage/v1/ on it, as it does on storage.googleapis.com.
+		opts = append(opts, option.WithEndpoint(strings.TrimSuffix(cfg.Endpoint, "/")+"/storage/v1/"))
 	}
 	return opts, nil
 }
@@ -445,7 +460,7 @@ func mapErr(op string, err error) error {
 		switch gerr.Code {
 		case 304:
 			return serr.Wrap(serr.NotModified, op, err)
-		case 403:
+		case 401, 403: // 401: a bearer the store does not accept (expired, revoked)
 			return serr.Wrap(serr.PermissionDenied, op, err)
 		case 404:
 			return serr.Wrap(serr.NotFound, op, err)

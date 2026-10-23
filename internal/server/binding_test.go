@@ -105,3 +105,43 @@ func TestBoundCallReachesOnlyAComposedNonPublicEndpoint(t *testing.T) {
 	_, err = newTestClient(t).List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(store.URL)})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 }
+
+func gcsTokenBinding(endpoint, token string) *storagev0.Binding {
+	return &storagev0.Binding{
+		Kind: "gcs", Endpoint: endpoint, Bucket: "tenant",
+		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessToken{AccessToken: token}},
+	}
+}
+
+// A gcs access token is sent as the bearer exactly as given — nothing
+// refreshes or exchanges it — so a token the store no longer accepts comes
+// back as the store's own refusal, PERMISSION_DENIED. A missing token is
+// refused before anything is dialed: there is no identity to fall back to.
+func TestBoundGCSAccessTokenIsTheBearerAndTheStoreJudgesIt(t *testing.T) {
+	var bearers []string
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bearers = append(bearers, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":401,"message":"Invalid Credentials","errors":[{"reason":"authError","message":"Invalid Credentials"}]}}`))
+	}))
+	defer store.Close()
+	composed, err := egress.ParseComposed(strings.TrimPrefix(store.URL, "http://"))
+	require.NoError(t, err)
+	be, err := mem.New(context.Background(), backend.Config{})
+	require.NoError(t, err)
+	c := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
+
+	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(store.URL, "ya29.expired")})
+	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
+	require.Contains(t, status.Convert(err).Message(), "Invalid Credentials")
+	require.NotEmpty(t, bearers)
+	for _, bearer := range bearers {
+		require.Equal(t, "Bearer ya29.expired", bearer)
+	}
+
+	seen := len(bearers)
+	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(store.URL, "")})
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
+	require.Len(t, bearers, seen, "a missing token must not reach the store")
+}

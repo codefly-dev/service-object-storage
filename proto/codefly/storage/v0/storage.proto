@@ -95,6 +95,12 @@ message Credential {
     // service_account_key is a Google service-account JSON key, for "gcs".
     // No other Google credential type is accepted.
     bytes service_account_key = 2 [debug_redact = true];
+    // access_token is a short-lived OAuth2 access token, for "gcs": the
+    // bearer for this one call, minted by the caller (for example by service
+    // account impersonation) where keys are forbidden. The gateway sends it
+    // as is — no refresh, no exchange — so an expired token is refused by the
+    // store, with the store's answer, as PERMISSION_DENIED.
+    string access_token = 3 [debug_redact = true];
   }
 }
 

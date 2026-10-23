@@ -79,9 +79,10 @@ func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Comp
 	cred := b.GetCredential()
 	switch b.GetKind() {
 	case "gcs":
-		cfg.GCSCredentialsJSON = cred.GetServiceAccountKey()
-		if len(cfg.GCSCredentialsJSON) == 0 {
-			return backend.Config{}, serr.New(serr.InvalidArgument, op, "kind gcs requires credential.service_account_key")
+		cfg.GCSCredentialsJSON, cfg.GCSAccessToken = cred.GetServiceAccountKey(), cred.GetAccessToken()
+		if len(cfg.GCSCredentialsJSON) == 0 && cfg.GCSAccessToken == "" {
+			return backend.Config{}, serr.New(serr.InvalidArgument, op,
+				"kind gcs requires credential.service_account_key or credential.access_token")
 		}
 	case "azure":
 		cfg.AzureAccount, cfg.AzureKey = cred.GetAccessKey().GetId(), cred.GetAccessKey().GetSecret()
