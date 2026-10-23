@@ -11,6 +11,7 @@ import (
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/egress"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
@@ -34,12 +35,21 @@ type Server struct {
 	be        backend.Backend
 	hub       *events.Hub
 	readiness Readiness
+	composed  egress.Composed
 }
 
 // New builds a Server over be, publishing write events to hub and answering
 // Ready from readiness.
 func New(be backend.Backend, hub *events.Hub, readiness Readiness) *Server {
 	return &Server{be: be, hub: hub, readiness: readiness}
+}
+
+// AdmitComposed sets the composed-dependency endpoints a binding may name
+// although they are not public — see egress.Composed. Without it, a binding
+// reaches only the public internet.
+func (s *Server) AdmitComposed(composed egress.Composed) *Server {
+	s.composed = composed
+	return s
 }
 
 // Stat returns object metadata, honoring conditional headers by comparing the

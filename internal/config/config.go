@@ -12,6 +12,7 @@ import (
 
 	"github.com/codefly-dev/core/callertoken"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/egress"
 )
 
 // Config is the fully resolved server configuration.
@@ -27,6 +28,11 @@ type Config struct {
 	AuthToken string
 	Backend   backend.Config
 	Health    HealthConfig
+	// Composed is SOS_COMPOSED_ENDPOINTS: the endpoints of the service's
+	// composed dependencies, which a binding may name although they are not
+	// public. The agent's Runtime writes it from the dependency network mappings
+	// codefly resolved; it is not an operator setting. See egress.Composed.
+	Composed egress.Composed
 }
 
 // HealthConfig paces the background probe that drives the gRPC health service.
@@ -66,6 +72,11 @@ func FromEnv() (Config, error) {
 	if cfg.Backend.Bucket == "" {
 		return Config{}, fmt.Errorf("SOS_BUCKET is required")
 	}
+	composed, err := egress.ParseComposed(os.Getenv("SOS_COMPOSED_ENDPOINTS"))
+	if err != nil {
+		return Config{}, fmt.Errorf("SOS_COMPOSED_ENDPOINTS: %w", err)
+	}
+	cfg.Composed = composed
 	if err := callertoken.CheckListener(cfg.AuthToken, envBool("SOS_ALLOW_ANONYMOUS", false), callertoken.Listener{
 		TokenVar: "SOS_AUTH_TOKEN", AnonymousVar: "SOS_ALLOW_ANONYMOUS",
 		Exposure: "has bucket-wide read/write/delete/presign",

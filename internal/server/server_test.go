@@ -33,11 +33,17 @@ func newTestClient(t *testing.T) storagev0.ObjectStorageClient {
 
 func newTestClientFor(t *testing.T, be backend.Backend) storagev0.ObjectStorageClient {
 	t.Helper()
+	hub := events.NewHub()
+	t.Cleanup(hub.Close)
+	return newTestClientForServer(t, server.New(be, hub, probetest.Monitor(t, be)))
+}
+
+func newTestClientForServer(t *testing.T, srv *server.Server) storagev0.ObjectStorageClient {
+	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 
-	hub := events.NewHub()
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev0.RegisterObjectStorageServer(s, srv)
 	go func() { _ = s.Serve(lis) }()
 
 	conn, err := grpc.NewClient(
@@ -46,7 +52,7 @@ func newTestClientFor(t *testing.T, be backend.Backend) storagev0.ObjectStorageC
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close() })
+	t.Cleanup(func() { _ = conn.Close(); s.Stop() })
 	return storagev0.NewObjectStorageClient(conn)
 }
 

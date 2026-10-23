@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"syscall"
 	"time"
 
@@ -126,14 +127,49 @@ func guardDial(_, address string, _ syscall.RawConn) error {
 // observe the verdict on every dial.
 var dialGuard = guardDial
 
-// Client returns an HTTP client for one bound call. Its every dial is guarded,
-// and it never uses a proxy: a proxy would make the guard judge the proxy's
-// address instead of the destination's. The caller closes idle connections
-// when the call returns, so nothing outlives it.
-func Client() *http.Client {
+// Composed is the set of endpoints the platform resolved for the gateway's
+// composed dependencies — the services it declares as service-dependencies —
+// as the gateway reaches them. It is the one exception to the public-only rule,
+// and it is exact: an endpoint is admitted only when it is one of these, by
+// name and port, and then only the addresses that name resolves to, on that
+// port. It cannot widen to a range, a host on another port, or a redirect.
+// Nothing in it is chosen by a caller or an operator: the agent writes it from
+// the dependency network mappings codefly hands its Runtime.
+type Composed map[string]bool
+
+// ParseComposed reads a comma-separated list of host:port endpoints.
+func ParseComposed(list string) (Composed, error) {
+	composed := Composed{}
+	for _, entry := range strings.Split(list, ",") {
+		if entry = strings.TrimSpace(entry); entry == "" {
+			continue
+		}
+		origin, err := urlguard.NormalizeOrigin("http://" + entry)
+		if err != nil || strings.Count(entry, ":") == 0 {
+			return nil, fmt.Errorf("composed endpoint %q is not a host:port", entry)
+		}
+		composed[origin.HostPort()] = true
+	}
+	return composed, nil
+}
+
+// Client returns an HTTP client for one bound call. Its every dial is guarded:
+// an address in admitted (what Qualify returned for a composed endpoint) is
+// dialed, anything else must be public. It never uses a proxy: a proxy would
+// make the guard judge the proxy's address instead of the destination's. The
+// caller closes idle connections when the call returns, so nothing outlives it.
+func Client(admitted []netip.AddrPort) *http.Client {
 	dialer := &net.Dialer{
 		Timeout: 10 * time.Second,
 		Control: func(network, address string, c syscall.RawConn) error {
+			if target, err := netip.ParseAddrPort(address); err == nil {
+				target = netip.AddrPortFrom(target.Addr().Unmap(), target.Port())
+				for _, allowed := range admitted {
+					if target == allowed {
+						return nil
+					}
+				}
+			}
 			return dialGuard(network, address, c)
 		},
 	}
@@ -146,28 +182,37 @@ func Client() *http.Client {
 	}}
 }
 
-// Qualify judges a caller-supplied endpoint before the first dial: it must be
+// Qualify judges a caller-supplied endpoint before the first dial. It must be
 // a bare http(s) origin (core's urlguard.NormalizeOrigin refuses userinfo, a
-// path, a query and IDNA-ambiguous hosts), and every address its host resolves
-// to must be public. The dial guard still runs afterwards, because a name may
-// resolve differently on the dial than it did here; this check exists so a
-// refusal is immediate and names the endpoint, instead of surfacing as an SDK
-// retrying a refused dial.
-func Qualify(ctx context.Context, endpoint string) error {
+// path, a query and IDNA-ambiguous hosts). When it is a composed endpoint,
+// Qualify returns the exact addresses it resolves to, on its port, for Client
+// to admit. Otherwise every address it resolves to must be public, and nothing
+// is admitted beyond the public-only rule. The dial guard still runs
+// afterwards, because a name may resolve differently on the dial than it did
+// here; this check exists so a refusal is immediate and names the endpoint,
+// instead of surfacing as an SDK retrying a refused dial.
+func Qualify(ctx context.Context, endpoint string, composed Composed) ([]netip.AddrPort, error) {
 	origin, err := urlguard.NormalizeOrigin(endpoint)
 	if err != nil {
-		return fmt.Errorf("binding endpoint: %w", err)
+		return nil, fmt.Errorf("binding endpoint: %w", err)
 	}
 	var addresses []netip.Addr
 	if literal, perr := netip.ParseAddr(origin.Host); perr == nil {
 		addresses = []netip.Addr{literal}
 	} else if addresses, err = net.DefaultResolver.LookupNetIP(ctx, "ip", origin.Host); err != nil {
-		return fmt.Errorf("binding endpoint %q does not resolve: %w", origin.Host, err)
+		return nil, fmt.Errorf("binding endpoint %q does not resolve: %w", origin.Host, err)
+	}
+	if composed[origin.HostPort()] {
+		admitted := make([]netip.AddrPort, 0, len(addresses))
+		for _, address := range addresses {
+			admitted = append(admitted, netip.AddrPortFrom(address.Unmap(), uint16(origin.Port)))
+		}
+		return admitted, nil
 	}
 	for _, address := range addresses {
 		if !IsPublic(address) {
-			return fmt.Errorf("binding endpoint %q: %w", origin.Host, ErrNonPublicDestination)
+			return nil, fmt.Errorf("binding endpoint %q: %w", origin.Host, ErrNonPublicDestination)
 		}
 	}
-	return nil
+	return nil, nil
 }

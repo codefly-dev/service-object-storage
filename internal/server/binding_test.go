@@ -2,6 +2,9 @@ package server_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -9,7 +12,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	"github.com/codefly-dev/service-object-storage/internal/backend"
+	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/s3"
+	"github.com/codefly-dev/service-object-storage/internal/egress"
+	"github.com/codefly-dev/service-object-storage/internal/events"
+	"github.com/codefly-dev/service-object-storage/internal/probetest"
+	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
 func s3Binding(endpoint string) *storagev0.Binding {
@@ -73,4 +82,25 @@ func TestBindingRefusesAKindWithNoRemoteStore(t *testing.T) {
 	b.Kind = "mem"
 	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: b})
 	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
+}
+
+// A bound call reaches a non-public endpoint only when the server was told it
+// is a composed dependency, and then it is served; the same endpoint is
+// refused by a server that was not.
+func TestBoundCallReachesOnlyAComposedNonPublicEndpoint(t *testing.T) {
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<ListBucketResult><Name>tenant</Name><IsTruncated>false</IsTruncated></ListBucketResult>`))
+	}))
+	defer store.Close()
+	composed, err := egress.ParseComposed(strings.TrimPrefix(store.URL, "http://"))
+	require.NoError(t, err)
+
+	be, err := mem.New(context.Background(), backend.Config{})
+	require.NoError(t, err)
+	admitting := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
+	_, err = admitting.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(store.URL)})
+	require.NoError(t, err)
+
+	_, err = newTestClient(t).List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(store.URL)})
+	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 }

@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	miniogo "github.com/minio/minio-go/v7"
@@ -105,6 +107,11 @@ type Runtime struct {
 	// gcsCredentialsHostFile is the projected copy of the configured GCS
 	// service-account key that the gateway container mounts.
 	gcsCredentialsHostFile string
+
+	// composedEndpoints are the service's dependencies as the gateway container
+	// reaches them, delivered as SOS_COMPOSED_ENDPOINTS: the only non-public
+	// destinations a binding may name.
+	composedEndpoints []string
 }
 
 func NewRuntime() *Runtime {
@@ -145,6 +152,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Runtime.LogInitRequest(req)
 	s.Runtime.WithContext(req.GetRuntimeContext())
 	s.NetworkMappings = req.ProposedNetworkMappings
+	s.composedEndpoints = composedEndpoints(ctx, req.GetDependenciesNetworkMappings())
 
 	w := s.Wool.In("runtime::init")
 	configuration := req.GetConfiguration()
@@ -521,6 +529,9 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	if s.conf.azureAccount != "" {
 		envs = append(envs, resources.Env("SOS_AZURE_ACCOUNT", s.conf.azureAccount))
 	}
+	if len(s.composedEndpoints) > 0 {
+		envs = append(envs, resources.Env("SOS_COMPOSED_ENDPOINTS", strings.Join(s.composedEndpoints, ",")))
+	}
 	runner.WithEnvironmentVariables(ctx, envs...)
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start gateway")
@@ -538,6 +549,21 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 		}
 	}
 	return nil
+}
+
+// composedEndpoints lists each dependency endpoint codefly resolved for this
+// service, as a container reaches it — the gateway runs in one. These are the
+// endpoints a binding may name although they are not public; nothing else is
+// added, so a service with no dependency admits none.
+func composedEndpoints(ctx context.Context, mappings []*basev0.NetworkMapping) []string {
+	var out []string
+	for _, mapping := range mappings {
+		instance := resources.FilterNetworkInstance(ctx, mapping.GetInstances(), resources.NewContainerNetworkAccess())
+		if instance != nil && instance.GetHost() != "" && instance.GetPort() != 0 {
+			out = append(out, net.JoinHostPort(instance.GetHost(), strconv.Itoa(int(instance.GetPort()))))
+		}
+	}
+	return out
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {

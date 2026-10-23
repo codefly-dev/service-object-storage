@@ -86,7 +86,7 @@ func run() error {
 	// both read its verdict, so it must exist before the storage service that
 	// answers from it.
 	monitor := serveHealth(monitorCtx, grpcServer, store, cfg.Health)
-	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub, monitor))
+	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub, monitor).AdmitComposed(cfg.Composed))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

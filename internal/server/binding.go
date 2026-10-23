@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
@@ -34,7 +35,7 @@ func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding) (backend.
 	if b == nil {
 		return s.be, func() {}, nil
 	}
-	cfg, err := boundConfig(ctx, b)
+	cfg, err := boundConfig(ctx, b, s.composed)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -50,8 +51,9 @@ func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding) (backend.
 }
 
 // boundConfig validates a binding and translates it to a backend.Config. The
-// endpoint is qualified before anything dials it.
-func boundConfig(ctx context.Context, b *storagev0.Binding) (backend.Config, error) {
+// endpoint is qualified before anything dials it, against the public-only rule
+// or, for one of the gateway's composed endpoints, by exact admission.
+func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Composed) (backend.Config, error) {
 	const op = "binding"
 	if !bindableKinds[b.GetKind()] {
 		return backend.Config{}, serr.New(serr.InvalidArgument, op,
@@ -93,8 +95,10 @@ func boundConfig(ctx context.Context, b *storagev0.Binding) (backend.Config, err
 				fmt.Sprintf("kind %s requires credential.access_key", b.GetKind()))
 		}
 	}
+	var admitted []netip.AddrPort
 	if cfg.Endpoint != "" {
-		if err := egress.Qualify(ctx, cfg.Endpoint); err != nil {
+		var err error
+		if admitted, err = egress.Qualify(ctx, cfg.Endpoint, composed); err != nil {
 			var dnsErr *net.DNSError
 			switch {
 			case errors.Is(err, egress.ErrNonPublicDestination):
@@ -106,7 +110,7 @@ func boundConfig(ctx context.Context, b *storagev0.Binding) (backend.Config, err
 			}
 		}
 	}
-	cfg.HTTPClient = egress.Client()
+	cfg.HTTPClient = egress.Client(admitted)
 	return cfg, nil
 }
 
