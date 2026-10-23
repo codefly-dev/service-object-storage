@@ -65,9 +65,8 @@ ListRequest { prefix: "", limit: 0,
 
 - **The binding is an argument, not a configuration.** The gateway opens a
   client for the call and closes it, and its connections, when the call
-  returns. It does not store, log or return the credential, and the credential
-  fields are marked `debug_redact`. The caller decrypts the credential for the
-  call, as it would for an in-process client.
+  returns. It does not store, log or return the credential. The caller
+  decrypts the credential for the call, as it would for an in-process client.
 - **Only the binding's credential is used.** Each kind takes one credential,
   set in `Credential`:
 
@@ -81,8 +80,20 @@ ListRequest { prefix: "", limit: 0,
   A missing credential is `INVALID_ARGUMENT` and nothing is dialed. The call
   never falls back to the gateway's own identity (AWS default chain, ADC,
   `DefaultAzureCredential`), which would lend the caller the gateway's grants.
-  `secret`, `service_account_key` and `access_token` are marked `debug_redact`
-  and never logged.
+- **No credential leaves in what the gateway emits.** A store may echo what it
+  was sent, so:
+  - Every bound error message has the binding's credentials scrubbed, and so
+    is every `Authorization` value the call put on the wire, including a token
+    minted from a service-account key.
+  - The bound client removes those values from every response header and from
+    error bodies, before the SDK parses or logs them. This matters because
+    `GOOGLE_SDK_GO_LOGGING_LEVEL=debug` writes response headers and error
+    bodies to stderr, and the storage SDK ignores a logger passed to it.
+  - `secret`, `service_account_key` and `access_token` are marked
+    `debug_redact`, but protobuf-go does not implement that option: `String()`,
+    prototext and protojson print the field. The gateway never formats a
+    request, so the error policy above is the protection, not the
+    annotation.
 - **The public-destination guard.** A binding's endpoint is supplied by the
   caller, so it is an egress the gateway must not let reach its own network.
   Every dial a bound call makes, including the token exchange of a GCS key, is
@@ -113,11 +124,22 @@ ListRequest { prefix: "", limit: 0,
   request order in one call. Each item gets a header with its `index` and an
   outcome, followed by data chunks totalling exactly `info.size` when the
   outcome is `OK`.
+  - The size is enforced. A body that runs longer or ends shorter than the
+    size its header declared ends the stream with `ABORTED`.
+  - A store that sends no length has the object read, within the 5 MiB cap,
+    to learn its size before the header is sent.
+  - A GCS read is pinned to the generation its metadata observed, so a
+    replacement in between is `CHANGED`, never new bytes under the old ETag.
+  - When a stream ends with an error, the item it was in is incomplete:
+    discard it.
   - `CHANGED` means the ETag no longer matches, `NOT_FOUND` means the key is
     gone, and `TOO_LARGE` means the object is over the bound cap. None of
     these is followed by data.
   - Any failure that isn't about one item (refused credential, unreachable
-    store, guard refusal) ends the stream with its status.
+    store, guard refusal) ends the stream with its status. A **missing bucket
+    or container** is one of those: it ends the stream with `NOT_FOUND`, never
+    a `NOT_FOUND` outcome per item, which would read as every object deleted.
+    A bound `List` of a missing bucket fails with `NOT_FOUND` on every kind.
   - A bound batch opens one guarded client for all its items. It also works
     without a binding, against the configured bucket.
 
@@ -133,8 +155,14 @@ address (the gateway runs in a container), and delivers them to the gateway as
 - the binding's endpoint must match a composed endpoint by host **and** port —
   the same address under another name, or another port on the same host, is
   refused;
-- the gateway then dials only the addresses that name resolves to, on that
-  port — a redirect anywhere else is judged by the public-only rule and refused;
+- the exception holds only while the call talks to that authority: a redirect
+  or a token request to any other name is judged by the public-only rule,
+  even one that resolves to the very same address and port;
+- within it, the gateway dials only the addresses that name resolved to, on
+  that port;
+- a composed endpoint is a name, as codefly's mappings are: an address literal
+  is refused, and a name resolving to a link-local (the cloud metadata
+  service), multicast or unspecified address is never admitted;
 - every other loopback, private, link-local or reserved destination is refused
   as before, and a public endpoint is admitted as before.
 
@@ -142,8 +170,14 @@ There is no switch that widens this: no "allow private" setting, no flag that
 disables the guard, no local-versus-hosted mode. A service with no dependency
 admits nothing beyond the public internet, and that is every environment's rule
 — a deployed gateway is given no composed endpoints today, so it binds only
-public stores. `SOS_COMPOSED_ENDPOINTS` is the Runtime's output, not an
-operator setting.
+public stores.
+
+`SOS_COMPOSED_ENDPOINTS` is the Runtime's output. The gateway reads it from its
+environment, so whoever launches the gateway process can set it, exactly as
+they can set `SOS_ENDPOINT` or the backend's credentials. The guard protects
+the cell from callers' bindings, not from the gateway's launcher. What the
+variable cannot do, whoever sets it, is admit an address literal, the metadata
+service, or any authority other than the exact names it lists.
 
 The MinIO a local run starts as this gateway's own backend is not a dependency
 and stays unbindable.

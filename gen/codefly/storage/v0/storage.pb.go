@@ -453,7 +453,9 @@ func (x *ByteRange) GetLength() int64 {
 //
 // The binding is an argument, not a configuration: the gateway opens a client
 // for the call, drops it when the call returns, and never stores, logs or
-// returns the credential. Every dial a bound call makes is checked against the
+// returns the credential: bound error messages are scrubbed of it, and so are
+// the responses the SDKs see. (The debug_redact marks below are honoured by
+// the runtimes that implement the option; protobuf-go does not.) Every dial a bound call makes is checked against the
 // concrete address being connected to — on the first request and on every
 // redirect — and an address that is not on the public internet is refused
 // with PERMISSION_DENIED. A named endpoint is resolved and judged before the
@@ -1151,8 +1153,10 @@ func (x *GetManyItem) GetIfMatch() string {
 // GetManyResponse streams, per item in request order: one header, then — when
 // the outcome is OK — data chunks whose total is exactly header.info.size. A
 // header for the next item starts the next object. An error that is not about
-// one item (credentials refused, store unreachable, guard refusal) ends the
-// stream with its status instead.
+// one item (credentials refused, store unreachable, guard refusal, a missing
+// bucket or container) ends the stream with its status instead. The size is
+// enforced: a body that runs longer or shorter ends the stream with ABORTED,
+// and a stream that ends with an error leaves its current item incomplete.
 type GetManyResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:

@@ -6,8 +6,8 @@
 //
 //	docker run -d --name fake-gcs -p 4443:4443 \
 //	  fsouza/fake-gcs-server@sha256:d47b4cf8b87006cab8fbbecfa5f06a2a3c5722e464abddc0d107729663d40ec4 \
-//	  -scheme http -public-host 127.0.0.1:4443
-//	STORAGE_EMULATOR_HOST=127.0.0.1:4443 GCS_BUCKET=sos-test \
+//	  -scheme http -public-host localhost:4443
+//	STORAGE_EMULATOR_HOST=localhost:4443 GCS_BUCKET=sos-test \
 //	  go test -tags integration -count=1 -v -run GCS ./internal/integration/...
 //
 // What it proves: the backend opens with NO key file (the configuration a
@@ -201,6 +201,9 @@ func TestGCSBoundAccessToken(t *testing.T) {
 	}
 	t.Setenv("STORAGE_EMULATOR_HOST", "")
 
+	// A composed endpoint is a name, so the emulator is named (localhost) in
+	// STORAGE_EMULATOR_HOST and in its own -public-host, which fake-gcs-server
+	// matches against the Host of XML reads.
 	composed, err := egress.ParseComposed(host)
 	require.NoError(t, err)
 	be, err := mem.New(ctx, backend.Config{})

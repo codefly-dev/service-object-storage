@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -58,14 +59,14 @@ func (s *Server) AdmitComposed(composed egress.Composed) *Server {
 // Stat returns object metadata, honoring conditional headers by comparing the
 // fetched ETag (NotModified is carried in the header, not as an error).
 func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storagev0.GetHeader, error) {
-	be, release, err := s.backendFor(ctx, req.GetBinding())
+	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	defer release()
-	info, err := be.Stat(ctx, req.GetKey(), req.GetVersionId())
+	defer c.Release()
+	info, err := c.Stat(ctx, req.GetKey(), req.GetVersionId())
 	if err != nil {
-		return nil, toStatus(boundErr(err))
+		return nil, toStatus(c.err(err))
 	}
 	if inm := req.GetIfNoneMatch(); inm != "" && inm == info.ETag {
 		return &storagev0.GetHeader{Info: toProtoInfo(info), NotModified: true}, nil
@@ -80,14 +81,14 @@ func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storage
 // frames. This is the proxy byte path; large objects that should skip the proxy
 // use the Presign RPC instead. A bound Get is capped at maxBoundObjectBytes.
 func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_GetServer) error {
-	be, release, err := s.backendFor(stream.Context(), req.GetBinding())
+	c, err := s.backendFor(stream.Context(), req.GetBinding())
 	if err != nil {
 		return toStatus(err)
 	}
-	defer release()
-	res, err := be.Get(stream.Context(), req.GetKey(), toBackendGetOptions(req))
+	defer c.Release()
+	res, err := c.Get(stream.Context(), req.GetKey(), toBackendGetOptions(req))
 	if err != nil {
-		return toStatus(boundErr(err))
+		return toStatus(c.err(err))
 	}
 	if res.NotModified {
 		return stream.Send(&storagev0.GetResponse{
@@ -109,87 +110,115 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 	}); err != nil {
 		return err
 	}
-	return streamBody(res.Body, func(chunk []byte) error {
+	return streamBody(res.Body, -1, c.err, func(chunk []byte) error {
 		return stream.Send(&storagev0.GetResponse{Kind: &storagev0.GetResponse_Data{Data: chunk}})
 	})
 }
 
 // GetMany streams several objects in one call, in request order: each item is
 // a Get at its if_match ETag against one backend, so a bound batch shares one
-// guarded client. What happens to one item — changed since it was listed,
+// guarded client. What happens to one object — changed since it was listed,
 // gone, over the bound cap — is that item's header outcome and the stream
-// moves on; any other failure ends the stream with its status.
+// moves on. Anything else ends the stream with its status: above all a missing
+// bucket or container, which would otherwise read as every object deleted.
 func (s *Server) GetMany(req *storagev0.GetManyRequest, stream storagev0.ObjectStorage_GetManyServer) error {
 	if n := len(req.GetItems()); n > maxGetManyItems {
 		return status.Errorf(codes.InvalidArgument, "get-many: %d items, at most %d per call", n, maxGetManyItems)
 	}
-	be, release, err := s.backendFor(stream.Context(), req.GetBinding())
+	c, err := s.backendFor(stream.Context(), req.GetBinding())
 	if err != nil {
 		return toStatus(err)
 	}
-	defer release()
+	defer c.Release()
 	for i, item := range req.GetItems() {
-		if err := getManyItem(stream, be, int32(i), item, req.GetBinding() != nil); err != nil {
+		if err := getManyItem(stream, c, int32(i), item, req.GetBinding() != nil); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func getManyItem(stream storagev0.ObjectStorage_GetManyServer, be backend.Backend, index int32, item *storagev0.GetManyItem, bound bool) error {
+func getManyItem(stream storagev0.ObjectStorage_GetManyServer, c *call, index int32, item *storagev0.GetManyItem, bound bool) error {
 	header := &storagev0.GetManyHeader{Index: index}
 	sendHeader := func() error {
 		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Header{Header: header}})
 	}
-	res, err := be.Get(stream.Context(), item.GetKey(), backend.GetOptions{IfMatch: item.GetIfMatch()})
+	res, err := c.Get(stream.Context(), item.GetKey(), backend.GetOptions{IfMatch: item.GetIfMatch()})
 	if err != nil {
-		switch serr.CodeOf(err) {
-		case serr.PreconditionFailed:
+		switch {
+		case errors.Is(err, serr.ErrBucketNotFound):
+			return toStatus(c.err(err))
+		case serr.CodeOf(err) == serr.PreconditionFailed:
 			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED
-		case serr.NotFound:
+		case serr.CodeOf(err) == serr.NotFound:
 			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND
 		default:
-			return toStatus(boundErr(err))
+			return toStatus(c.err(err))
 		}
 		return sendHeader()
 	}
 	defer res.Body.Close()
-	body := io.Reader(res.Body)
-	if bound {
-		if res.Info.Size > maxBoundObjectBytes {
-			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE
-			return sendHeader()
+	tooLarge := func() error {
+		header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE
+		return sendHeader()
+	}
+	if bound && res.Info.Size > maxBoundObjectBytes {
+		return tooLarge()
+	}
+	var body io.Reader = res.Body
+	if res.Info.Size <= 0 {
+		// The header promises the item's exact size, and a store answering
+		// without a length (chunked) reports 0: read it, within the bound
+		// cap, to learn the size before promising it.
+		buf, rerr := io.ReadAll(io.LimitReader(res.Body, maxBoundObjectBytes+1))
+		if rerr != nil {
+			return toStatus(serrWrapInternal(c.err(rerr)))
 		}
-		body = &capReader{ReadCloser: res.Body, left: maxBoundObjectBytes}
+		if len(buf) > maxBoundObjectBytes {
+			return tooLarge()
+		}
+		res.Info.Size, body = int64(len(buf)), bytes.NewReader(buf)
 	}
 	header.Outcome, header.Info = storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK, toProtoInfo(&res.Info)
 	if err := sendHeader(); err != nil {
 		return err
 	}
-	return streamBody(body, func(chunk []byte) error {
+	return streamBody(body, res.Info.Size, c.err, func(chunk []byte) error {
 		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Data{Data: chunk}})
 	})
 }
 
-// streamBody relays body in chunkSize frames through send until EOF. A bound
-// body that runs past its cap ends the stream with RESOURCE_EXHAUSTED.
-func streamBody(body io.Reader, send func([]byte) error) error {
+// streamBody relays body in chunkSize frames through send until EOF. With an
+// expected size (expect >= 0) it relays exactly that many bytes: a body that
+// runs longer or ends shorter ends the stream with ABORTED rather than let a
+// frame disagree with its header. A bound body that runs past its cap ends
+// the stream with RESOURCE_EXHAUSTED. Read errors pass through the call's
+// error policy.
+func streamBody(body io.Reader, expect int64, classify func(error) error, send func([]byte) error) error {
 	buf := make([]byte, chunkSize)
+	var sent int64
 	for {
 		n, rerr := body.Read(buf)
 		if n > 0 {
+			if expect >= 0 && sent+int64(n) > expect {
+				return status.Errorf(codes.Aborted, "object is longer than its declared %d bytes", expect)
+			}
 			if err := send(buf[:n]); err != nil {
 				return err
 			}
+			sent += int64(n)
 		}
 		if rerr == io.EOF {
+			if expect >= 0 && sent != expect {
+				return status.Errorf(codes.Aborted, "object ended at %d of its declared %d bytes", sent, expect)
+			}
 			return nil
 		}
 		if errors.Is(rerr, errObjectTooLarge) {
 			return status.Error(codes.ResourceExhausted, rerr.Error())
 		}
 		if rerr != nil {
-			return toStatus(serrWrapInternal(boundErr(rerr)))
+			return toStatus(serrWrapInternal(classify(rerr)))
 		}
 	}
 }
@@ -279,23 +308,23 @@ func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyReques
 // List enumerates a prefix. A bound List returns at most maxBoundListLimit
 // objects per page.
 func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storagev0.ListResult, error) {
-	be, release, err := s.backendFor(ctx, req.GetBinding())
+	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	defer release()
+	defer c.Release()
 	limit := req.GetLimit()
 	if req.GetBinding() != nil && (limit <= 0 || limit > maxBoundListLimit) {
 		limit = maxBoundListLimit
 	}
-	res, err := be.List(ctx, backend.ListOptions{
+	res, err := c.List(ctx, backend.ListOptions{
 		Prefix:    req.GetPrefix(),
 		Delimiter: req.GetDelimiter(),
 		PageToken: req.GetPageToken(),
 		Limit:     limit,
 	})
 	if err != nil {
-		return nil, toStatus(boundErr(err))
+		return nil, toStatus(c.err(err))
 	}
 	out := &storagev0.ListResult{
 		CommonPrefixes: res.CommonPrefixes,
@@ -368,12 +397,12 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 // a binding it reports the bound kind and the caps a bound call runs under;
 // qualifying the bound endpoint resolves its name, and nothing is dialed.
 func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
-	be, release, err := s.backendFor(ctx, req.GetBinding())
+	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	defer release()
-	caps := be.Capabilities()
+	defer c.Release()
+	caps := c.Capabilities()
 	if req.GetBinding() != nil {
 		// A bound call reaches only Stat, Get, GetMany and List, so only the read
 		// surface is reported: no write, presign or native verb is reachable.

@@ -206,6 +206,15 @@ func mapErr(op string, err error) error {
 		return nil
 	}
 
+	var apiErr smithy.APIError
+	code := ""
+	if errors.As(err, &apiErr) {
+		code = apiErr.ErrorCode()
+	}
+	if code == "NoSuchBucket" {
+		return serr.BucketNotFound(op, err)
+	}
+
 	var nsk *types.NoSuchKey
 	var nf *types.NotFound
 	if errors.As(err, &nsk) || errors.As(err, &nf) {
@@ -215,14 +224,8 @@ func mapErr(op string, err error) error {
 	// HTTP status, when available, is the most reliable signal for conditionals.
 	status := httpStatus(err)
 
-	var apiErr smithy.APIError
-	code := ""
-	if errors.As(err, &apiErr) {
-		code = apiErr.ErrorCode()
-	}
-
 	switch {
-	case code == "NoSuchKey", code == "NoSuchBucket", code == "NotFound", status == 404:
+	case code == "NoSuchKey", code == "NotFound", status == 404:
 		return serr.Wrap(serr.NotFound, op, err)
 	case status == 304, code == "NotModified":
 		return serr.Wrap(serr.NotModified, op, err)

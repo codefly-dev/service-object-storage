@@ -2,11 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
+	"strings"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
@@ -26,44 +27,106 @@ const (
 // that reaches a remote store. "mem" holds nothing a caller could bind to.
 var bindableKinds = map[string]bool{"s3": true, "minio": true, "gcs": true, "azure": true}
 
-// backendFor returns the backend a call runs against and a release func the
-// caller defers. Without a binding it is the gateway's configured backend.
-// With one, it is a backend opened for this call alone, through a guarded
-// client, from the binding's own credential; release closes it and its
-// connections, so neither the credential nor a connection outlives the call.
-func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding) (backend.Backend, func(), error) {
-	if b == nil {
-		return s.be, func() {}, nil
-	}
-	cfg, err := boundConfig(ctx, b, s.composed)
-	if err != nil {
-		return nil, nil, err
-	}
-	be, err := backend.Open(ctx, cfg)
-	if err != nil {
-		cfg.HTTPClient.CloseIdleConnections()
-		return nil, nil, err
-	}
-	return be, func() {
-		_ = be.Close()
-		cfg.HTTPClient.CloseIdleConnections()
-	}, nil
+// call is the backend one RPC runs against, and how that RPC's errors leave
+// the gateway. Release closes a bound backend and its connections, so neither
+// the credential nor a connection outlives the call.
+type call struct {
+	backend.Backend
+	Release func()
+	// guard and secrets are set for a bound call only.
+	guard   *egress.Guard
+	secrets []string
 }
 
-// boundConfig validates a binding and translates it to a backend.Config. The
-// endpoint is qualified before anything dials it, against the public-only rule
-// or, for one of the gateway's composed endpoints, by exact admission.
-func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Composed) (backend.Config, error) {
+// backendFor returns the call an RPC runs against. Without a binding it is the
+// gateway's configured backend. With one, it is a backend opened for this call
+// alone, through a guarded client, from the binding's own credential. A
+// returned error has already passed through the call's error policy.
+func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding) (*call, error) {
+	if b == nil {
+		return &call{Backend: s.be, Release: func() {}}, nil
+	}
+	c := &call{secrets: bindingSecrets(b)}
+	cfg, guard, err := boundConfig(ctx, b, s.composed)
+	if err != nil {
+		return nil, c.err(err)
+	}
+	c.guard = guard
+	be, err := backend.Open(ctx, cfg)
+	if err != nil {
+		guard.Client.CloseIdleConnections()
+		return nil, c.err(err)
+	}
+	c.Backend = be
+	c.Release = func() {
+		_ = be.Close()
+		guard.Client.CloseIdleConnections()
+	}
+	return c, nil
+}
+
+// err is the error policy of a bound call: a dial the guard refused is
+// PermissionDenied however the SDK in between reported it (some format the
+// dial error into text and drop its identity), and no credential of the
+// binding leaves in a message — an upstream may echo what it was sent. The
+// normalized code and the store's own words are otherwise kept. An unbound
+// call's errors pass through unchanged.
+func (c *call) err(err error) error {
+	if err == nil || c.secrets == nil {
+		return err
+	}
+	code := serr.CodeOf(err)
+	if errors.Is(err, egress.ErrNonPublicDestination) || (c.guard != nil && c.guard.Refused()) {
+		code = serr.PermissionDenied
+	}
+	op, msg := "binding", err.Error()
+	var coded *serr.Error
+	if errors.As(err, &coded) && coded.Err != nil {
+		op, msg = coded.Op, coded.Err.Error()
+	}
+	secrets := c.secrets
+	if c.guard != nil {
+		secrets = append(c.guard.Sent(), secrets...)
+	}
+	return serr.New(code, op, egress.Redact(msg, secrets))
+}
+
+// bindingSecrets are the credential values a bound call's errors must never
+// carry: the secret half of an access key, an access token, and a
+// service-account key with its private key. The access key id and the account
+// name are identifiers, not secrets.
+func bindingSecrets(b *storagev0.Binding) []string {
+	secrets := []string{}
+	cred := b.GetCredential()
+	for _, value := range []string{cred.GetAccessKey().GetSecret(), cred.GetAccessToken(), string(cred.GetServiceAccountKey())} {
+		if value != "" {
+			secrets = append(secrets, value)
+		}
+	}
+	var key struct {
+		PrivateKey string `json:"private_key"`
+	}
+	if json.Unmarshal(cred.GetServiceAccountKey(), &key) == nil && key.PrivateKey != "" {
+		secrets = append(secrets, key.PrivateKey, strings.ReplaceAll(key.PrivateKey, "\n", "\\n"))
+	}
+	return secrets
+}
+
+// boundConfig validates a binding and translates it to a backend.Config and
+// the guard its client dials through. The endpoint is qualified before
+// anything dials it, against the public-only rule or, for one of the
+// gateway's composed endpoints, by exact admission.
+func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Composed) (backend.Config, *egress.Guard, error) {
 	const op = "binding"
 	if !bindableKinds[b.GetKind()] {
-		return backend.Config{}, serr.New(serr.InvalidArgument, op,
+		return backend.Config{}, nil, serr.New(serr.InvalidArgument, op,
 			fmt.Sprintf("kind %q cannot be bound (want s3, minio, gcs or azure)", b.GetKind()))
 	}
 	if b.GetBucket() == "" {
-		return backend.Config{}, serr.New(serr.InvalidArgument, op, "bucket is required")
+		return backend.Config{}, nil, serr.New(serr.InvalidArgument, op, "bucket is required")
 	}
 	if b.GetKind() == "minio" && b.GetEndpoint() == "" {
-		return backend.Config{}, serr.New(serr.InvalidArgument, op, "kind minio requires an endpoint")
+		return backend.Config{}, nil, serr.New(serr.InvalidArgument, op, "kind minio requires an endpoint")
 	}
 	cfg := backend.Config{
 		Kind:         b.GetKind(),
@@ -81,48 +144,39 @@ func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Comp
 	case "gcs":
 		cfg.GCSCredentialsJSON, cfg.GCSAccessToken = cred.GetServiceAccountKey(), cred.GetAccessToken()
 		if len(cfg.GCSCredentialsJSON) == 0 && cfg.GCSAccessToken == "" {
-			return backend.Config{}, serr.New(serr.InvalidArgument, op,
+			return backend.Config{}, nil, serr.New(serr.InvalidArgument, op,
 				"kind gcs requires credential.service_account_key or credential.access_token")
 		}
 	case "azure":
 		cfg.AzureAccount, cfg.AzureKey = cred.GetAccessKey().GetId(), cred.GetAccessKey().GetSecret()
 		if cfg.AzureAccount == "" || cfg.AzureKey == "" {
-			return backend.Config{}, serr.New(serr.InvalidArgument, op, "kind azure requires credential.access_key (account and shared key)")
+			return backend.Config{}, nil, serr.New(serr.InvalidArgument, op, "kind azure requires credential.access_key (account and shared key)")
 		}
 	default:
 		cfg.AccessKey, cfg.SecretKey = cred.GetAccessKey().GetId(), cred.GetAccessKey().GetSecret()
 		if cfg.AccessKey == "" || cfg.SecretKey == "" {
-			return backend.Config{}, serr.New(serr.InvalidArgument, op,
+			return backend.Config{}, nil, serr.New(serr.InvalidArgument, op,
 				fmt.Sprintf("kind %s requires credential.access_key", b.GetKind()))
 		}
 	}
-	var admitted []netip.AddrPort
+	var admission egress.Admission
 	if cfg.Endpoint != "" {
 		var err error
-		if admitted, err = egress.Qualify(ctx, cfg.Endpoint, composed); err != nil {
+		if admission, err = egress.Qualify(ctx, cfg.Endpoint, composed); err != nil {
 			var dnsErr *net.DNSError
 			switch {
 			case errors.Is(err, egress.ErrNonPublicDestination):
-				return backend.Config{}, serr.Wrap(serr.PermissionDenied, op, err)
+				return backend.Config{}, nil, serr.Wrap(serr.PermissionDenied, op, err)
 			case errors.As(err, &dnsErr):
-				return backend.Config{}, serr.Wrap(serr.Unavailable, op, err)
+				return backend.Config{}, nil, serr.Wrap(serr.Unavailable, op, err)
 			default:
-				return backend.Config{}, serr.Wrap(serr.InvalidArgument, op, err)
+				return backend.Config{}, nil, serr.Wrap(serr.InvalidArgument, op, err)
 			}
 		}
 	}
-	cfg.HTTPClient = egress.Client(admitted)
-	return cfg, nil
-}
-
-// boundErr classifies a dial the guard refused as PermissionDenied wherever the
-// backend surfaced it — after a redirect, or a name that resolved differently
-// on the dial than when it was qualified. Any other error keeps its code.
-func boundErr(err error) error {
-	if err != nil && errors.Is(err, egress.ErrNonPublicDestination) {
-		return serr.Wrap(serr.PermissionDenied, "binding", err)
-	}
-	return err
+	guard := egress.NewGuard(admission)
+	cfg.HTTPClient = guard.Client
+	return cfg, guard, nil
 }
 
 // errObjectTooLarge refuses a bound Get past maxBoundObjectBytes.

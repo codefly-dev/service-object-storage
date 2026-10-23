@@ -170,7 +170,9 @@ func mapErr(op string, err error) error {
 	}
 	resp := minio.ToErrorResponse(err)
 	switch {
-	case resp.StatusCode == 404, resp.Code == "NoSuchKey", resp.Code == "NoSuchBucket":
+	case resp.Code == "NoSuchBucket":
+		return serr.BucketNotFound(op, err)
+	case resp.StatusCode == 404, resp.Code == "NoSuchKey":
 		return serr.Wrap(serr.NotFound, op, err)
 	case resp.StatusCode == 304:
 		return serr.Wrap(serr.NotModified, op, err)

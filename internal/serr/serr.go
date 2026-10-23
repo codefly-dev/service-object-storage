@@ -94,6 +94,18 @@ func Wrap(code Code, op string, err error) *Error {
 	return &Error{Code: code, Op: op, Err: err}
 }
 
+// ErrBucketNotFound marks a NotFound whose subject is the bucket or container
+// itself, not one object in it. A caller that treats a missing object as
+// "deleted" must not treat a missing bucket the same way: every object would
+// read as deleted.
+var ErrBucketNotFound = errors.New("bucket or container does not exist")
+
+// BucketNotFound is NotFound for a missing bucket or container, carrying
+// ErrBucketNotFound beside the backend's cause.
+func BucketNotFound(op string, err error) *Error {
+	return Wrap(NotFound, op, fmt.Errorf("%w: %w", ErrBucketNotFound, err))
+}
+
 // CodeOf extracts the normalized code, defaulting to Internal for a plain error
 // and to Internal for nil-safe callers (nil returns Internal is never used —
 // callers check err != nil first).

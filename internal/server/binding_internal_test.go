@@ -89,10 +89,10 @@ func TestEveryBindableBackendSendsThroughTheBoundClient(t *testing.T) {
 // absent one is refused rather than replaced by the gateway's own identity.
 func TestBindingRequiresItsOwnCredential(t *testing.T) {
 	for kind := range bindableKinds {
-		_, err := boundConfig(context.Background(), &storagev0.Binding{Kind: kind, Bucket: "data", Endpoint: "https://8.8.8.8"}, nil)
+		_, _, err := boundConfig(context.Background(), &storagev0.Binding{Kind: kind, Bucket: "data", Endpoint: "https://8.8.8.8"}, nil)
 		require.ErrorContains(t, err, "requires", kind)
 	}
-	cfg, err := boundConfig(context.Background(), &storagev0.Binding{
+	cfg, _, err := boundConfig(context.Background(), &storagev0.Binding{
 		Kind: "s3", Bucket: "data",
 		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{Id: "id", Secret: "secret"}}},
 	}, nil)

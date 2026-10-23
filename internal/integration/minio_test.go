@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,7 +85,7 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 	hub := events.NewHub()
 	// The MinIO is on loopback, so a bound call can reach it only as a
 	// composed endpoint; the configured-bucket tests never consult this.
-	composed, err := egress.ParseComposed(endpoint)
+	composed, err := egress.ParseComposed(byName(endpoint))
 	require.NoError(t, err)
 
 	lis := bufconn.Listen(1 << 20)
@@ -216,7 +217,7 @@ func TestMinIOBoundGetMany(t *testing.T) {
 		_, err := put(t, c, prefix+key, []byte("# "+key), nil)
 		require.NoError(t, err)
 	}
-	binding := &storagev0.Binding{Kind: "minio", Endpoint: "http://" + mustEnv(t, "MINIO_ENDPOINT"),
+	binding := &storagev0.Binding{Kind: "minio", Endpoint: "http://" + byName(mustEnv(t, "MINIO_ENDPOINT")),
 		Bucket: mustEnv(t, "MINIO_BUCKET"), Prefix: prefix,
 		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{
 			Id: mustEnv(t, "MINIO_ACCESS_KEY"), Secret: mustEnv(t, "MINIO_SECRET_KEY")}}}}
@@ -255,4 +256,10 @@ func TestMinIOBoundGetMany(t *testing.T) {
 		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
 	}, outcomes)
 	require.Equal(t, []string{"# b.md", "", "# a.md"}, payloads)
+}
+
+// byName is a loopback host:port as a composed endpoint names it: by
+// localhost, never by address.
+func byName(endpoint string) string {
+	return "localhost:" + endpoint[strings.LastIndex(endpoint, ":")+1:]
 }

@@ -128,13 +128,14 @@ func fakeS3(t *testing.T) *httptest.Server {
 func TestBoundGetManyMapsStoreAnswersToOutcomes(t *testing.T) {
 	store := fakeS3(t)
 	defer store.Close()
-	composed, err := egress.ParseComposed(strings.TrimPrefix(store.URL, "http://"))
+	endpoint := named(store)
+	composed, err := egress.ParseComposed(strings.TrimPrefix(endpoint, "http://"))
 	require.NoError(t, err)
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
 	c := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
 
-	items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(store.URL), Items: []*storagev0.GetManyItem{
+	items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{
 		{Key: "a.md", IfMatch: `"etag-1"`},
 		{Key: "a.md", IfMatch: `"etag-0"`},
 		{Key: "gone.md"},
@@ -151,6 +152,6 @@ func TestBoundGetManyMapsStoreAnswersToOutcomes(t *testing.T) {
 
 	// The guard still decides the endpoint: the same request without the
 	// composed admission ends the stream before any item.
-	_, err = getMany(t, newTestClient(t), &storagev0.GetManyRequest{Binding: s3Binding(store.URL), Items: []*storagev0.GetManyItem{{Key: "a.md"}}})
+	_, err = getMany(t, newTestClient(t), &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a.md"}}})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 }

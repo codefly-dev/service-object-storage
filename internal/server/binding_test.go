@@ -21,6 +21,12 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
+// named is a loopback test listener's endpoint by name: a composed endpoint
+// is a name, never an address.
+func named(srv *httptest.Server) string {
+	return "http://localhost:" + srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+}
+
 func s3Binding(endpoint string) *storagev0.Binding {
 	return &storagev0.Binding{
 		Kind: "s3", Endpoint: endpoint, Bucket: "tenant", Prefix: "docs/",
@@ -93,16 +99,17 @@ func TestBoundCallReachesOnlyAComposedNonPublicEndpoint(t *testing.T) {
 		_, _ = w.Write([]byte(`<ListBucketResult><Name>tenant</Name><IsTruncated>false</IsTruncated></ListBucketResult>`))
 	}))
 	defer store.Close()
-	composed, err := egress.ParseComposed(strings.TrimPrefix(store.URL, "http://"))
+	endpoint := named(store)
+	composed, err := egress.ParseComposed(strings.TrimPrefix(endpoint, "http://"))
 	require.NoError(t, err)
 
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
 	admitting := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
-	_, err = admitting.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(store.URL)})
+	_, err = admitting.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
 	require.NoError(t, err)
 
-	_, err = newTestClient(t).List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(store.URL)})
+	_, err = newTestClient(t).List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 }
 
@@ -126,13 +133,14 @@ func TestBoundGCSAccessTokenIsTheBearerAndTheStoreJudgesIt(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"code":401,"message":"Invalid Credentials","errors":[{"reason":"authError","message":"Invalid Credentials"}]}}`))
 	}))
 	defer store.Close()
-	composed, err := egress.ParseComposed(strings.TrimPrefix(store.URL, "http://"))
+	endpoint := named(store)
+	composed, err := egress.ParseComposed(strings.TrimPrefix(endpoint, "http://"))
 	require.NoError(t, err)
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
 	c := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
 
-	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(store.URL, "ya29.expired")})
+	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(endpoint, "ya29.expired")})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 	require.Contains(t, status.Convert(err).Message(), "Invalid Credentials")
 	require.NotEmpty(t, bearers)
@@ -141,7 +149,7 @@ func TestBoundGCSAccessTokenIsTheBearerAndTheStoreJudgesIt(t *testing.T) {
 	}
 
 	seen := len(bearers)
-	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(store.URL, "")})
+	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(endpoint, "")})
 	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
 	require.Len(t, bearers, seen, "a missing token must not reach the store")
 }
