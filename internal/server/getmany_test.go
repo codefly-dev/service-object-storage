@@ -97,6 +97,8 @@ func TestGetManyRefusesMoreItemsThanCapabilitiesAllows(t *testing.T) {
 	}
 	_, err = getMany(t, c, &storagev0.GetManyRequest{Items: items})
 	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
+	info, _ := requireReason(t, err, codes.InvalidArgument, "TOO_MANY_ITEMS")
+	require.Equal(t, "1000", info.GetMetadata()["max_items"])
 }
 
 // fakeS3 answers GetObject path-style the way S3 does for the cases a bound

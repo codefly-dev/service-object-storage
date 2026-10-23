@@ -56,6 +56,7 @@ func TestReview1235TruncatedWithoutTokenAcceptedComplete(t *testing.T) {
 			require.Error(t, err, "an incomplete listing was answered as %v", res)
 			require.NotEqual(t, codes.OK, status.Code(err))
 			require.Contains(t, strings.ToLower(status.Convert(err).Message()), "truncated")
+			requireReason(t, err, codes.Internal, "LISTING_INCOMPLETE")
 		})
 	}
 }
@@ -70,6 +71,7 @@ func TestReview1235ListBodyExceedsOldFiveMiBLimit(t *testing.T) {
 	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
 	require.Equal(t, codes.ResourceExhausted, status.Code(err), "got %v", err)
 	require.Contains(t, status.Convert(err).Message(), "exceeded")
+	requireReason(t, err, codes.ResourceExhausted, "RESPONSE_TOO_LARGE")
 }
 
 func TestReview1235ListDoesNotEnforceReturnedObjectLimit(t *testing.T) {
@@ -83,6 +85,8 @@ func TestReview1235ListDoesNotEnforceReturnedObjectLimit(t *testing.T) {
 	res, err := c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
 	require.Equal(t, codes.ResourceExhausted, status.Code(err), "got %d objects, %v", len(res.GetObjects()), err)
 	require.Contains(t, status.Convert(err).Message(), "1001 entries for a page of at most 1000")
+	info, _ := requireReason(t, err, codes.ResourceExhausted, "LISTING_TOO_LONG")
+	require.Equal(t, map[string]string{"entries": "1001", "max_entries": "1000"}, info.GetMetadata())
 }
 
 // (D) Every bound operation has a finite end-to-end deadline, body included:
@@ -112,6 +116,7 @@ func TestReview1235SlowBodyOutlivesOldTimeout(t *testing.T) {
 	require.Error(t, err)
 	require.Less(t, time.Since(start), 3*time.Second, "a stalled listing body held the call")
 	require.Contains(t, status.Convert(err).Message(), "did not complete the operation within")
+	requireReason(t, err, codes.Unavailable, "OPERATION_DEADLINE")
 
 	start = time.Now()
 	_, err = getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a"}}})

@@ -18,7 +18,6 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // chunkSize bounds each streamed data frame on Get.
@@ -75,7 +74,7 @@ func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storage
 		return &storagev0.GetHeader{Info: toProtoInfo(info), NotModified: true}, nil
 	}
 	if im := req.GetIfMatch(); im != "" && im != info.ETag {
-		return nil, status.Error(codes.FailedPrecondition, "if-match: etag mismatch")
+		return nil, refuse(codes.FailedPrecondition, "if-match: etag mismatch", serr.ReasonPreconditionFailed, nil, 0)
 	}
 	return &storagev0.GetHeader{Info: toProtoInfo(info)}, nil
 }
@@ -105,7 +104,7 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 	defer res.Body.Close()
 	if req.GetBinding() != nil {
 		if req.GetRange() == nil && res.Info.Size > maxBoundObjectBytes {
-			return status.Error(codes.ResourceExhausted, errObjectTooLarge.Error())
+			return refuse(codes.ResourceExhausted, errObjectTooLarge.Error(), serr.ReasonObjectTooLarge, capMeta, 0)
 		}
 		res.Body = &capReader{ReadCloser: res.Body, left: maxBoundObjectBytes}
 	}
@@ -128,7 +127,8 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 // bucket or container, which would otherwise read as every object deleted.
 func (s *Server) GetMany(req *storagev0.GetManyRequest, stream storagev0.ObjectStorage_GetManyServer) error {
 	if n := len(req.GetItems()); n > maxGetManyItems {
-		return status.Errorf(codes.InvalidArgument, "get-many: %d items, at most %d per call", n, maxGetManyItems)
+		return refuse(codes.InvalidArgument, fmt.Sprintf("get-many: %d items, at most %d per call", n, maxGetManyItems),
+			serr.ReasonTooManyItems, map[string]string{"max_items": fmt.Sprint(maxGetManyItems)}, 0)
 	}
 	ctx, cancel := boundCall(stream.Context(), req.GetBinding(), boundBatchTimeout)
 	defer cancel()
@@ -210,7 +210,8 @@ func streamBody(body io.Reader, expect int64, classify func(error) error, send f
 		n, rerr := body.Read(buf)
 		if n > 0 {
 			if expect >= 0 && sent+int64(n) > expect {
-				return status.Errorf(codes.Aborted, "object is longer than its declared %d bytes", expect)
+				return refuse(codes.Aborted, fmt.Sprintf("object is longer than its declared %d bytes", expect),
+					serr.ReasonBodySizeMismatch, map[string]string{"declared_bytes": fmt.Sprint(expect)}, 0)
 			}
 			if err := send(buf[:n]); err != nil {
 				return err
@@ -219,12 +220,13 @@ func streamBody(body io.Reader, expect int64, classify func(error) error, send f
 		}
 		if rerr == io.EOF {
 			if expect >= 0 && sent != expect {
-				return status.Errorf(codes.Aborted, "object ended at %d of its declared %d bytes", sent, expect)
+				return refuse(codes.Aborted, fmt.Sprintf("object ended at %d of its declared %d bytes", sent, expect),
+					serr.ReasonBodySizeMismatch, map[string]string{"declared_bytes": fmt.Sprint(expect), "sent_bytes": fmt.Sprint(sent)}, 0)
 			}
 			return nil
 		}
 		if errors.Is(rerr, errObjectTooLarge) {
-			return status.Error(codes.ResourceExhausted, rerr.Error())
+			return refuse(codes.ResourceExhausted, rerr.Error(), serr.ReasonObjectTooLarge, capMeta, 0)
 		}
 		if rerr != nil {
 			return toStatus(serrWrapInternal(classify(rerr)))
@@ -341,7 +343,8 @@ func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storage
 	// answered the page it was asked for.
 	if n := len(res.Objects) + len(res.CommonPrefixes); req.GetBinding() != nil && n > int(limit) {
 		return nil, toStatus(serr.New(serr.TooLarge, "binding",
-			fmt.Sprintf("the store returned %d entries for a page of at most %d; refusing the over-long listing", n, limit)))
+			fmt.Sprintf("the store returned %d entries for a page of at most %d; refusing the over-long listing", n, limit)).
+			WithReason(serr.ReasonListingTooLong, map[string]string{"entries": fmt.Sprint(n), "max_entries": fmt.Sprint(limit)}))
 	}
 	out := &storagev0.ListResult{
 		CommonPrefixes: res.CommonPrefixes,
@@ -399,7 +402,7 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 			return stream.Context().Err()
 		case ev, ok := <-sub.Events():
 			if !ok {
-				return status.Error(codes.ResourceExhausted, "watch: consumer fell behind")
+				return refuse(codes.ResourceExhausted, "watch: consumer fell behind", serr.ReasonWatchConsumerBehind, nil, 0)
 			}
 			if err := stream.Send(toProtoEvent(ev)); err != nil {
 				return err

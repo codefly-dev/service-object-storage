@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -184,10 +185,11 @@ type Admission struct {
 // SDK in between reported it — some format the dial error into text and drop
 // its identity.
 type Guard struct {
-	Client   *http.Client
-	refused  atomic.Bool
-	tooLarge atomic.Bool
-	maxBody  int64
+	Client     *http.Client
+	refused    atomic.Bool
+	tooLarge   atomic.Bool
+	retryAfter atomic.Int64
+	maxBody    int64
 
 	mu   sync.Mutex
 	sent []string
@@ -198,6 +200,21 @@ func (g *Guard) Refused() bool { return g.refused.Load() }
 
 // TooLarge reports whether any response body ran past the guard's bound.
 func (g *Guard) TooLarge() bool { return g.tooLarge.Load() }
+
+// RetryAfter is how long the store last asked the call to wait, by a
+// Retry-After on a 429 or 503; 0 when it never did.
+func (g *Guard) RetryAfter() time.Duration { return time.Duration(g.retryAfter.Load()) }
+
+// retryAfter parses a Retry-After value: delay seconds or an HTTP date.
+func retryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
+}
 
 // ErrResponseTooLarge fails the read of a response body that runs past the
 // guard's bound.
@@ -269,6 +286,11 @@ func (t *redacting) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp == nil {
 		return resp, err
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		if delay := retryAfter(resp.Header.Get("Retry-After"), time.Now()); delay > 0 {
+			t.guard.retryAfter.Store(int64(delay))
+		}
 	}
 	if t.guard.maxBody > 0 && resp.Body != nil {
 		resp.Body = &boundedBody{ReadCloser: resp.Body, left: t.guard.maxBody, guard: t.guard}

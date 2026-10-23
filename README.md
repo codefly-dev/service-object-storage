@@ -43,6 +43,33 @@ The honest intersection across all four backends (the surface OpenDAL /
 Errors are normalized to gRPC status codes (`NotFound`, `AlreadyExists`,
 `FailedPrecondition`, `Unimplemented`, …) so clients never parse an S3 XML code.
 
+**Every refusal names its reason.** Beside the unchanged message, the status
+carries a `google.rpc.ErrorInfo` in domain `object-storage.codefly.dev`. Act on
+the reason, not the code, because one code covers refusals that need different
+actions:
+
+| Code | Reason | What it means, and what to do |
+|------|--------|-------------------------------|
+| `PERMISSION_DENIED` | `DESTINATION_REFUSED` | The guard refused the endpoint. Refuse the source. |
+| `PERMISSION_DENIED` | `CREDENTIAL_REJECTED` | The store refused the credential. Re-authorise. |
+| `RESOURCE_EXHAUSTED` | `STORE_THROTTLED` | The store throttled. Back off. Carries a `google.rpc.RetryInfo`: the store's `Retry-After` when it sent one, else 1 s; metadata `retry_delay_source` is `store` or `default`. |
+| `RESOURCE_EXHAUSTED` | `OBJECT_TOO_LARGE` | Over the bound object cap (`max_bytes`). Skip the object. |
+| `RESOURCE_EXHAUSTED` | `RESPONSE_TOO_LARGE` | A store response exceeded the bound (`max_bytes`). |
+| `RESOURCE_EXHAUSTED` | `LISTING_TOO_LONG` | A page had more entries than asked for (`entries`, `max_entries`). |
+| `RESOURCE_EXHAUSTED` | `WATCH_CONSUMER_BEHIND` | A Watch consumer fell behind. Reconcile, then re-watch. |
+| `NOT_FOUND` | `OBJECT_NOT_FOUND` | The object does not exist. |
+| `NOT_FOUND` | `BUCKET_NOT_FOUND` | The bucket or container does not exist. |
+| `INVALID_ARGUMENT` | `BINDING_INVALID` | The binding is unusable as given: kind, bucket, endpoint, or credential. |
+| `INVALID_ARGUMENT` | `TOO_MANY_ITEMS` | Too many `GetMany` items (`max_items`). |
+| `INVALID_ARGUMENT` | `INVALID_ARGUMENT` | Any other invalid request. |
+| `UNAVAILABLE` | `OPERATION_DEADLINE` | A bound operation or `GetMany` ran out of time (`per_operation`, `per_get_many`). |
+| `UNAVAILABLE` | `ENDPOINT_UNRESOLVED` | The endpoint's name did not resolve. |
+| `UNAVAILABLE` | `STORE_UNAVAILABLE` | The store did not answer. |
+| `ABORTED` | `BODY_SIZE_MISMATCH` | A `GetMany` body disagreed with its declared size (`declared_bytes`, `sent_bytes`). |
+| `INTERNAL` | `LISTING_INCOMPLETE` | The store marked a page truncated without a continuation token. |
+| `INTERNAL` | `INTERNAL` | Unclassified. |
+| `FAILED_PRECONDITION`, `ALREADY_EXISTS`, `UNIMPLEMENTED` | `PRECONDITION_FAILED`, `ALREADY_EXISTS`, `UNSUPPORTED` | The conditional, create-if-absent and unsupported-operation refusals. |
+
 `Stat`, `Get`, `GetMany`, `List` and `Capabilities` can also read a bucket the caller
 names, with the caller's credential — see
 [bound calls](#reading-a-callers-own-bucket-bound-calls).

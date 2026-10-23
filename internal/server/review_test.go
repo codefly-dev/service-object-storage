@@ -64,7 +64,12 @@ func TestReviewBearerReturnedInStatus(t *testing.T) {
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 	require.NotContains(t, status.Convert(err).Message(), token)
 	require.Contains(t, status.Convert(err).Message(), "invalid credential: [redacted]", "the store's own words are kept")
-	require.Empty(t, status.Convert(err).Details())
+	// The refusal names its reason beside the message (it used to carry no
+	// details at all), and no detail carries the credential either.
+	requireReason(t, err, codes.PermissionDenied, "CREDENTIAL_REJECTED")
+	for _, detail := range status.Convert(err).Details() {
+		require.NotContains(t, fmt.Sprint(detail), token)
+	}
 
 	const secret = "synthetic-access-secret"
 	endpoint, c = composedStore(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -210,6 +215,8 @@ func TestReviewUnknownSizeBatch(t *testing.T) {
 		Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
 	require.Equal(t, codes.Aborted, status.Code(err), "a body shorter than its declared size completed: %v", err)
 	require.Contains(t, status.Convert(err).Message(), "ended at 5 of its declared 10 bytes")
+	info, _ := requireReason(t, err, codes.Aborted, "BODY_SIZE_MISMATCH")
+	require.Equal(t, map[string]string{"declared_bytes": "10", "sent_bytes": "5"}, info.GetMetadata())
 	require.Len(t, items, 1, "the batch moved on past an incomplete item")
 }
 
@@ -224,6 +231,7 @@ func TestReviewMissingBucketContinuesBatch(t *testing.T) {
 	items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
 	require.Equal(t, codes.NotFound, status.Code(err), "got %v", err)
 	require.Contains(t, status.Convert(err).Message(), "bucket or container does not exist")
+	requireReason(t, err, codes.NotFound, "BUCKET_NOT_FOUND")
 	require.Empty(t, items)
 
 	endpoint, c = composedStore(t, func(w http.ResponseWriter, r *http.Request) {

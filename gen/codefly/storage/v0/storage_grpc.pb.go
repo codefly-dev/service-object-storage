@@ -49,7 +49,31 @@ const (
 // ObjectStorage is the generic data plane. Errors are returned as gRPC status
 // codes normalized across backends: NOT_FOUND, ALREADY_EXISTS,
 // FAILED_PRECONDITION (conditional/CAS), UNIMPLEMENTED (unsupported),
-// PERMISSION_DENIED, RESOURCE_EXHAUSTED (throttled), INTERNAL.
+// PERMISSION_DENIED, RESOURCE_EXHAUSTED, ABORTED, UNAVAILABLE, INTERNAL.
+//
+// Every refusal also names its reason: a google.rpc.ErrorInfo in the status
+// details, domain "object-storage.codefly.dev", beside the unchanged message.
+// Act on the reason, not the code — one code covers refusals that call for
+// different actions:
+//
+//	PERMISSION_DENIED   DESTINATION_REFUSED (the guard: refuse the source),
+//	                    CREDENTIAL_REJECTED (the store: re-authorise)
+//	RESOURCE_EXHAUSTED  STORE_THROTTLED (back off; carries a
+//	                    google.rpc.RetryInfo — the store's Retry-After, or a
+//	                    1 s default, metadata retry_delay_source=store|default),
+//	                    OBJECT_TOO_LARGE (skip the object; max_bytes),
+//	                    RESPONSE_TOO_LARGE (max_bytes),
+//	                    LISTING_TOO_LONG (entries, max_entries),
+//	                    WATCH_CONSUMER_BEHIND (reconcile, then re-watch)
+//	NOT_FOUND           OBJECT_NOT_FOUND, BUCKET_NOT_FOUND
+//	INVALID_ARGUMENT    BINDING_INVALID, TOO_MANY_ITEMS (max_items),
+//	                    INVALID_ARGUMENT
+//	UNAVAILABLE         OPERATION_DEADLINE (per_operation, per_get_many),
+//	                    ENDPOINT_UNRESOLVED, STORE_UNAVAILABLE
+//	ABORTED             BODY_SIZE_MISMATCH (declared_bytes, sent_bytes)
+//	INTERNAL            LISTING_INCOMPLETE, INTERNAL
+//	FAILED_PRECONDITION PRECONDITION_FAILED;  ALREADY_EXISTS ALREADY_EXISTS;
+//	UNIMPLEMENTED       UNSUPPORTED
 type ObjectStorageClient interface {
 	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*GetHeader, error)
 	Get(ctx context.Context, in *GetRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[GetResponse], error)
@@ -253,7 +277,31 @@ func (c *objectStorageClient) Native(ctx context.Context, in *NativeRequest, opt
 // ObjectStorage is the generic data plane. Errors are returned as gRPC status
 // codes normalized across backends: NOT_FOUND, ALREADY_EXISTS,
 // FAILED_PRECONDITION (conditional/CAS), UNIMPLEMENTED (unsupported),
-// PERMISSION_DENIED, RESOURCE_EXHAUSTED (throttled), INTERNAL.
+// PERMISSION_DENIED, RESOURCE_EXHAUSTED, ABORTED, UNAVAILABLE, INTERNAL.
+//
+// Every refusal also names its reason: a google.rpc.ErrorInfo in the status
+// details, domain "object-storage.codefly.dev", beside the unchanged message.
+// Act on the reason, not the code — one code covers refusals that call for
+// different actions:
+//
+//	PERMISSION_DENIED   DESTINATION_REFUSED (the guard: refuse the source),
+//	                    CREDENTIAL_REJECTED (the store: re-authorise)
+//	RESOURCE_EXHAUSTED  STORE_THROTTLED (back off; carries a
+//	                    google.rpc.RetryInfo — the store's Retry-After, or a
+//	                    1 s default, metadata retry_delay_source=store|default),
+//	                    OBJECT_TOO_LARGE (skip the object; max_bytes),
+//	                    RESPONSE_TOO_LARGE (max_bytes),
+//	                    LISTING_TOO_LONG (entries, max_entries),
+//	                    WATCH_CONSUMER_BEHIND (reconcile, then re-watch)
+//	NOT_FOUND           OBJECT_NOT_FOUND, BUCKET_NOT_FOUND
+//	INVALID_ARGUMENT    BINDING_INVALID, TOO_MANY_ITEMS (max_items),
+//	                    INVALID_ARGUMENT
+//	UNAVAILABLE         OPERATION_DEADLINE (per_operation, per_get_many),
+//	                    ENDPOINT_UNRESOLVED, STORE_UNAVAILABLE
+//	ABORTED             BODY_SIZE_MISMATCH (declared_bytes, sent_bytes)
+//	INTERNAL            LISTING_INCOMPLETE, INTERNAL
+//	FAILED_PRECONDITION PRECONDITION_FAILED;  ALREADY_EXISTS ALREADY_EXISTS;
+//	UNIMPLEMENTED       UNSUPPORTED
 type ObjectStorageServer interface {
 	Stat(context.Context, *StatRequest) (*GetHeader, error)
 	Get(*GetRequest, grpc.ServerStreamingServer[GetResponse]) error

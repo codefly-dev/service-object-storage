@@ -106,19 +106,23 @@ func (c *call) err(err error) error {
 		return err
 	}
 	code := serr.CodeOf(err)
+	reason := serr.ReasonOf(err)
 	op, msg := "binding", err.Error()
+	var meta map[string]string
 	var coded *serr.Error
 	if errors.As(err, &coded) && coded.Err != nil {
-		op, msg = coded.Op, coded.Err.Error()
+		op, msg, meta = coded.Op, coded.Err.Error(), coded.Meta
 	}
 	switch {
 	case errors.Is(err, egress.ErrNonPublicDestination) || (c.guard != nil && c.guard.Refused()):
-		code = serr.PermissionDenied
+		code, reason = serr.PermissionDenied, serr.ReasonDestinationRefused
 	case errors.Is(err, egress.ErrResponseTooLarge) || (c.guard != nil && c.guard.TooLarge()):
-		code = serr.TooLarge
+		code, reason = serr.TooLarge, serr.ReasonResponseTooLarge
+		meta = map[string]string{"max_bytes": fmt.Sprint(maxBoundObjectBytes)}
 		msg = fmt.Sprintf("a response from the store exceeded %d bytes; refused: %s", maxBoundObjectBytes, msg)
 	case errors.Is(err, context.DeadlineExceeded):
-		code = serr.Unavailable
+		code, reason = serr.Unavailable, serr.ReasonOperationDeadline
+		meta = map[string]string{"per_operation": boundOperationTimeout.String(), "per_get_many": boundBatchTimeout.String()}
 		msg = fmt.Sprintf("the store did not complete the operation within its deadline (%s per operation, %s per GetMany call): %s",
 			boundOperationTimeout, boundBatchTimeout, msg)
 	}
@@ -126,7 +130,11 @@ func (c *call) err(err error) error {
 	if c.guard != nil {
 		secrets = append(c.guard.Sent(), secrets...)
 	}
-	return serr.New(code, op, egress.Redact(msg, secrets))
+	out := serr.New(code, op, egress.Redact(msg, secrets)).WithReason(reason, meta)
+	if code == serr.Throttled && c.guard != nil {
+		out.RetryAfter = c.guard.RetryAfter()
+	}
+	return out
 }
 
 // bindingSecrets are the credential values a bound call's errors must never
@@ -157,14 +165,14 @@ func bindingSecrets(b *storagev0.Binding) []string {
 func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Composed) (backend.Config, *egress.Guard, error) {
 	const op = "binding"
 	if !bindableKinds[b.GetKind()] {
-		return backend.Config{}, nil, serr.New(serr.InvalidArgument, op,
+		return backend.Config{}, nil, bindingInvalid(op,
 			fmt.Sprintf("kind %q cannot be bound (want s3, minio, gcs or azure)", b.GetKind()))
 	}
 	if b.GetBucket() == "" {
-		return backend.Config{}, nil, serr.New(serr.InvalidArgument, op, "bucket is required")
+		return backend.Config{}, nil, bindingInvalid(op, "bucket is required")
 	}
 	if b.GetKind() == "minio" && b.GetEndpoint() == "" {
-		return backend.Config{}, nil, serr.New(serr.InvalidArgument, op, "kind minio requires an endpoint")
+		return backend.Config{}, nil, bindingInvalid(op, "kind minio requires an endpoint")
 	}
 	cfg := backend.Config{
 		Kind:         b.GetKind(),
@@ -182,18 +190,18 @@ func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Comp
 	case "gcs":
 		cfg.GCSCredentialsJSON, cfg.GCSAccessToken = cred.GetServiceAccountKey(), cred.GetAccessToken()
 		if len(cfg.GCSCredentialsJSON) == 0 && cfg.GCSAccessToken == "" {
-			return backend.Config{}, nil, serr.New(serr.InvalidArgument, op,
+			return backend.Config{}, nil, bindingInvalid(op,
 				"kind gcs requires credential.service_account_key or credential.access_token")
 		}
 	case "azure":
 		cfg.AzureAccount, cfg.AzureKey = cred.GetAccessKey().GetId(), cred.GetAccessKey().GetSecret()
 		if cfg.AzureAccount == "" || cfg.AzureKey == "" {
-			return backend.Config{}, nil, serr.New(serr.InvalidArgument, op, "kind azure requires credential.access_key (account and shared key)")
+			return backend.Config{}, nil, bindingInvalid(op, "kind azure requires credential.access_key (account and shared key)")
 		}
 	default:
 		cfg.AccessKey, cfg.SecretKey = cred.GetAccessKey().GetId(), cred.GetAccessKey().GetSecret()
 		if cfg.AccessKey == "" || cfg.SecretKey == "" {
-			return backend.Config{}, nil, serr.New(serr.InvalidArgument, op,
+			return backend.Config{}, nil, bindingInvalid(op,
 				fmt.Sprintf("kind %s requires credential.access_key", b.GetKind()))
 		}
 	}
@@ -204,11 +212,11 @@ func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Comp
 			var dnsErr *net.DNSError
 			switch {
 			case errors.Is(err, egress.ErrNonPublicDestination):
-				return backend.Config{}, nil, serr.Wrap(serr.PermissionDenied, op, err)
+				return backend.Config{}, nil, serr.Wrap(serr.PermissionDenied, op, err).WithReason(serr.ReasonDestinationRefused, nil)
 			case errors.As(err, &dnsErr):
-				return backend.Config{}, nil, serr.Wrap(serr.Unavailable, op, err)
+				return backend.Config{}, nil, serr.Wrap(serr.Unavailable, op, err).WithReason(serr.ReasonEndpointUnresolved, nil)
 			default:
-				return backend.Config{}, nil, serr.Wrap(serr.InvalidArgument, op, err)
+				return backend.Config{}, nil, serr.Wrap(serr.InvalidArgument, op, err).WithReason(serr.ReasonBindingInvalid, nil)
 			}
 		}
 	}
@@ -216,6 +224,14 @@ func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Comp
 	cfg.HTTPClient = guard.Client
 	return cfg, guard, nil
 }
+
+// bindingInvalid refuses a binding the gateway cannot use as given.
+func bindingInvalid(op, msg string) *serr.Error {
+	return serr.New(serr.InvalidArgument, op, msg).WithReason(serr.ReasonBindingInvalid, nil)
+}
+
+// capMeta is the metadata of an OBJECT_TOO_LARGE refusal.
+var capMeta = map[string]string{"max_bytes": fmt.Sprint(maxBoundObjectBytes)}
 
 // errObjectTooLarge refuses a bound Get past maxBoundObjectBytes.
 var errObjectTooLarge = fmt.Errorf("object exceeds the bound-read cap of %d bytes", maxBoundObjectBytes)

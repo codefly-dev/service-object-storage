@@ -98,7 +98,7 @@ func boundOptions(ctx context.Context, cfg backend.Config) ([]option.ClientOptio
 	} else {
 		jwt, err := google.JWTConfigFromJSON(cfg.GCSCredentialsJSON, storage.ScopeReadOnly)
 		if err != nil {
-			return nil, serr.Wrap(serr.InvalidArgument, "gcs.New", err)
+			return nil, serr.Wrap(serr.InvalidArgument, "gcs.New", err).WithReason(serr.ReasonBindingInvalid, nil)
 		}
 		client = jwt.Client(context.WithValue(ctx, oauth2.HTTPClient, cfg.HTTPClient))
 	}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -58,6 +59,29 @@ func requireRefused(t *testing.T, err error) {
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 	require.Contains(t, status.Convert(err).Message(), `"localhost"`)
 	require.Contains(t, status.Convert(err).Message(), "not a public address")
+	requireReason(t, err, codes.PermissionDenied, "DESTINATION_REFUSED")
+}
+
+// requireReason asserts err is code and names reason in a google.rpc.ErrorInfo
+// of the gateway's domain, and returns that ErrorInfo and any RetryInfo.
+func requireReason(t *testing.T, err error, code codes.Code, reason string) (*errdetails.ErrorInfo, *errdetails.RetryInfo) {
+	t.Helper()
+	st := status.Convert(err)
+	require.Equal(t, code, st.Code(), "got %v", err)
+	var info *errdetails.ErrorInfo
+	var retry *errdetails.RetryInfo
+	for _, detail := range st.Details() {
+		switch d := detail.(type) {
+		case *errdetails.ErrorInfo:
+			info = d
+		case *errdetails.RetryInfo:
+			retry = d
+		}
+	}
+	require.NotNil(t, info, "the refusal names no reason: %v", err)
+	require.Equal(t, server.ErrorDomain, info.GetDomain())
+	require.Equal(t, reason, info.GetReason(), "got %v", err)
+	return info, retry
 }
 
 // A bound Capabilities answers for the bound kind and reports the caps a bound
@@ -89,6 +113,7 @@ func TestBindingRefusesAKindWithNoRemoteStore(t *testing.T) {
 	b.Kind = "mem"
 	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: b})
 	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
+	requireReason(t, err, codes.InvalidArgument, "BINDING_INVALID")
 }
 
 // A bound call reaches a non-public endpoint only when the server was told it

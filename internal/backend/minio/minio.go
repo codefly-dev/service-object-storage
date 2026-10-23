@@ -433,6 +433,13 @@ func (b *Backend) List(ctx context.Context, opts backend.ListOptions) (*backend.
 	count := 0
 	for obj := range b.client.ListObjects(lctx, b.bucket, mopts) {
 		if obj.Err != nil {
+			// minio-go refuses a page marked truncated with no continuation
+			// token, an incomplete listing, as NotImplemented — a code too
+			// generic to classify by, so its own message identifies it.
+			if resp := minio.ToErrorResponse(obj.Err); resp.Code == minio.NotImplemented &&
+				resp.Message == "Truncated response should have continuation token set" {
+				return nil, serr.Wrap(serr.Internal, op, obj.Err).WithReason(serr.ReasonListingIncomplete, nil)
+			}
 			return nil, mapErr(op, obj.Err)
 		}
 		if opts.Delimiter != "" && strings.HasSuffix(obj.Key, "/") {
