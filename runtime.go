@@ -559,8 +559,9 @@ func composedEndpoints(ctx context.Context, mappings []*basev0.NetworkMapping) [
 	var out []string
 	for _, mapping := range mappings {
 		instance := resources.FilterNetworkInstance(ctx, mapping.GetInstances(), resources.NewContainerNetworkAccess())
-		if instance != nil && instance.GetHost() != "" && instance.GetPort() != 0 {
-			out = append(out, net.JoinHostPort(instance.GetHost(), strconv.Itoa(int(instance.GetPort()))))
+		// Hostname is the bare host; core's Host already carries the port.
+		if instance != nil && instance.GetHostname() != "" && instance.GetPort() != 0 {
+			out = append(out, net.JoinHostPort(instance.GetHostname(), strconv.Itoa(int(instance.GetPort()))))
 		}
 	}
 	return out
