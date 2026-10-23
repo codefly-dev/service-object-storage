@@ -163,6 +163,20 @@ type Service struct {
 	gatewayToken string
 
 	GrpcEndpoint *basev0.Endpoint
+	// TenantStoreEndpoint is the declared tenant-store endpoint, nil when not declared.
+	TenantStoreEndpoint *basev0.Endpoint
+	// tenantStore is what a dependent needs to bind the local MinIO, set once
+	// the Runtime has started it behind TenantStoreEndpoint.
+	tenantStore *tenantStore
+}
+
+// tenantStore is the local MinIO as a dependent reaches it: the mapping of
+// the tenant-store endpoint and the per-run root key of a throwaway store.
+// Dependents already hold the gateway token, which grants bucket-wide
+// read/write/delete on the same store, so the key grants nothing new.
+type tenantStore struct {
+	mapping           *basev0.NetworkMapping
+	accessKey, secret string
 }
 
 func NewService() *Service {
@@ -187,6 +201,9 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 					{Name: "connection", Description: "grpc connection string"},
 					{Name: "endpoint", Description: "host:port of the gRPC endpoint"},
 					{Name: "token", Description: "bearer sent as the x-codefly-token grpc metadata header"},
+					{Name: "minio_endpoint", Description: "local runs with a `minio` endpoint only: http origin of the local MinIO, a tenant store to bind"},
+					{Name: "minio_access_key", Description: "local runs with a `minio` endpoint only: the local MinIO's access key"},
+					{Name: "minio_secret_key", Description: "local runs with a `minio` endpoint only: the local MinIO's per-run secret key"},
 				},
 			},
 		},
@@ -207,6 +224,22 @@ func resolveServingGRPCEndpoint(ctx context.Context, endpoints []*basev0.Endpoin
 		return nil, fmt.Errorf("no grpc endpoint found")
 	}
 	return grpc[0], nil
+}
+
+// tenantStoreEndpointName is the optional endpoint through which a service
+// offers its local MinIO's S3 API to the services that depend on it — a
+// tenant store a bound call can read, for a local proof. Declaring it is the
+// opt-in; without it the MinIO stays private to the gateway.
+const tenantStoreEndpointName = "minio"
+
+// resolveTenantStoreEndpoint returns the declared tenant-store endpoint, or nil.
+func resolveTenantStoreEndpoint(ctx context.Context, endpoints []*basev0.Endpoint) *basev0.Endpoint {
+	for _, endpoint := range resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints) {
+		if endpoint.GetName() == tenantStoreEndpointName {
+			return endpoint
+		}
+	}
+	return nil
 }
 
 // LoadConfiguration resolves the effective backend configuration. Settings are
@@ -280,6 +313,17 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	// endpoint.
 	if s.gatewayToken != "" {
 		values = append(values, &basev0.ConfigurationValue{Key: "token", Value: s.gatewayToken, Secret: true})
+	}
+	if s.tenantStore != nil {
+		store := resources.FilterNetworkInstance(ctx, s.tenantStore.mapping.GetInstances(), instance.GetAccess())
+		if store == nil {
+			return nil, s.Wool.NewError("tenant store endpoint has no instance for access %s", instance.GetAccess().GetKind())
+		}
+		values = append(values,
+			&basev0.ConfigurationValue{Key: "minio_endpoint", Value: "http://" + store.GetAddress()},
+			&basev0.ConfigurationValue{Key: "minio_access_key", Value: s.tenantStore.accessKey},
+			&basev0.ConfigurationValue{Key: "minio_secret_key", Value: s.tenantStore.secret, Secret: true},
+		)
 	}
 	return &basev0.Configuration{
 		Origin:         s.Base.Unique(),

@@ -148,6 +148,53 @@ operator setting.
 The MinIO a local run starts as this gateway's own backend is not a dependency
 and stays unbindable.
 
+### A tenant store for a local proof: this service itself
+
+A local proof of a bound read needs no other agent. Its store is a **second
+object-storage service** with no backend set, which runs its own MinIO. It
+offers that MinIO to the services that depend on it when it declares a
+`minio` endpoint:
+
+```yaml
+# services/tenant/service.codefly.yaml
+endpoints:
+    - name: grpc
+    - name: minio
+      api: tcp
+      visibility: internal
+
+# services/<reader>/service.codefly.yaml (the object-storage service that binds it)
+service-dependencies:
+    - name: tenant
+      kind: runtime
+      endpoints:
+        - name: grpc
+          api: grpc
+        - name: minio
+          api: tcp
+```
+
+- **Port and reach.** On a local run, the tenant's MinIO is published on the
+  port codefly allocated to `minio`. The reader's mapping therefore names the
+  store itself, and its gateway admits exactly that address as a composed
+  endpoint. The port is published on all interfaces, as the gateway's is, so a
+  container can reach it through `host.docker.internal`. The per-run root key
+  guards it.
+- **What a dependent receives.** The tenant's `object-storage` configuration
+  group adds:
+  - `minio_endpoint`: the http origin, for the dependent's access view.
+  - `minio_access_key`.
+  - `minio_secret_key`: the per-run root key of this throwaway store, marked
+    secret. It grants nothing a dependent's gateway `token` does not already
+    grant on the same store.
+- **The binding** is `kind: "minio"`, with `endpoint` set to `minio_endpoint`
+  as the reader's gateway reaches it.
+- **Without the endpoint** the MinIO stays private, exactly as before.
+- **Refusals.**
+  - Declaring `minio` with a backend that runs no local MinIO fails at init.
+  - The Builder refuses to deploy a service that declares it, because a
+    deployment starts no MinIO.
+
 ## Byte path
 
 - **Small objects** are proxied through the gateway.

@@ -133,6 +133,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 				return s.Wool.Wrapf(err, "cannot find grpc endpoint")
 			}
 			s.GrpcEndpoint = endpoint
+			s.TenantStoreEndpoint = resolveTenantStoreEndpoint(ctx, endpoints)
 			return nil
 		},
 	})
@@ -177,6 +178,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
+	if s.TenantStoreEndpoint != nil && !s.runsLocalMinIO() {
+		return s.Runtime.InitError(w.NewError("endpoint %q serves the local MinIO, and backend %q runs none", tenantStoreEndpointName, s.conf.backend))
+	}
 	if s.runsLocalMinIO() {
 		release, startErr := s.startLocalMinIOWithRelease(ctx)
 		if startErr != nil {
@@ -253,7 +257,7 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 			release()
 		}
 	}()
-	port, err := freeHostPort()
+	port, err := s.minioPort(ctx)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot allocate minio port")
 	}
@@ -277,6 +281,13 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 	// operator's recovery tools, so it stays on core's loopback default. The
 	// gateway never dials it: see joinMinIONetwork.
 	runner.WithPortMapping(ctx, s.minioHostPort, minioContainerPort)
+	if s.TenantStoreEndpoint != nil {
+		// Declared as a tenant store: dependents in their own containers reach
+		// it through host.docker.internal, which is the bridge gateway on
+		// Linux, so — as for the gateway — the port is published on all
+		// interfaces, and the per-run root key is what guards it.
+		runner.WithPublicPorts()
+	}
 	runner.WithEnvironmentVariables(ctx,
 		resources.Env("MINIO_ROOT_USER", localMinioUser),
 		resources.Env("MINIO_ROOT_PASSWORD", s.minioPassword),
@@ -314,7 +325,28 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 	if err = s.commitMinIOProvisioning(); err != nil {
 		return nil, err
 	}
+	if s.TenantStoreEndpoint != nil {
+		mapping, mapErr := resources.FindNetworkMapping(ctx, s.NetworkMappings, s.TenantStoreEndpoint)
+		if mapErr != nil {
+			return nil, s.Wool.Wrapf(mapErr, "cannot find the tenant store mapping")
+		}
+		s.tenantStore = &tenantStore{mapping: mapping, accessKey: localMinioUser, secret: s.minioPassword}
+	}
 	return release, nil
+}
+
+// minioPort is MinIO's host port: the one codefly allocated to the declared
+// tenant-store endpoint, so a dependent's mapping names the store itself, or
+// otherwise a free loopback port for the agent alone.
+func (s *Runtime) minioPort(ctx context.Context) (uint16, error) {
+	if s.TenantStoreEndpoint == nil {
+		return freeHostPort()
+	}
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TenantStoreEndpoint, resources.NewNativeNetworkAccess())
+	if err != nil {
+		return 0, err
+	}
+	return uint16(instance.GetPort()), nil
 }
 
 // ensureBucket creates the configured bucket if it does not yet exist, retrying
