@@ -26,9 +26,23 @@ const (
 
 // boundOperationTimeout bounds each bound operation end to end — a List, a
 // Stat, a Get, a Capabilities, each GetMany item — body included, so a store
-// that sends headers and then stalls cannot hold the caller. A variable only
-// so a test can shorten it.
-var boundOperationTimeout = 30 * time.Second
+// that sends headers and then stalls cannot hold the caller. boundBatchTimeout
+// bounds a whole GetMany, however many items it carries. Both run from the
+// start of the call, so qualifying the endpoint (its DNS resolution) is inside
+// them. Variables only so a test can shorten them.
+var (
+	boundOperationTimeout = 30 * time.Second
+	boundBatchTimeout     = 10 * time.Minute
+)
+
+// boundCall returns the context a bound RPC runs under from its first step:
+// within budget. An unbound RPC's context is ctx.
+func boundCall(ctx context.Context, b *storagev0.Binding, budget time.Duration) (context.Context, context.CancelFunc) {
+	if b == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, budget)
+}
 
 // bindableKinds are the backends a binding may name: every registered kind
 // that reaches a remote store. "mem" holds nothing a caller could bind to.
@@ -105,7 +119,8 @@ func (c *call) err(err error) error {
 		msg = fmt.Sprintf("a response from the store exceeded %d bytes; refused: %s", maxBoundObjectBytes, msg)
 	case errors.Is(err, context.DeadlineExceeded):
 		code = serr.Unavailable
-		msg = fmt.Sprintf("the store did not complete the operation within %s: %s", boundOperationTimeout, msg)
+		msg = fmt.Sprintf("the store did not complete the operation within its deadline (%s per operation, %s per GetMany call): %s",
+			boundOperationTimeout, boundBatchTimeout, msg)
 	}
 	secrets := c.secrets
 	if c.guard != nil {

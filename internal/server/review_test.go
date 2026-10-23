@@ -189,22 +189,28 @@ func TestReviewUnknownSizeBatch(t *testing.T) {
 		require.Equal(t, "alpha", string(item.body))
 	}
 
+	// The short-body branch (round two, n2). Over S3 the declared size is the
+	// same response's Content-Length, so a short body is the HTTP layer's
+	// ErrUnexpectedEOF before the accounting runs. On GCS the size comes from
+	// the metadata read and the bytes from the media read, so a store whose
+	// metadata says 10 bytes and whose media read ends cleanly after 5 reaches
+	// the accounting itself — which must end the stream, not complete the item.
+	t.Setenv("STORAGE_EMULATOR_HOST", "")
 	endpoint, c = composedStore(t, func(w http.ResponseWriter, r *http.Request) {
-		hj, ok := w.(http.Hijacker)
-		require.True(t, ok)
-		conn, buf, err := hj.Hijack()
-		require.NoError(t, err)
-		defer conn.Close()
-		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nETag: \"etag\"\r\nContent-Length: 10\r\n\r\nalpha")
-		_ = buf.Flush()
-	})
-	items, err = getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
-	require.Error(t, err, "a body shorter than its declared length completed")
-	for _, item := range items {
-		if item.header.GetOutcome() == storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK && len(items) > 1 {
-			require.EqualValues(t, item.header.GetInfo().GetSize(), len(item.body))
+		if r.URL.Query().Get("alt") == "media" || !strings.HasPrefix(r.URL.Path, "/storage/v1/") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", "5")
+			_, _ = fmt.Fprint(w, "alpha")
+			return
 		}
-	}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"bucket":"tenant","name":"a","etag":"e1","size":"10","generation":"1","metageneration":"1","updated":"2026-01-01T00:00:00Z"}`)
+	})
+	items, err = getMany(t, c, &storagev0.GetManyRequest{Binding: gcsTokenBinding(endpoint, "synthetic-token"),
+		Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
+	require.Equal(t, codes.Aborted, status.Code(err), "a body shorter than its declared size completed: %v", err)
+	require.Contains(t, status.Convert(err).Message(), "ended at 5 of its declared 10 bytes")
+	require.Len(t, items, 1, "the batch moved on past an incomplete item")
 }
 
 // r7: a missing bucket is not every object deleted. The stream ends with
@@ -281,8 +287,13 @@ func TestBoundListOfAMissingBucketFailsOnEveryKind(t *testing.T) {
 // gateway's ambient identity — GOOGLE_APPLICATION_CREDENTIALS, the metadata
 // server — is never consulted, for an access token or a service-account key,
 // opening a client (Capabilities) or reading through one (List).
+//
+// Round two (n1): GCP_STORAGE_GO_ENABLE_OTEL_METRICS=true would start the
+// SDK's metrics exporter, which runs the same discovery; it is set here so
+// the invariant holds with it on.
 func TestReviewBoundGCSReadsAmbientCredentials(t *testing.T) {
 	t.Setenv("STORAGE_EMULATOR_HOST", "")
+	t.Setenv("GCP_STORAGE_GO_ENABLE_OTEL_METRICS", "true")
 	fifo := filepath.Join(t.TempDir(), "ambient-credentials.json")
 	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", fifo)

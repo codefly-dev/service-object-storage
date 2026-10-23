@@ -60,13 +60,13 @@ func (s *Server) AdmitComposed(composed egress.Composed) *Server {
 // Stat returns object metadata, honoring conditional headers by comparing the
 // fetched ETag (NotModified is carried in the header, not as an error).
 func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storagev0.GetHeader, error) {
+	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
+	defer cancel()
 	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return nil, toStatus(err)
 	}
 	defer c.Release()
-	ctx, cancel := c.operation(ctx)
-	defer cancel()
 	info, err := c.Stat(ctx, req.GetKey(), req.GetVersionId())
 	if err != nil {
 		return nil, toStatus(c.err(err))
@@ -84,13 +84,13 @@ func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storage
 // frames. This is the proxy byte path; large objects that should skip the proxy
 // use the Presign RPC instead. A bound Get is capped at maxBoundObjectBytes.
 func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_GetServer) error {
-	c, err := s.backendFor(stream.Context(), req.GetBinding())
+	ctx, cancel := boundCall(stream.Context(), req.GetBinding(), boundOperationTimeout)
+	defer cancel()
+	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return toStatus(err)
 	}
 	defer c.Release()
-	ctx, cancel := c.operation(stream.Context())
-	defer cancel()
 	res, err := c.Get(ctx, req.GetKey(), toBackendGetOptions(req))
 	if err != nil {
 		return toStatus(c.err(err))
@@ -130,25 +130,27 @@ func (s *Server) GetMany(req *storagev0.GetManyRequest, stream storagev0.ObjectS
 	if n := len(req.GetItems()); n > maxGetManyItems {
 		return status.Errorf(codes.InvalidArgument, "get-many: %d items, at most %d per call", n, maxGetManyItems)
 	}
-	c, err := s.backendFor(stream.Context(), req.GetBinding())
+	ctx, cancel := boundCall(stream.Context(), req.GetBinding(), boundBatchTimeout)
+	defer cancel()
+	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return toStatus(err)
 	}
 	defer c.Release()
 	for i, item := range req.GetItems() {
-		if err := getManyItem(stream, c, int32(i), item, req.GetBinding() != nil); err != nil {
+		if err := getManyItem(ctx, stream, c, int32(i), item, req.GetBinding() != nil); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func getManyItem(stream storagev0.ObjectStorage_GetManyServer, c *call, index int32, item *storagev0.GetManyItem, bound bool) error {
+func getManyItem(ctx context.Context, stream storagev0.ObjectStorage_GetManyServer, c *call, index int32, item *storagev0.GetManyItem, bound bool) error {
 	header := &storagev0.GetManyHeader{Index: index}
 	sendHeader := func() error {
 		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Header{Header: header}})
 	}
-	ctx, cancel := c.operation(stream.Context())
+	ctx, cancel := c.operation(ctx)
 	defer cancel()
 	res, err := c.Get(ctx, item.GetKey(), backend.GetOptions{IfMatch: item.GetIfMatch()})
 	if err != nil {
@@ -315,13 +317,13 @@ func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyReques
 // List enumerates a prefix. A bound List returns at most maxBoundListLimit
 // objects per page.
 func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storagev0.ListResult, error) {
+	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
+	defer cancel()
 	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return nil, toStatus(err)
 	}
 	defer c.Release()
-	ctx, cancel := c.operation(ctx)
-	defer cancel()
 	limit := req.GetLimit()
 	if req.GetBinding() != nil && (limit <= 0 || limit > maxBoundListLimit) {
 		limit = maxBoundListLimit
@@ -412,6 +414,8 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 // a binding it reports the bound kind and the caps a bound call runs under;
 // qualifying the bound endpoint resolves its name, and nothing is dialed.
 func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
+	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
+	defer cancel()
 	c, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return nil, toStatus(err)

@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // The host classifier's full vector set (module-saas-starter
@@ -255,5 +256,23 @@ func TestQualify(t *testing.T) {
 	}
 	if _, err := Qualify(ctx, "https://8.8.8.8", nil); err != nil {
 		t.Errorf("Qualify(public literal) = %v", err)
+	}
+}
+
+// Qualify resolves under its caller's context: a resolution that does not
+// answer ends with the caller's deadline (round two, n3).
+func TestQualifyResolvesUnderTheCallersDeadline(t *testing.T) {
+	saved := lookupNetIP
+	lookupNetIP = func(ctx context.Context, _, _ string) ([]netip.Addr, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { lookupNetIP = saved })
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := Qualify(ctx, "https://store.example.com", nil)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+		t.Fatalf("Qualify = %v after %v, want the caller's deadline", err, time.Since(start))
 	}
 }

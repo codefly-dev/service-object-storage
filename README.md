@@ -133,10 +133,13 @@ ListRequest { prefix: "", limit: 0,
 - **Bounds.**
   - Every response a store sends a bound call is bounded to 5 MiB; a longer
     one, a listing included, fails with `RESOURCE_EXHAUSTED`.
-  - Each bound operation (a `List`, `Stat`, `Get`, or each `GetMany` item)
-    must complete within 30 seconds, body included, or fails with
-    `UNAVAILABLE`. A store that sends headers and then stalls cannot hold the
-    caller.
+  - Each bound operation (a `List`, `Stat`, `Get`, `Capabilities`, or each
+    `GetMany` item) must complete within 30 seconds, body included. A whole
+    `GetMany` must complete within 10 minutes, however many items it carries.
+    Either failing is `UNAVAILABLE`.
+  - Both deadlines start before the endpoint is qualified, so its DNS
+    resolution is inside them. A store that sends headers and then stalls
+    cannot hold the caller.
 - **Batched reads.** `GetMany` takes up to `max_get_many_items` (1,000) keys,
   each with the ETag the caller listed as `if_match`, and streams them in
   request order in one call. Each item gets a header with its `index` and an

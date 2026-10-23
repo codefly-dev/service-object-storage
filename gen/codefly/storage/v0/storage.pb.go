@@ -461,9 +461,11 @@ func (x *ByteRange) GetLength() int64 {
 // with PERMISSION_DENIED. A named endpoint is resolved and judged before the
 // first dial as well, so the refusal names it. Bound reads are capped: see
 // BackendCapabilities.max_object_bytes and max_list_limit; every response a
-// store sends a bound call is bounded to max_object_bytes, and each bound
-// operation (a List, Stat, Get, or GetMany item) must complete within 30
-// seconds, body included, or fails UNAVAILABLE.
+// store sends a bound call is bounded to max_object_bytes. Each bound
+// operation (a List, Stat, Get, Capabilities, or GetMany item) must complete
+// within 30 seconds, body included, and a whole GetMany within 10 minutes, or
+// the call fails UNAVAILABLE; both deadlines start before the endpoint is
+// qualified, so its DNS resolution is inside them.
 //
 // A bound List never answers an incomplete listing as complete: a page the
 // store marks truncated without a continuation token, or one with more

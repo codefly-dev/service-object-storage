@@ -118,3 +118,37 @@ func TestReview1235SlowBodyOutlivesOldTimeout(t *testing.T) {
 	require.Error(t, err)
 	require.Less(t, time.Since(start), 3*time.Second, "a stalled object body held the batch")
 }
+
+// Round two (n3): a GetMany whose every item completes within its own
+// deadline is still bounded as a whole — here six items answering in 150 ms
+// each against a 400 ms call budget.
+func TestBoundGetManyHasAWholeCallDeadline(t *testing.T) {
+	defer server.SetBoundBatchTimeout(400 * time.Millisecond)()
+	endpoint, c := composedStore(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("ETag", `"etag"`)
+		w.Header().Set("Content-Length", "5")
+		_, _ = fmt.Fprint(w, "alpha")
+	})
+	items := make([]*storagev0.GetManyItem, 6)
+	for i := range items {
+		items[i] = &storagev0.GetManyItem{Key: fmt.Sprintf("k%d", i)}
+	}
+	start := time.Now()
+	got, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: items})
+	require.Equal(t, codes.Unavailable, status.Code(err), "got %d items, %v", len(got), err)
+	require.Contains(t, status.Convert(err).Message(), "deadline")
+	require.Less(t, len(got), len(items))
+	require.Less(t, time.Since(start), 2*time.Second)
+}
+
+// Round two (n3): the call deadline starts before the endpoint is qualified,
+// so its DNS resolution is inside it — on every bound RPC, Capabilities
+// included, which reaches the store only through that resolution.
+func TestBoundQualificationRunsUnderTheCallDeadline(t *testing.T) {
+	defer server.SetBoundOperationTimeout(time.Nanosecond)()
+	endpoint, c := composedStore(t, func(http.ResponseWriter, *http.Request) {})
+	_, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{Binding: s3Binding(endpoint)})
+	require.Equal(t, codes.Unavailable, status.Code(err), "qualification ran outside the call deadline: %v", err)
+	require.Contains(t, status.Convert(err).Message(), "does not resolve")
+}

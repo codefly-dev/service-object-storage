@@ -108,10 +108,15 @@ func boundOptions(ctx context.Context, cfg backend.Config) ([]option.ClientOptio
 	// server) — the gateway's own identity. The discarding logger keeps
 	// GOOGLE_SDK_GO_LOGGING_LEVEL from writing a bound call's traffic, which
 	// can echo the credential, to the gateway's stderr.
+	// WithDisabledClientMetrics: GCP_STORAGE_GO_ENABLE_OTEL_METRICS=true would
+	// otherwise start a Cloud Monitoring exporter and a resource detector, which
+	// run default credential discovery and query the metadata server outside
+	// client's transport. The option is checked before the variable.
 	opts := []option.ClientOption{
 		option.WithHTTPClient(client),
 		option.WithoutAuthentication(),
 		option.WithLogger(slog.New(slog.DiscardHandler)),
+		storage.WithDisabledClientMetrics(),
 	}
 	if cfg.Endpoint != "" {
 		// A binding's endpoint is a bare origin; the JSON API lives under
