@@ -42,6 +42,68 @@ The honest intersection across all four backends (the surface OpenDAL /
 Errors are normalized to gRPC status codes (`NotFound`, `AlreadyExists`,
 `FailedPrecondition`, `Unimplemented`, …) so clients never parse an S3 XML code.
 
+`Stat`, `Get`, `List` and `Capabilities` can also read a bucket the caller
+names, with the caller's credential — see
+[bound calls](#reading-a-callers-own-bucket-bound-calls).
+
+## Reading a caller's own bucket (bound calls)
+
+`Stat`, `Get`, `List` and `Capabilities` take an optional `Binding`: kind
+(`s3`, `minio`, `gcs`, `azure`), endpoint, region, bucket, prefix, and the
+credential for that one call. A request that carries a binding runs against the
+bucket it names and never touches the configured one; a request without one is
+unchanged. It is how a host reads a tenant's own bucket — its datasource — over
+every backend this gateway has, without a store client of its own.
+
+```text
+ListRequest { prefix: "", limit: 0,
+  binding: { kind: "s3", endpoint: "https://s3.eu-west-1.amazonaws.com",
+             region: "eu-west-1", bucket: "acme-docs", prefix: "kb/",
+             credential: { access_key: { id: "AKIA…", secret: "…" } } } }
+```
+
+- **The binding is an argument, not a configuration.** The gateway opens a
+  client for the call and closes it, and its connections, when the call
+  returns. It does not store, log or return the credential, and the credential
+  fields are marked `debug_redact`. The caller decrypts the credential for the
+  call, as it would for an in-process client.
+- **Only the binding's credential is used.** `s3`/`minio` take an access key,
+  `azure` takes the account name and shared key in the same `access_key`, and
+  `gcs` takes a service-account JSON key. Google keys of any other type are
+  refused, because an external-account key names a local file or command as
+  its token source. A missing credential is `INVALID_ARGUMENT`. The call never
+  falls back to the gateway's own identity, which would lend the caller the
+  gateway's grants.
+- **The public-destination guard.** A binding's endpoint is supplied by the
+  caller, so it is an egress the gateway must not let reach its own network.
+  Every dial a bound call makes, including the token exchange of a GCS key, is
+  judged against the concrete IP being connected to. That covers the first
+  request and every redirect, so neither DNS rebinding nor a redirect gets
+  past it. Any address outside the public internet is refused: loopback,
+  RFC 1918, link-local (cloud metadata included), CGNAT, documentation,
+  benchmarking, reserved, NAT64, 6to4 and Teredo, read from the IANA
+  special-purpose registries. The client never uses a proxy. A named endpoint
+  is also resolved and judged before the first dial, so the refusal is
+  immediate and names it:
+  `PERMISSION_DENIED: binding endpoint "localhost": destination is not a public address`.
+  The endpoint must be a bare `http(s)` origin with no path, query or userinfo.
+  If it is empty, the kind's public service is used. S3-style stores are
+  addressed path-style.
+- **Caps.** A bound `Get` streams at most 5 MiB per object; a larger object is
+  refused with `RESOURCE_EXHAUSTED`, and so is a store that sends more than the
+  size it declared. A bound `List` returns at most 1,000 objects per page, and
+  a zero or larger `limit` is clamped to that; page with `next_page_token` for
+  more. `Capabilities` with the same binding reports both caps
+  (`max_object_bytes`, `max_list_limit`), the bound kind and whether it has
+  `versions`. It reports only the read surface, because a bound call cannot
+  write or presign.
+- Keys are relative to the binding's `prefix`, exactly as `SOS_PREFIX` works
+  for the configured bucket.
+
+A consequence of the guard: a store on the local machine or the cell's network,
+including the MinIO a local run starts, can never be bound. Bound reads are
+for stores on the public internet.
+
 ## Byte path
 
 - **Small objects** are proxied through the gateway.
@@ -427,8 +489,8 @@ and canonical inventory checksum (not the checksum of the formatted file).
 ## Develop
 
 ```bash
-# regenerate stubs from proto (requires buf + protoc-gen-go/-grpc)
-buf generate
+# regenerate stubs from proto (runs buf in codefly's pinned proto companion image)
+codefly generate proto --proto proto --output . --template buf.gen.yaml
 
 go build ./...
 go vet ./...
@@ -449,7 +511,8 @@ proto/codefly/storage/v0/    the uniform API
 gen/                         generated gRPC stubs
 internal/backend/            Backend interface + s3, gcs, azure, minio, mem
 internal/events/             in-process write-event hub behind Watch
-internal/server/             gRPC ObjectStorage implementation
+internal/server/             gRPC ObjectStorage implementation (binding.go: bound calls)
+internal/egress/             public-destination guard for bound calls
 internal/config/             env configuration
 cmd/service-object-storage/  the server binary
 ```

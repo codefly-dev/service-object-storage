@@ -52,12 +52,65 @@ enum CacheStatus {
   CACHE_STATUS_NO_STORE = 6;
 }
 
+// Binding names a bucket the gateway is NOT configured for: a store the caller
+// reaches with its own credential, for this one call. A request that carries a
+// binding runs against it and never touches the gateway's configured bucket;
+// a request without one is unchanged. Only Stat, Get, List and Capabilities
+// take a binding — the reads a datasource pull needs.
+//
+// The binding is an argument, not a configuration: the gateway opens a client
+// for the call, drops it when the call returns, and never stores, logs or
+// returns the credential. Every dial a bound call makes is checked against the
+// concrete address being connected to — on the first request and on every
+// redirect — and an address that is not on the public internet is refused
+// with PERMISSION_DENIED. A named endpoint is resolved and judged before the
+// first dial as well, so the refusal names it. Bound reads are capped: see
+// BackendCapabilities.max_object_bytes and max_list_limit.
+message Binding {
+  // kind is a registered remote backend: "s3", "minio", "gcs" or "azure".
+  string kind = 1;
+  // endpoint is an http(s) origin with no path, query or userinfo. Empty means
+  // the kind's public service: AWS S3 for "s3", Cloud Storage for "gcs",
+  // https://<account>.blob.core.windows.net for "azure". "minio" requires one.
+  // S3-style stores ("s3", "minio") are addressed path-style.
+  string endpoint = 2;
+  // region signs S3-style requests; empty means "us-east-1".
+  string region = 3;
+  // bucket is the bucket (S3, MinIO, GCS) or container (Azure).
+  string bucket = 4;
+  // prefix confines the call to keys under it, exactly as SOS_PREFIX does for
+  // the configured bucket: keys in requests and results are relative to it.
+  string prefix = 5;
+  // credential authenticates this call. It is required: a bound call never
+  // falls back to the gateway's own identity.
+  Credential credential = 6;
+}
+
+// Credential is the caller's credential for one bound call.
+message Credential {
+  oneof kind {
+    // access_key authenticates "s3" and "minio" (access key id and secret
+    // access key) and "azure" (storage account name and shared account key).
+    AccessKey access_key = 1;
+    // service_account_key is a Google service-account JSON key, for "gcs".
+    // No other Google credential type is accepted.
+    bytes service_account_key = 2 [debug_redact = true];
+  }
+}
+
+message AccessKey {
+  string id = 1;
+  string secret = 2 [debug_redact = true];
+}
+
 message StatRequest {
   string key = 1;
   string version_id = 2;
   // Conditional stat: empty means unconditional.
   string if_none_match = 3;
   string if_match = 4;
+  // binding, when set, reads a bucket named by the caller — see Binding.
+  Binding binding = 5;
 }
 
 message GetRequest {
@@ -67,6 +120,8 @@ message GetRequest {
   string if_none_match = 4;
   string if_match = 5;
   int64 if_modified_since_unix_ms = 6;
+  // binding, when set, reads a bucket named by the caller — see Binding.
+  Binding binding = 7;
 }
 
 // GetResponse streams: the first message carries the header (info +
@@ -147,6 +202,8 @@ message ListRequest {
   string delimiter = 2;
   string page_token = 3;
   int32 limit = 4;
+  // binding, when set, lists a bucket named by the caller — see Binding.
+  Binding binding = 5;
 }
 
 // ListResult — objects plus synthetic common_prefixes ("directories"). Ordering
@@ -234,7 +291,13 @@ message WriteEvent {
   int64 time_unix_ms = 5;
 }
 
-message CapabilitiesRequest {}
+message CapabilitiesRequest {
+  // binding, when set, asks what a bound call honors — see Binding. Only the
+  // read surface is reported for it: backend, versions and the two caps; every
+  // write, presign and native field is unset, because a bound call can reach
+  // only Stat, Get and List.
+  Binding binding = 1;
+}
 
 // Capabilities is the OpenDAL-style introspection surface: a client asks what
 // this backend honors before it calls, instead of discovering by failure.
@@ -250,6 +313,14 @@ message BackendCapabilities {
   bool presign_ambient_creds = 9;
   int32 batch_delete_max = 10;
   repeated string native_verbs = 11;
+  // max_object_bytes is the largest object a bound Get streams; a larger one
+  // is refused with RESOURCE_EXHAUSTED. 0 means the gateway sets no cap, which
+  // is the case for its configured bucket.
+  int64 max_object_bytes = 12;
+  // max_list_limit is the most objects one bound List page returns; a larger
+  // or zero ListRequest.limit is clamped to it. Page with next_page_token for
+  // more. 0 means the gateway sets no cap.
+  int32 max_list_limit = 13;
 }
 
 message ReadyRequest {}

@@ -63,12 +63,18 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		probeKey:  cfg.ProbeKey,
 	}
 
-	if cfg.AzureKey != "" {
+	if cfg.AzureKey != "" || cfg.HTTPClient != nil {
+		// A bound call always takes this branch: it authenticates with the
+		// caller's shared key, never the process's default credential.
 		cred, err := azblob.NewSharedKeyCredential(cfg.AzureAccount, cfg.AzureKey)
 		if err != nil {
 			return nil, serr.Wrap(serr.InvalidArgument, op, err)
 		}
-		client, err := azblob.NewClientWithSharedKeyCredential(serviceURL, cred, nil)
+		var opts *azblob.ClientOptions
+		if cfg.HTTPClient != nil {
+			opts = &azblob.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: cfg.HTTPClient}}
+		}
+		client, err := azblob.NewClientWithSharedKeyCredential(serviceURL, cred, opts)
 		if err != nil {
 			return nil, serr.Wrap(serr.Internal, op, err)
 		}

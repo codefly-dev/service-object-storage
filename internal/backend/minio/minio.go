@@ -67,11 +67,18 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 		region = "us-east-1"
 	}
 
-	client, err := minio.New(endpoint, &minio.Options{
+	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure: secure,
 		Region: region,
-	})
+	}
+	if cfg.UsePathStyle {
+		opts.BucketLookup = minio.BucketLookupPath
+	}
+	if cfg.HTTPClient != nil {
+		opts.Transport = cfg.HTTPClient.Transport
+	}
+	client, err := minio.New(endpoint, opts)
 	if err != nil {
 		return nil, serr.Wrap(serr.InvalidArgument, op, err)
 	}

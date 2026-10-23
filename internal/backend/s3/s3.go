@@ -60,6 +60,9 @@ type Backend struct {
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	const op = "s3.New"
 
+	if cfg.HTTPClient != nil {
+		return newBound(cfg), nil
+	}
 	optFns := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 	}
@@ -92,6 +95,35 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		probe:      cfg.Strategy(),
 		probeKey:   cfg.ProbeKey,
 	}, nil
+}
+
+// newBound opens an S3 backend for one bound call. It is built from explicit
+// options, not LoadDefaultConfig, so no shared config file, environment
+// variable or ambient credential of the gateway's reaches the caller's store.
+func newBound(cfg backend.Config) *Backend {
+	creds := credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")
+	client := s3.New(s3.Options{
+		Region:       cfg.Region,
+		Credentials:  creds,
+		HTTPClient:   cfg.HTTPClient,
+		UsePathStyle: cfg.UsePathStyle,
+		BaseEndpoint: func() *string {
+			if cfg.Endpoint == "" {
+				return nil
+			}
+			return aws.String(cfg.Endpoint)
+		}(),
+	})
+	return &Backend{
+		client:   client,
+		uploader: manager.NewUploader(client),
+		presign:  s3.NewPresignClient(client),
+		creds:    creds,
+		bucket:   cfg.Bucket,
+		endpoint: cfg.Endpoint,
+		probe:    cfg.Strategy(),
+		probeKey: cfg.ProbeKey,
+	}
 }
 
 // Name reports the backend kind.

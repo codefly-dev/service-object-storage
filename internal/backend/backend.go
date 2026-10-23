@@ -8,6 +8,7 @@ package backend
 import (
 	"context"
 	"io"
+	"net/http"
 	"time"
 )
 
@@ -46,6 +47,17 @@ type Config struct {
 	ProbeStrategy ProbeStrategy
 	// ProbeKey is the object ProbeStat heads. It need not exist.
 	ProbeKey string
+
+	// HTTPClient, when set, marks a backend opened for one bound call (see the
+	// Binding proto message). The backend sends every request through it and
+	// authenticates only with the static credentials in this Config — the
+	// access key, the Azure shared key, or GCSCredentialsJSON — and never with
+	// the process's ambient identity, which would let a caller's binding borrow
+	// the gateway's own grants.
+	HTTPClient *http.Client
+	// GCSCredentialsJSON is a service-account JSON key, used only with
+	// HTTPClient.
+	GCSCredentialsJSON []byte
 }
 
 // ProbeStrategy names how a backend verifies access to its bucket/container.

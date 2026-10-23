@@ -1,0 +1,76 @@
+package server_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	_ "github.com/codefly-dev/service-object-storage/internal/backend/s3"
+)
+
+func s3Binding(endpoint string) *storagev0.Binding {
+	return &storagev0.Binding{
+		Kind: "s3", Endpoint: endpoint, Bucket: "tenant", Prefix: "docs/",
+		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{
+			AccessKey: &storagev0.AccessKey{Id: "id", Secret: "secret"},
+		}},
+	}
+}
+
+// A loopback endpoint is refused before anything dials it, on every bound RPC,
+// and the refusal names the endpoint the caller sent.
+func TestBoundCallRefusesALoopbackEndpointByName(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+	b := s3Binding("http://localhost:9000")
+
+	_, err := c.Stat(ctx, &storagev0.StatRequest{Key: "a", Binding: b})
+	requireRefused(t, err)
+	_, err = c.List(ctx, &storagev0.ListRequest{Binding: b})
+	requireRefused(t, err)
+	_, err = c.Capabilities(ctx, &storagev0.CapabilitiesRequest{Binding: b})
+	requireRefused(t, err)
+	_, _, err = getObject(t, c, &storagev0.GetRequest{Key: "a", Binding: b})
+	requireRefused(t, err)
+}
+
+func requireRefused(t *testing.T, err error) {
+	t.Helper()
+	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
+	require.Contains(t, status.Convert(err).Message(), `"localhost"`)
+	require.Contains(t, status.Convert(err).Message(), "not a public address")
+}
+
+// A bound Capabilities answers for the bound kind and reports the caps a bound
+// call runs under; the configured bucket reports none.
+func TestCapabilitiesReportsTheBoundKindAndCaps(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	bound, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{Binding: s3Binding("")})
+	require.NoError(t, err)
+	require.Equal(t, "s3", bound.GetBackend())
+	require.True(t, bound.GetVersions())
+	require.False(t, bound.GetPresign(), "a bound call cannot presign")
+	require.False(t, bound.GetConditionalPut(), "a bound call cannot write")
+	require.EqualValues(t, 5<<20, bound.GetMaxObjectBytes())
+	require.EqualValues(t, 1000, bound.GetMaxListLimit())
+
+	own, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	require.NoError(t, err)
+	require.Equal(t, "mem", own.GetBackend())
+	require.Zero(t, own.GetMaxObjectBytes())
+	require.Zero(t, own.GetMaxListLimit())
+}
+
+func TestBindingRefusesAKindWithNoRemoteStore(t *testing.T) {
+	c := newTestClient(t)
+	b := s3Binding("")
+	b.Kind = "mem"
+	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: b})
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
+}

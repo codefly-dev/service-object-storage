@@ -22,6 +22,8 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 
 	"github.com/codefly-dev/service-object-storage/internal/backend"
@@ -53,7 +55,13 @@ type Backend struct {
 // New opens a GCS backend bound to cfg.Bucket.
 func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	var opts []option.ClientOption
-	if cfg.GCSCredentialsFile != "" {
+	if cfg.HTTPClient != nil {
+		bound, err := boundOptions(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		opts = bound
+	} else if cfg.GCSCredentialsFile != "" {
 		opts = append(opts, option.WithCredentialsFile(cfg.GCSCredentialsFile))
 	}
 	client, err := storage.NewClient(ctx, opts...)
@@ -66,6 +74,25 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 		name:   "gcs",
 		cfg:    cfg,
 	}, nil
+}
+
+// boundOptions authenticates one bound call with the caller's service-account
+// key and nothing else. JWTConfigFromJSON accepts only the service_account
+// type: an external-account key names a local file or command as its token
+// source, which would let a caller read the gateway's filesystem. The token
+// exchange runs through cfg.HTTPClient too, because the key names its own
+// token endpoint.
+func boundOptions(ctx context.Context, cfg backend.Config) ([]option.ClientOption, error) {
+	jwt, err := google.JWTConfigFromJSON(cfg.GCSCredentialsJSON, storage.ScopeReadOnly)
+	if err != nil {
+		return nil, serr.Wrap(serr.InvalidArgument, "gcs.New", err)
+	}
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, cfg.HTTPClient)
+	opts := []option.ClientOption{option.WithHTTPClient(jwt.Client(ctx))}
+	if cfg.Endpoint != "" {
+		opts = append(opts, option.WithEndpoint(cfg.Endpoint))
+	}
+	return opts, nil
 }
 
 // Name reports the backend kind.

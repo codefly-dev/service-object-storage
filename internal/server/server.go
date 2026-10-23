@@ -45,9 +45,14 @@ func New(be backend.Backend, hub *events.Hub, readiness Readiness) *Server {
 // Stat returns object metadata, honoring conditional headers by comparing the
 // fetched ETag (NotModified is carried in the header, not as an error).
 func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storagev0.GetHeader, error) {
-	info, err := s.be.Stat(ctx, req.GetKey(), req.GetVersionId())
+	be, release, err := s.backendFor(ctx, req.GetBinding())
 	if err != nil {
 		return nil, toStatus(err)
+	}
+	defer release()
+	info, err := be.Stat(ctx, req.GetKey(), req.GetVersionId())
+	if err != nil {
+		return nil, toStatus(boundErr(err))
 	}
 	if inm := req.GetIfNoneMatch(); inm != "" && inm == info.ETag {
 		return &storagev0.GetHeader{Info: toProtoInfo(info), NotModified: true}, nil
@@ -60,11 +65,16 @@ func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storage
 
 // Get streams an object: a header frame (info / not_modified) followed by data
 // frames. This is the proxy byte path; large objects that should skip the proxy
-// use the Presign RPC instead.
+// use the Presign RPC instead. A bound Get is capped at maxBoundObjectBytes.
 func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_GetServer) error {
-	res, err := s.be.Get(stream.Context(), req.GetKey(), toBackendGetOptions(req))
+	be, release, err := s.backendFor(stream.Context(), req.GetBinding())
 	if err != nil {
 		return toStatus(err)
+	}
+	defer release()
+	res, err := be.Get(stream.Context(), req.GetKey(), toBackendGetOptions(req))
+	if err != nil {
+		return toStatus(boundErr(err))
 	}
 	if res.NotModified {
 		return stream.Send(&storagev0.GetResponse{
@@ -74,6 +84,12 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 		})
 	}
 	defer res.Body.Close()
+	if req.GetBinding() != nil {
+		if req.GetRange() == nil && res.Info.Size > maxBoundObjectBytes {
+			return status.Error(codes.ResourceExhausted, errObjectTooLarge.Error())
+		}
+		res.Body = &capReader{ReadCloser: res.Body, left: maxBoundObjectBytes}
+	}
 
 	if err := stream.Send(&storagev0.GetResponse{
 		Kind: &storagev0.GetResponse_Header{Header: &storagev0.GetHeader{Info: toProtoInfo(&res.Info)}},
@@ -94,8 +110,11 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 		if rerr == io.EOF {
 			return nil
 		}
+		if errors.Is(rerr, errObjectTooLarge) {
+			return status.Error(codes.ResourceExhausted, rerr.Error())
+		}
 		if rerr != nil {
-			return toStatus(serrWrapInternal(rerr))
+			return toStatus(serrWrapInternal(boundErr(rerr)))
 		}
 	}
 }
@@ -182,15 +201,26 @@ func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyReques
 	return out, nil
 }
 
+// List enumerates a prefix. A bound List returns at most maxBoundListLimit
+// objects per page.
 func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storagev0.ListResult, error) {
-	res, err := s.be.List(ctx, backend.ListOptions{
+	be, release, err := s.backendFor(ctx, req.GetBinding())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	defer release()
+	limit := req.GetLimit()
+	if req.GetBinding() != nil && (limit <= 0 || limit > maxBoundListLimit) {
+		limit = maxBoundListLimit
+	}
+	res, err := be.List(ctx, backend.ListOptions{
 		Prefix:    req.GetPrefix(),
 		Delimiter: req.GetDelimiter(),
 		PageToken: req.GetPageToken(),
-		Limit:     req.GetLimit(),
+		Limit:     limit,
 	})
 	if err != nil {
-		return nil, toStatus(err)
+		return nil, toStatus(boundErr(err))
 	}
 	out := &storagev0.ListResult{
 		CommonPrefixes: res.CommonPrefixes,
@@ -259,9 +289,27 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 
 // Capabilities reports the static feature set. It deliberately touches no
 // network: what the backend supports is a property of its kind and
-// configuration, not of whether it is currently reachable — that is Ready.
-func (s *Server) Capabilities(ctx context.Context, _ *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
-	return toProtoCapabilities(s.be.Capabilities()), nil
+// configuration, not of whether it is currently reachable — that is Ready. For
+// a binding it reports the bound kind and the caps a bound call runs under;
+// qualifying the bound endpoint resolves its name, and nothing is dialed.
+func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
+	be, release, err := s.backendFor(ctx, req.GetBinding())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	defer release()
+	caps := be.Capabilities()
+	if req.GetBinding() != nil {
+		// A bound call reaches only Stat, Get and List, so only the read
+		// surface is reported: no write, presign or native verb is reachable.
+		return &storagev0.BackendCapabilities{
+			Backend:        caps.Backend,
+			Versions:       caps.Versions,
+			MaxObjectBytes: maxBoundObjectBytes,
+			MaxListLimit:   maxBoundListLimit,
+		}, nil
+	}
+	return toProtoCapabilities(caps), nil
 }
 
 // Ready reports the most recent background probe, and deliberately does not
