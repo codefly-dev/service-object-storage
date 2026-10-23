@@ -100,9 +100,32 @@ ListRequest { prefix: "", limit: 0,
 - Keys are relative to the binding's `prefix`, exactly as `SOS_PREFIX` works
   for the configured bucket.
 
-A consequence of the guard: a store on the local machine or the cell's network,
-including the MinIO a local run starts, can never be bound. Bound reads are
-for stores on the public internet.
+### The guard's one exception: composed dependencies
+
+A binding may name a non-public endpoint in exactly one case: it is the
+endpoint of a service this gateway's service declares as a
+`service-dependency`, as codefly resolved it. The agent's Runtime reads the
+dependency network mappings codefly hands it, takes each one's container
+address (the gateway runs in a container), and delivers them to the gateway as
+`SOS_COMPOSED_ENDPOINTS` (`host:port`, comma-separated). The admission is exact:
+
+- the binding's endpoint must match a composed endpoint by host **and** port —
+  the same address under another name, or another port on the same host, is
+  refused;
+- the gateway then dials only the addresses that name resolves to, on that
+  port — a redirect anywhere else is judged by the public-only rule and refused;
+- every other loopback, private, link-local or reserved destination is refused
+  as before, and a public endpoint is admitted as before.
+
+There is no switch that widens this: no "allow private" setting, no flag that
+disables the guard, no local-versus-hosted mode. A service with no dependency
+admits nothing beyond the public internet, and that is every environment's rule
+— a deployed gateway is given no composed endpoints today, so it binds only
+public stores. `SOS_COMPOSED_ENDPOINTS` is the Runtime's output, not an
+operator setting.
+
+The MinIO a local run starts as this gateway's own backend is not a dependency
+and stays unbindable.
 
 ## Byte path
 
@@ -142,6 +165,7 @@ notifications, Azure Event Grid) instead.
 | `SOS_PROBE_KEY` | — | required for `stat`; the object headed (need not exist) |
 | `SOS_PROBE_INTERVAL` | `10s` | how often readiness is re-probed |
 | `SOS_PROBE_TIMEOUT` | `5s` | per-probe deadline |
+| `SOS_COMPOSED_ENDPOINTS` | — | written by the agent's Runtime, not an operator: the composed dependencies a binding may name although not public (see [the guard's exception](#the-guards-one-exception-composed-dependencies)) |
 
 ## Readiness
 
