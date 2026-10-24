@@ -18,6 +18,6 @@ on:
 jobs:
   agent-ci:
     # Pinned to an immutable core commit SHA, not @main (see ci.yml for why).
-    uses: codefly-dev/core/.github/workflows/agent-ci.yml@5b9dbf5d7f03dd048d7b741dc8b79ab2bc407ab3 # v0.19.4
+    uses: codefly-dev/core/.github/workflows/agent-ci.yml@ce29e08b80e0a328acb61138faf57a4c58b5049f # v0.19.5
     with:
       codefly-cli-version: "0.1.188"
