@@ -6,7 +6,7 @@
 # was later replaced by runtime selection): `codefly agent ci` uses the
 # `source.agent` that agent.codefly.yaml declares, so moving the packager is an
 # edit to that file, not a CLI bump. With codefly-cli-version below and that
-# declaration, the gate passes against this repo's Go 1.27.2 module.
+# declaration, the gate passes against the Go version this repo's go.mod declares.
 #
 # Manual (workflow_dispatch) only. Making it a pull_request gate is a separate
 # decision, not part of moving a pin.
