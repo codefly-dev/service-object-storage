@@ -45,7 +45,7 @@ jobs:
       # Full history for the ancestry proof, and no persisted credential — the
       # action refuses a checkout that left one in the local git config, since
       # the build context would otherwise carry it into the image.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -59,7 +59,7 @@ jobs:
       # it is this repository's shipped-platform declaration, asserted against
       # internal/imageevidence.Platforms by TestShippedPlatformsMatchTheReleasePipeline,
       # so evidence can never cover fewer platforms than the release ships.
-      - uses: codefly-dev/core/.github/actions/publish-service-image@5b9dbf5d7f03dd048d7b741dc8b79ab2bc407ab3 # v0.19.4
+      - uses: codefly-dev/core/.github/actions/publish-service-image@ce29e08b80e0a328acb61138faf57a4c58b5049f # v0.19.5
         id: publish
         with:
           version: ${{ inputs.version }}
