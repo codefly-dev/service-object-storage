@@ -106,6 +106,8 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	require.NoError(t, err)
 	requireMinIOFilesystemOwner(t, rt, minioID)
 	requirePublishedOnLoopbackOnly(t, minioID, minioContainerPort)
+	requireContainerParentService(t, rt, minioID)
+	requireContainerParentService(t, rt, gatewayID)
 
 	conf, err := resources.ExtractConfiguration(init.RuntimeConfigurations, resources.NewRuntimeContextNative())
 	require.NoError(t, err)
@@ -184,6 +186,21 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	requireContainerRemoved(t, gatewayID)
 	requireContainerRemoved(t, minioID)
 	require.Error(t, exec.Command("docker", "network", "inspect", network).Run(), "network %s survived teardown", network)
+}
+
+// requireContainerParentService checks the same Docker metadata the CLI reads,
+// through Core's public parser; suffixes are never used as ownership evidence.
+func requireContainerParentService(t *testing.T, rt *Runtime, containerID string) {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "-f", `{{json .Config.Labels}}`, containerID).Output()
+	require.NoError(t, err)
+	var labels map[string]string
+	require.NoError(t, json.Unmarshal(out, &labels))
+	parent, err := dockerrun.ContainerServiceIdentity(labels)
+	require.NoError(t, err)
+	require.NotNil(t, parent)
+	require.Equal(t, rt.Identity.Module, parent.Module)
+	require.Equal(t, rt.Identity.Name, parent.Name)
 }
 
 // requireContainerRemoved asserts the container no longer exists on the daemon.

@@ -64,6 +64,10 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	firstID, err := rt.minioEnv.ContainerID()
 	require.NoError(t, err)
 	requireMinIOFilesystemOwner(t, rt, firstID)
+	requireContainerParentService(t, rt, firstID)
+	firstGatewayID, err := rt.gatewayEnv.ContainerID()
+	require.NoError(t, err)
+	requireContainerParentService(t, rt, firstGatewayID)
 	firstPassword, firstToken := rt.minioPassword, rt.gatewayToken
 	keys := []string{"sources/handbook/original.txt", "sources/handbook/nested/bytes.bin"}
 	payloads := [][]byte{[]byte("persistent source bytes\n"), bytes.Repeat([]byte{0, 1, 255, 42}, 32768)}
@@ -132,6 +136,12 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	secondID, err := rt.minioEnv.ContainerID()
 	require.NoError(t, err)
 	requireMinIOFilesystemOwner(t, rt, secondID)
+	requireContainerParentService(t, rt, secondID)
+	secondGatewayID, err := rt.gatewayEnv.ContainerID()
+	require.NoError(t, err)
+	requireContainerParentService(t, rt, secondGatewayID)
+	require.NotEqual(t, firstGatewayID, secondGatewayID)
+	requireContainerRemoved(t, firstGatewayID)
 	require.NotEqual(t, firstID, secondID)
 	require.True(t, firstPassword != rt.minioPassword, "MinIO credentials must rotate")
 	require.True(t, firstToken != rt.gatewayToken, "gateway credentials must rotate")
