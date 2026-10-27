@@ -46,8 +46,9 @@ func TestMinIOPersistentCustody(t *testing.T) {
 		response, err := rt.Init(ctx, &runtimev0.InitRequest{RuntimeContext: runtimeContext, ProposedNetworkMappings: mappings})
 		require.NoError(t, err)
 		require.NotEqual(t, runtimev0.InitStatus_ERROR, response.GetStatus().GetState(), response.GetStatus().GetMessage())
-		_, err = rt.Start(ctx, &runtimev0.StartRequest{})
+		started, err := rt.Start(ctx, &runtimev0.StartRequest{})
 		require.NoError(t, err)
+		require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
 	}
 	connect := func(token string) storagev0.ObjectStorageClient {
 		endpoint, err := rt.gatewayEnv.ContainerID()
@@ -112,8 +113,9 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	}
 	_, err = rt.Stop(ctx, &runtimev0.StopRequest{})
 	require.NoError(t, err)
-	_, err = rt.Start(ctx, &runtimev0.StartRequest{})
+	started, err := rt.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
+	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
 	verify()
 	// Also exercise a real Docker Stop/Start on only this test's MinIO.
 	require.NoError(t, exec.Command("docker", "stop", firstID).Run())
