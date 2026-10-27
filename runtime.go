@@ -276,6 +276,9 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 	// Own the environment before starting it: a container that is created and
 	// then exits still has to be removed, and only Shutdown does that.
 	s.minioEnv = runner
+	if err := runner.WithServiceIdentity(s.Identity); err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot bind minio parent service")
+	}
 	runner.WithOutput(os.Stdout)
 	// The published port is for the agent alone (bucket bootstrap, below) and an
 	// operator's recovery tools, so it stays on core's loopback default. The
@@ -521,6 +524,9 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	// Own the environment before starting it: a container that is created and
 	// then exits still has to be removed, and only Shutdown does that.
 	s.gatewayEnv = runner
+	if err := runner.WithServiceIdentity(s.Identity); err != nil {
+		return s.Wool.Wrapf(err, "cannot bind gateway parent service")
+	}
 	runner.WithOutput(os.Stdout)
 	runner.WithUser(gatewayContainerUser)
 	runner.WithPortMapping(ctx, hostPort, gatewayContainerPort)

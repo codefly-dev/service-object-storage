@@ -398,6 +398,19 @@ closed and require recovery. `SOS_LOCAL_MINIO_INITIALIZE` is no longer read.
 See [local custody and retained-volume recovery](docs/local-minio-recovery.md)
 for ownership, paths, lifecycle behavior and recovery instructions.
 
+Both local MinIO and gateway containers bind the loaded parent service through
+Core's `DockerEnvironment.WithServiceIdentity`. Their `codefly.service` label
+records the exact module/service, independently of their `-minio` and `-gateway`
+names. The CLI reads Core's shared attribution parser in addition to its scope,
+name and port checks. A conflicting present parent label refuses adoption or
+replacement before runtime configuration drift can remove a container.
+
+`Stop` keeps the containers available; a new runtime instance may replace them
+to rotate credentials while the owned MinIO data survives. Containers created
+by older agents have no parent label and remain unproven to the CLI's suffixed
+container check. Installing a new CLI does not relabel them; recovery follows
+the explicit retained-volume procedure above, without broad cleanup.
+
 ## Authentication
 
 The gateway holds the backend credentials and exposes bucket-wide read, write,
