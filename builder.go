@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"path"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
@@ -83,6 +84,12 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		ResolveEndpoints: func(ctx context.Context, endpoints []*v0.Endpoint) error {
 			endpoint, err := resolveServingGRPCEndpoint(ctx, endpoints)
 			if err != nil {
+				return err
+			}
+			// Advertise the storage API whether or not this service has been
+			// synced since the contract was published: dependents generate
+			// their client from what Load returns.
+			if err := advertiseContract(endpoint); err != nil {
 				return err
 			}
 			s.GrpcEndpoint = endpoint
@@ -286,6 +293,9 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	if err := s.Templates(ctx, s.Information, services.WithFactory(factoryFS)); err != nil {
 		return s.Builder.CreateError(err)
 	}
+	if err := s.publishContract(); err != nil {
+		return s.Builder.CreateError(err)
+	}
 	if err := s.CreateEndpoints(ctx); err != nil {
 		return s.Builder.CreateErrorf(err, "cannot create endpoints")
 	}
@@ -293,7 +303,9 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 }
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
-	grpc, err := resources.LoadGrpcAPI(ctx, nil)
+	// The gRPC endpoint advertises the storage API, so dependents generate a
+	// client from it.
+	grpc, err := contractAPI()
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot load grpc api")
 	}
@@ -306,6 +318,30 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	s.Endpoints = []*v0.Endpoint{s.GrpcEndpoint}
 	s.Wool.Debug("created endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(s.Endpoints)))
 	return nil
+}
+
+// Sync publishes the storage API contract into the service, so a service
+// created before the contract was published, or by an older agent version,
+// holds the current API. A dry run writes nothing and reports the contract
+// as changed when the service's copy differs.
+func (s *Builder) Sync(_ context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
+	defer s.Wool.Catch()
+	if req.GetDryRun() {
+		current, err := contractCurrent(s.Location)
+		if err != nil {
+			return s.Builder.SyncError(err)
+		}
+		resp, err := s.Builder.SyncResponse()
+		if err != nil || current || resp.GetState().GetState() != builderv0.SyncStatus_SUCCESS {
+			return resp, err
+		}
+		resp.ChangedFiles = []string{path.Join(s.Identity.RelativeToWorkspace, standards.DependencyProtoPath)}
+		return resp, nil
+	}
+	if err := s.publishContract(); err != nil {
+		return s.Builder.SyncError(err)
+	}
+	return s.Builder.SyncResponse()
 }
 
 func (s *Builder) Communicate(stream builderv0.Builder_CommunicateServer) error {
