@@ -234,61 +234,6 @@ func streamBody(body io.Reader, expect int64, classify func(error) error, send f
 	}
 }
 
-// Put assembles a streamed upload and writes it, hiding multipart in the backend.
-func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
-	first, err := stream.Recv()
-	if err != nil {
-		return toStatus(serrInvalid("put: empty stream"))
-	}
-	header := first.GetHeader()
-	if header == nil {
-		return toStatus(serrInvalid("put: first message must be the header"))
-	}
-
-	pr, pw := io.Pipe()
-	go func() {
-		var werr error
-		for {
-			msg, rerr := stream.Recv()
-			if rerr == io.EOF {
-				break
-			}
-			if rerr != nil {
-				werr = rerr
-				break
-			}
-			if d := msg.GetData(); len(d) > 0 {
-				if _, e := pw.Write(d); e != nil {
-					werr = e
-					break
-				}
-			}
-		}
-		pw.CloseWithError(werr)
-	}()
-
-	opts := backend.PutOptions{
-		ContentType:     header.GetContentType(),
-		ContentEncoding: header.GetContentEncoding(),
-		CacheControl:    header.GetCacheControl(),
-		UserMetadata:    header.GetUserMetadata(),
-		IfNoneMatch:     header.GetIfNoneMatch(),
-		IfMatch:         header.GetIfMatch(),
-		Size:            header.GetTotalSize(),
-	}
-	res, err := s.be.Put(stream.Context(), header.GetKey(), pr, opts)
-	if err != nil {
-		pr.CloseWithError(err)
-		return toStatus(err)
-	}
-	s.hub.Publish(events.Event{Key: header.GetKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
-	return stream.SendAndClose(&storagev0.PutResult{
-		Etag:       res.ETag,
-		VersionId:  res.VersionID,
-		Generation: res.Generation,
-	})
-}
-
 func (s *Server) Delete(ctx context.Context, req *storagev0.DeleteRequest) (*storagev0.DeleteResult, error) {
 	err := s.be.Delete(ctx, req.GetKey(), backend.DeleteOptions{
 		VersionID: req.GetVersionId(),
