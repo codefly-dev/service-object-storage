@@ -4,13 +4,13 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"path"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
-	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 
@@ -84,6 +84,12 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		ResolveEndpoints: func(ctx context.Context, endpoints []*v0.Endpoint) error {
 			endpoint, err := resolveServingGRPCEndpoint(ctx, endpoints)
 			if err != nil {
+				return err
+			}
+			// Advertise the storage API whether or not this service has been
+			// synced since the contract was published: dependents generate
+			// their client from what Load returns.
+			if err := advertiseContract(endpoint); err != nil {
 				return err
 			}
 			s.GrpcEndpoint = endpoint
@@ -298,8 +304,8 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 
 func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	// The gRPC endpoint advertises the storage API, so dependents generate a
-	// client from it (see writeDependencyContract).
-	grpc, err := resources.LoadGrpcAPI(ctx, shared.Pointer(s.Local(standards.DependencyProtoPath)))
+	// client from it.
+	grpc, err := contractAPI()
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot load grpc api")
 	}
@@ -315,10 +321,23 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 }
 
 // Sync publishes the storage API contract into the service, so a service
-// created before the contract was published — or by an older agent version —
-// advertises the current API to its dependents.
-func (s *Builder) Sync(ctx context.Context, _ *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
+// created before the contract was published, or by an older agent version,
+// holds the current API. A dry run writes nothing and reports the contract
+// as changed when the service's copy differs.
+func (s *Builder) Sync(_ context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
 	defer s.Wool.Catch()
+	if req.GetDryRun() {
+		current, err := contractCurrent(s.Location)
+		if err != nil {
+			return s.Builder.SyncError(err)
+		}
+		resp, err := s.Builder.SyncResponse()
+		if err != nil || current || resp.GetState().GetState() != builderv0.SyncStatus_SUCCESS {
+			return resp, err
+		}
+		resp.ChangedFiles = []string{path.Join(s.Identity.RelativeToWorkspace, standards.DependencyProtoPath)}
+		return resp, nil
+	}
 	if err := s.publishContract(); err != nil {
 		return s.Builder.SyncError(err)
 	}

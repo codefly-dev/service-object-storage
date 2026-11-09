@@ -19,6 +19,7 @@ require (
 	github.com/gofrs/flock v0.13.1
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/stretchr/testify v1.12.1
+	github.com/yoheimuta/go-protoparser/v4 v4.14.2
 	golang.org/x/oauth2 v0.37.0
 	google.golang.org/api v0.306.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b
@@ -154,7 +155,6 @@ require (
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/xlab/treeprint v1.2.0 // indirect
-	github.com/yoheimuta/go-protoparser/v4 v4.14.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
