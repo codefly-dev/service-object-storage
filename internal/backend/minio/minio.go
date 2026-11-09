@@ -311,6 +311,10 @@ func (b *Backend) Get(ctx context.Context, key string, opts backend.GetOptions) 
 	}, nil
 }
 
+// unknownSizePartBytes is the multipart part size for an upload of unknown
+// length: 64 MiB of memory per upload, objects up to 625 GiB.
+const unknownSizePartBytes = 64 << 20
+
 // Put writes an object from r.
 func (b *Backend) Put(ctx context.Context, key string, r io.Reader, opts backend.PutOptions) (*backend.PutResult, error) {
 	const op = "minio.Put"
@@ -331,8 +335,12 @@ func (b *Backend) Put(ctx context.Context, key string, r io.Reader, opts backend
 
 	size := opts.Size
 	if size < 0 {
-		// Unknown length: -1 lets minio-go stream and auto-multipart.
+		// Unknown length: minio-go streams it as a multipart upload, sizing
+		// each part for a 5 TiB object (~537 MiB, allocated per upload) unless
+		// told otherwise. Bound the part, and so the memory, instead; the
+		// largest object becomes unknownSizePartBytes × 10,000 parts.
 		size = -1
+		mopts.PartSize = unknownSizePartBytes
 	}
 
 	info, err := b.client.PutObject(ctx, b.bucket, key, r, size, mopts)

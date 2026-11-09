@@ -18,7 +18,6 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // chunkSize bounds each streamed data frame on Get.
@@ -235,90 +234,6 @@ func streamBody(body io.Reader, expect int64, classify func(error) error, send f
 	}
 }
 
-// Put assembles a streamed upload and writes it, hiding multipart in the backend.
-func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
-	first, err := stream.Recv()
-	if err != nil {
-		return toStatus(serrInvalid("put: empty stream"))
-	}
-	header := first.GetHeader()
-	if header == nil {
-		return toStatus(serrInvalid("put: first message must be the header"))
-	}
-
-	// total_size is a hint the client may leave unset, and proto3 cannot tell
-	// unset from 0: a positive value is a declared length, anything else is
-	// unknown. The backend always streams (Size -1), and a declared length is
-	// enforced here on the bytes actually received. Handing a declared length
-	// to a backend as an exact one made it read that many bytes and stop: an
-	// unset total_size stored an empty object, and a short one stored a
-	// truncated object, both without an error.
-	declared := header.GetTotalSize()
-	pr, pw := io.Pipe()
-	body := make(chan error, 1)
-	go func() {
-		var werr error
-		var received int64
-		for {
-			msg, rerr := stream.Recv()
-			if rerr == io.EOF {
-				break
-			}
-			if rerr != nil {
-				werr = rerr
-				break
-			}
-			if d := msg.GetData(); len(d) > 0 {
-				received += int64(len(d))
-				if declared > 0 && received > declared {
-					werr = putSizeMismatch(declared, received, "is longer than")
-					break
-				}
-				if _, e := pw.Write(d); e != nil {
-					werr = e
-					break
-				}
-			}
-		}
-		if werr == nil && declared > 0 && received != declared {
-			werr = putSizeMismatch(declared, received, "ended short of")
-		}
-		pw.CloseWithError(werr)
-		body <- werr
-	}()
-
-	opts := backend.PutOptions{
-		ContentType:     header.GetContentType(),
-		ContentEncoding: header.GetContentEncoding(),
-		CacheControl:    header.GetCacheControl(),
-		UserMetadata:    header.GetUserMetadata(),
-		IfNoneMatch:     header.GetIfNoneMatch(),
-		IfMatch:         header.GetIfMatch(),
-		Size:            -1,
-	}
-	res, err := s.be.Put(stream.Context(), header.GetKey(), pr, opts)
-	// Unblock the receiver if the backend stopped reading, then take its
-	// verdict: a body refusal is the cause of any backend error it produced.
-	pr.CloseWithError(errPutFinished)
-	if berr := <-body; berr != nil && !errors.Is(berr, errPutFinished) {
-		if _, ok := status.FromError(berr); ok {
-			return berr
-		}
-		if err == nil {
-			return toStatus(berr)
-		}
-	}
-	if err != nil {
-		return toStatus(err)
-	}
-	s.hub.Publish(events.Event{Key: header.GetKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
-	return stream.SendAndClose(&storagev0.PutResult{
-		Etag:       res.ETag,
-		VersionId:  res.VersionID,
-		Generation: res.Generation,
-	})
-}
-
 func (s *Server) Delete(ctx context.Context, req *storagev0.DeleteRequest) (*storagev0.DeleteResult, error) {
 	err := s.be.Delete(ctx, req.GetKey(), backend.DeleteOptions{
 		VersionID: req.GetVersionId(),
@@ -514,14 +429,3 @@ func serrWrapInternal(err error) error {
 }
 
 func serrInvalid(msg string) error { return serr.New(serr.InvalidArgument, "request", msg) }
-
-// errPutFinished closes a Put's body pipe once the backend has returned, so a
-// receiver still writing to it stops.
-var errPutFinished = errors.New("put: backend finished reading the body")
-
-// putSizeMismatch refuses a Put whose body disagrees with its declared
-// total_size, before the backend commits anything.
-func putSizeMismatch(declared, received int64, relation string) error {
-	return refuse(codes.Aborted, fmt.Sprintf("put body %s its declared %d bytes (received %d)", relation, declared, received),
-		serr.ReasonBodySizeMismatch, map[string]string{"declared_bytes": fmt.Sprint(declared), "sent_bytes": fmt.Sprint(received)}, 0)
-}

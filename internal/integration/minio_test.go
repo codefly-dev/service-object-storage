@@ -14,6 +14,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -170,6 +171,50 @@ func TestMinIOFullStack(t *testing.T) {
 	_, err = c.DeleteMany(context.Background(), &storagev0.DeleteManyRequest{
 		Keys: []string{key, "integration/copy.txt"},
 	})
+	require.NoError(t, err)
+}
+
+// putUnsized streams a body without declaring total_size, as a client that
+// leaves the proto3 field unset does.
+func putUnsized(t *testing.T, c storagev0.ObjectStorageClient, h *storagev0.PutHeader, chunks ...[]byte) (*storagev0.PutResult, error) {
+	st, err := c.Put(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: h}}))
+	for _, chunk := range chunks {
+		require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: chunk}}))
+	}
+	return st.CloseAndRecv()
+}
+
+// TestMinIOPutWithoutTotalSize is the regression against the store where it
+// happened: an unset total_size reached minio-go as an exact length of 0, and
+// the object was stored empty with no error.
+func TestMinIOPutWithoutTotalSize(t *testing.T) {
+	c := newStack(t)
+	key := "integration/unsized.bin"
+	payload := bytes.Repeat([]byte("unsized body "), 20_000)
+	_, err := putUnsized(t, c, &storagev0.PutHeader{Key: key}, payload[:100_000], payload[100_000:])
+	require.NoError(t, err)
+	body, hdr := get(t, c, key)
+	require.Equal(t, int64(len(payload)), hdr.GetInfo().GetSize())
+	require.True(t, bytes.Equal(payload, body))
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key})
+	require.NoError(t, err)
+}
+
+// TestMinIOCreateIfAbsentWithoutTotalSize: a body of unknown size that fits
+// the gateway's size probe is written in one request, so create-if-absent
+// stays atomic and is enforced.
+func TestMinIOCreateIfAbsentWithoutTotalSize(t *testing.T) {
+	c := newStack(t)
+	key := "integration/create-once.txt"
+	_, err := putUnsized(t, c, &storagev0.PutHeader{Key: key, IfNoneMatch: "*"}, []byte("first"))
+	require.NoError(t, err)
+	_, err = putUnsized(t, c, &storagev0.PutHeader{Key: key, IfNoneMatch: "*"}, []byte("second"))
+	require.Error(t, err, "create-if-absent must refuse an existing key")
+	body, _ := get(t, c, key)
+	require.Equal(t, []byte("first"), body)
+	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key})
 	require.NoError(t, err)
 }
 
