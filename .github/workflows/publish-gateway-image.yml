@@ -59,7 +59,7 @@ jobs:
       # it is this repository's shipped-platform declaration, asserted against
       # internal/imageevidence.Platforms by TestShippedPlatformsMatchTheReleasePipeline,
       # so evidence can never cover fewer platforms than the release ships.
-      - uses: codefly-dev/core/.github/actions/publish-service-image@ce29e08b80e0a328acb61138faf57a4c58b5049f # v0.19.5
+      - uses: codefly-dev/core/.github/actions/publish-service-image@312de7d10b42ded5aa7987f27f9df37f84d8d9c5 # v0.19.24
         id: publish
         with:
           version: ${{ inputs.version }}
