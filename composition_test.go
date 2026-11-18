@@ -907,6 +907,10 @@ type stubEnvironment struct {
 
 func (e *stubEnvironment) ContainerID() (string, error) { return "stub", nil }
 
+func (e *stubEnvironment) Init(context.Context) error { return e.err }
+
+func (e *stubEnvironment) Stop(context.Context) error { return e.err }
+
 func (e *stubEnvironment) Shutdown(context.Context) error {
 	e.shutdowns++
 	return e.err

@@ -71,10 +71,17 @@ const (
 const localMinioUser = "minioadmin"
 
 // containerEnvironment is the part of dockerrun.DockerEnvironment the Runtime
-// owns: something it can identify and tear down. Teardown is the path that has
-// to keep working when Docker does not, so it is reachable through this seam.
+// owns: something it can identify, stop, start again and tear down. Stopping
+// and teardown are the paths that have to keep working when Docker does not,
+// so they are reachable through this seam.
 type containerEnvironment interface {
 	ContainerID() (string, error)
+	// Init starts the environment's container, or starts it again when it
+	// exists and is stopped.
+	Init(context.Context) error
+	// Stop stops the container and keeps it.
+	Stop(context.Context) error
+	// Shutdown stops and removes it.
 	Shutdown(context.Context) error
 }
 
@@ -84,6 +91,9 @@ type Runtime struct {
 
 	minioEnv   containerEnvironment
 	gatewayEnv containerEnvironment
+	// stopped records that Stop stopped the containers Init started, so a
+	// Start that follows it starts them again (resume).
+	stopped bool
 
 	// minioHostPort is the loopback host port MinIO is mapped to. Only the agent
 	// (a host process) uses it; the gateway container reaches MinIO on
@@ -152,6 +162,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Runtime.LogInitRequest(req)
 	s.Runtime.WithContext(req.GetRuntimeContext())
+	// Init starts both containers itself, whatever a Stop before it left.
+	s.stopped = false
 	s.NetworkMappings = req.ProposedNetworkMappings
 	s.composedEndpoints = composedEndpoints(ctx, req.GetDependenciesNetworkMappings())
 
@@ -608,6 +620,9 @@ func composedEndpoints(ctx context.Context, mappings []*basev0.NetworkMapping) [
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+	if err := s.resume(ctx); err != nil {
+		return s.Runtime.StartError(err)
+	}
 	if err := s.WaitForReady(ctx); err != nil {
 		return s.Runtime.StartError(err)
 	}
@@ -685,9 +700,61 @@ poll:
 		address, time.Since(start).Round(time.Millisecond), lastErr)
 }
 
+// Stop stops the gateway and the local MinIO, and keeps them.
+//
+// It is the whole of what a run that ends in order asks of this agent:
+// `codefly run service` sends Stop and never Destroy. Answering it without
+// stopping anything left both containers serving, on their network, after
+// every such run. The gateway goes first, so nothing is served from a store
+// that is going away.
+//
+// Nothing is removed here. The containers stay for the next run of the same
+// scope to find by name, their network stays because a stopped container whose
+// network is gone can never start again, and the MinIO data is not Stop's to
+// touch at all; removing the containers and the network is Destroy's (and, for
+// a run nobody runs again, the caller's). Every step runs even when an earlier
+// one fails, as in teardown.
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+	var errs []error
+	if s.gatewayEnv != nil {
+		s.stopped = true
+		if err := s.gatewayEnv.Stop(ctx); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot stop gateway"))
+		}
+	}
+	if s.minioEnv != nil {
+		s.stopped = true
+		if err := s.minioEnv.Stop(ctx); err != nil {
+			errs = append(errs, s.Wool.Wrapf(err, "cannot stop minio"))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return s.Runtime.StopError(err)
+	}
 	return s.Runtime.StopResponse()
+}
+
+// resume starts again the containers Stop stopped: MinIO before the gateway
+// that dials it. A service restarts inside a run, and a caller may send Start
+// alone then. After Init, which starts both, it does nothing.
+func (s *Runtime) resume(ctx context.Context) error {
+	if !s.stopped {
+		return nil
+	}
+	if s.minioEnv != nil {
+		if err := s.minioEnv.Init(ctx); err != nil {
+			return s.Wool.Wrapf(err, "cannot start minio again")
+		}
+	}
+	if s.gatewayEnv != nil {
+		if err := s.gatewayEnv.Init(ctx); err != nil {
+			return s.Wool.Wrapf(err, "cannot start gateway again")
+		}
+	}
+	s.stopped = false
+	return nil
 }
 
 func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
