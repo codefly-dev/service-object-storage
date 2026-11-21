@@ -18,9 +18,9 @@ import (
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
 	"github.com/gofrs/flock"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/stretchr/testify/require"
 )
 
@@ -179,10 +179,10 @@ func TestMinIORejectsUnownedMount(t *testing.T) {
 		{Type: mount.TypeBind, Source: "/owned", Destination: "/data", RW: false},
 		{Type: mount.TypeBind, Source: "/owned", Destination: "/elsewhere", RW: true},
 	} {
-		require.Error(t, validateMinIOMount(container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "disposable"}, Mounts: []container.MountPoint{m}}, "/owned"))
+		require.Error(t, validateMinIOMount(container.InspectResponse{ID: "disposable", Mounts: []container.MountPoint{m}}, "/owned"))
 	}
-	require.Error(t, validateMinIOMount(container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "disposable"}}, "/owned"))
-	require.NoError(t, validateMinIOMount(container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "disposable"}, Mounts: []container.MountPoint{{Type: mount.TypeBind, Source: "/owned", Destination: "/data", RW: true}}}, "/owned"))
+	require.Error(t, validateMinIOMount(container.InspectResponse{ID: "disposable"}, "/owned"))
+	require.NoError(t, validateMinIOMount(container.InspectResponse{ID: "disposable", Mounts: []container.MountPoint{{Type: mount.TypeBind, Source: "/owned", Destination: "/data", RW: true}}}, "/owned"))
 }
 
 func TestStructuredMinIOIdentity(t *testing.T) {
@@ -342,8 +342,10 @@ func TestMinIORejectsUserMappingBeforeCustodyMutation(t *testing.T) {
 		path := req.URL.Path
 		switch {
 		case strings.HasSuffix(path, "/_ping"):
-		case strings.HasSuffix(path, "/images/json"):
-			_, _ = fmt.Fprintf(w, `[{"RepoTags":[%q]}]`, minioImage.FullName())
+		// Core asks whether the image is present by inspecting that exact
+		// reference; the daemon here has it, so nothing is pulled.
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/images/"+minioImage.FullName()+"/json"):
+			_, _ = w.Write([]byte(`{"Id":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}`))
 		case strings.HasSuffix(path, "/containers/create"):
 			var body struct {
 				User       string

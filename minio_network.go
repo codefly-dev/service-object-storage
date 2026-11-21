@@ -6,7 +6,8 @@ import (
 	"fmt"
 
 	"github.com/containerd/errdefs"
-	"github.com/docker/docker/api/types/network"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
 )
@@ -21,10 +22,10 @@ const minioNetworkAlias = "minio"
 // primitive, so the agent drives these calls itself, through the same client
 // core constructs (DOCKER_HOST, the active Docker context).
 type dockerNetworks interface {
-	NetworkInspect(ctx context.Context, networkID string, options network.InspectOptions) (network.Inspect, error)
-	NetworkCreate(ctx context.Context, name string, options network.CreateOptions) (network.CreateResponse, error)
-	NetworkConnect(ctx context.Context, networkID, containerID string, config *network.EndpointSettings) error
-	NetworkRemove(ctx context.Context, networkID string) error
+	NetworkInspect(ctx context.Context, networkID string, options client.NetworkInspectOptions) (client.NetworkInspectResult, error)
+	NetworkCreate(ctx context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error)
+	NetworkConnect(ctx context.Context, networkID string, options client.NetworkConnectOptions) (client.NetworkConnectResult, error)
+	NetworkRemove(ctx context.Context, networkID string, options client.NetworkRemoveOptions) (client.NetworkRemoveResult, error)
 	Close() error
 }
 
@@ -62,13 +63,16 @@ func (s *Runtime) joinMinIONetwork(ctx context.Context, containerID string, alia
 		return err
 	}
 	s.minioNetwork = name
-	connectErr := cli.NetworkConnect(ctx, name, containerID, &network.EndpointSettings{Aliases: aliases})
+	_, connectErr := cli.NetworkConnect(ctx, name, client.NetworkConnectOptions{
+		Container:      containerID,
+		EndpointConfig: &network.EndpointSettings{Aliases: aliases},
+	})
 	if connectErr == nil {
 		return nil
 	}
-	inspect, err := cli.NetworkInspect(ctx, name, network.InspectOptions{})
+	inspect, err := cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 	if err == nil {
-		if _, attached := inspect.Containers[containerID]; attached {
+		if _, attached := inspect.Network.Containers[containerID]; attached {
 			return nil
 		}
 	}
@@ -78,14 +82,14 @@ func (s *Runtime) joinMinIONetwork(ctx context.Context, containerID string, alia
 // ensureNetwork creates the named bridge network unless it already exists. A
 // create that fails because a concurrent run created it first is not an error.
 func ensureNetwork(ctx context.Context, cli dockerNetworks, name string) error {
-	_, err := cli.NetworkInspect(ctx, name, network.InspectOptions{})
+	_, err := cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
 	if err == nil {
 		return nil
 	}
 	if !errdefs.IsNotFound(err) {
 		return fmt.Errorf("inspect network %s: %w", name, err)
 	}
-	_, createErr := cli.NetworkCreate(ctx, name, network.CreateOptions{
+	_, createErr := cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{
 			dockerrun.LabelCodeflyOwner: "true",
@@ -95,7 +99,7 @@ func ensureNetwork(ctx context.Context, cli dockerNetworks, name string) error {
 	if createErr == nil {
 		return nil
 	}
-	if _, err = cli.NetworkInspect(ctx, name, network.InspectOptions{}); err == nil {
+	if _, err = cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{}); err == nil {
 		return nil
 	}
 	return fmt.Errorf("create network %s: %w", name, createErr)
@@ -115,12 +119,12 @@ func (s *Runtime) removeMinIONetwork(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = cli.Close() }()
-	removeErr := cli.NetworkRemove(ctx, s.minioNetwork)
+	_, removeErr := cli.NetworkRemove(ctx, s.minioNetwork, client.NetworkRemoveOptions{})
 	if removeErr != nil && !errdefs.IsNotFound(removeErr) {
-		inspect, err := cli.NetworkInspect(ctx, s.minioNetwork, network.InspectOptions{})
+		inspect, err := cli.NetworkInspect(ctx, s.minioNetwork, client.NetworkInspectOptions{})
 		switch {
 		case errdefs.IsNotFound(err):
-		case err == nil && len(inspect.Containers) > 0:
+		case err == nil && len(inspect.Network.Containers) > 0:
 		default:
 			return fmt.Errorf("remove network %s: %w", s.minioNetwork, errors.Join(removeErr, err))
 		}

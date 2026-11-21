@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/moby/moby/api/pkg/stdcopy"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/client"
 )
 
 // The probe writes exactly this file into its scratch directory, and nothing
@@ -140,15 +140,15 @@ const minioProbeTimeout = 60 * time.Second
 func (p dockerProbeRunner) run(ctx context.Context, user, dir string) (result minioProbeRun, err error) {
 	ctx, cancel := context.WithTimeout(ctx, minioProbeTimeout)
 	defer cancel()
-	created, err := p.cli.ContainerCreate(ctx, &container.Config{
+	created, err := p.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Config: &container.Config{
 		Image:      p.image,
 		User:       user,
 		Entrypoint: []string{"/bin/sh", "-c", minioProbeScript},
 		Cmd:        []string{},
-	}, &container.HostConfig{
+	}, HostConfig: &container.HostConfig{
 		Mounts:      []mount.Mount{{Type: mount.TypeBind, Source: dir, Target: "/probe"}},
 		NetworkMode: "none",
-	}, nil, nil, "")
+	}})
 	if err != nil {
 		return result, err
 	}
@@ -156,24 +156,24 @@ func (p dockerProbeRunner) run(ctx context.Context, user, dir string) (result mi
 		// Removal outlives a cancelled caller so a probe never leaks a container.
 		removeCtx, cancelRemove := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelRemove()
-		if removeErr := p.cli.ContainerRemove(removeCtx, created.ID, container.RemoveOptions{Force: true}); removeErr != nil && err == nil {
+		if _, removeErr := p.cli.ContainerRemove(removeCtx, created.ID, client.ContainerRemoveOptions{Force: true}); removeErr != nil && err == nil {
 			err = fmt.Errorf("remove probe container %s: %w", created.ID, removeErr)
 		}
 	}()
-	waitC, errC := p.cli.ContainerWait(ctx, created.ID, container.WaitConditionNextExit)
-	if err = p.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
+	wait := p.cli.ContainerWait(ctx, created.ID, client.ContainerWaitOptions{Condition: container.WaitConditionNextExit})
+	if _, err = p.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		return result, err
 	}
 	var exit container.WaitResponse
 	select {
-	case exit = <-waitC:
-	case err = <-errC:
+	case exit = <-wait.Result:
+	case err = <-wait.Error:
 		return result, err
 	}
 	if exit.Error != nil {
 		return result, errors.New(exit.Error.Message)
 	}
-	logs, err := p.cli.ContainerLogs(ctx, created.ID, container.LogsOptions{ShowStdout: true, ShowStderr: true})
+	logs, err := p.cli.ContainerLogs(ctx, created.ID, client.ContainerLogsOptions{ShowStdout: true, ShowStderr: true})
 	if err != nil {
 		return result, err
 	}

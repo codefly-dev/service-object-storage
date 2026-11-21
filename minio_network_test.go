@@ -7,7 +7,8 @@ import (
 	"testing"
 
 	"github.com/containerd/errdefs"
-	"github.com/docker/docker/api/types/network"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/require"
 
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
@@ -17,7 +18,7 @@ import (
 // IDs and their aliases. Failures are injected per call.
 type fakeNetworks struct {
 	networks map[string]map[string][]string
-	created  []network.CreateOptions
+	created  []client.NetworkCreateOptions
 	calls    []string
 	closed   int
 
@@ -31,60 +32,60 @@ func newFakeNetworks() *fakeNetworks {
 	return &fakeNetworks{networks: map[string]map[string][]string{}}
 }
 
-func (f *fakeNetworks) NetworkInspect(_ context.Context, name string, _ network.InspectOptions) (network.Inspect, error) {
+func (f *fakeNetworks) NetworkInspect(_ context.Context, name string, _ client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
 	f.calls = append(f.calls, "inspect")
 	members, ok := f.networks[name]
 	if !ok {
-		return network.Inspect{}, errdefs.ErrNotFound
+		return client.NetworkInspectResult{}, errdefs.ErrNotFound
 	}
 	containers := map[string]network.EndpointResource{}
 	for id := range members {
 		containers[id] = network.EndpointResource{}
 	}
-	return network.Inspect{Name: name, Containers: containers}, nil
+	return client.NetworkInspectResult{Network: network.Inspect{Network: network.Network{Name: name}, Containers: containers}}, nil
 }
 
-func (f *fakeNetworks) NetworkCreate(_ context.Context, name string, options network.CreateOptions) (network.CreateResponse, error) {
+func (f *fakeNetworks) NetworkCreate(_ context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
 	f.calls = append(f.calls, "create")
 	if f.createdBehind {
 		f.networks[name] = map[string][]string{}
-		return network.CreateResponse{}, errdefs.ErrConflict
+		return client.NetworkCreateResult{}, errdefs.ErrConflict
 	}
 	f.created = append(f.created, options)
 	f.networks[name] = map[string][]string{}
-	return network.CreateResponse{ID: name}, nil
+	return client.NetworkCreateResult{ID: name}, nil
 }
 
-func (f *fakeNetworks) NetworkConnect(_ context.Context, name, containerID string, config *network.EndpointSettings) error {
+func (f *fakeNetworks) NetworkConnect(_ context.Context, name string, options client.NetworkConnectOptions) (client.NetworkConnectResult, error) {
 	f.calls = append(f.calls, "connect")
 	if f.connectErr != nil {
-		return f.connectErr
+		return client.NetworkConnectResult{}, f.connectErr
 	}
 	members, ok := f.networks[name]
 	if !ok {
-		return errdefs.ErrNotFound
+		return client.NetworkConnectResult{}, errdefs.ErrNotFound
 	}
-	if _, attached := members[containerID]; attached {
-		return errdefs.ErrPermissionDenied // what the daemon says for a duplicate endpoint
+	if _, attached := members[options.Container]; attached {
+		return client.NetworkConnectResult{}, errdefs.ErrPermissionDenied // what the daemon says for a duplicate endpoint
 	}
-	members[containerID] = slices.Clone(config.Aliases)
-	return nil
+	members[options.Container] = slices.Clone(options.EndpointConfig.Aliases)
+	return client.NetworkConnectResult{}, nil
 }
 
-func (f *fakeNetworks) NetworkRemove(_ context.Context, name string) error {
+func (f *fakeNetworks) NetworkRemove(_ context.Context, name string, _ client.NetworkRemoveOptions) (client.NetworkRemoveResult, error) {
 	f.calls = append(f.calls, "remove")
 	if f.removeErr != nil {
-		return f.removeErr
+		return client.NetworkRemoveResult{}, f.removeErr
 	}
 	members, ok := f.networks[name]
 	if !ok {
-		return errdefs.ErrNotFound
+		return client.NetworkRemoveResult{}, errdefs.ErrNotFound
 	}
 	if len(members) > 0 {
-		return errdefs.ErrPermissionDenied
+		return client.NetworkRemoveResult{}, errdefs.ErrPermissionDenied
 	}
 	delete(f.networks, name)
-	return nil
+	return client.NetworkRemoveResult{}, nil
 }
 
 func (f *fakeNetworks) Close() error {

@@ -16,9 +16,10 @@ import (
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/wool"
 	"github.com/containerd/errdefs"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
 	"github.com/gofrs/flock"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/client"
 )
 
 // claimEmptyCustodyRoot creates root, or accepts it when it already exists as
@@ -146,7 +147,7 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 	if _, legacyErr := os.Lstat(minioCustodyDir(displayName)); !errors.Is(legacyErr, os.ErrNotExist) {
 		return fail(fmt.Errorf("ambiguous legacy custody at %s; explicit verified recovery is required (stat: %v)", minioCustodyDir(displayName), legacyErr))
 	}
-	existing, err := cli.ContainerInspect(ctx, displayName)
+	existing, err := cli.ContainerInspect(ctx, displayName, client.ContainerInspectOptions{})
 	present := err == nil
 	if err != nil && !errdefs.IsNotFound(err) {
 		return fail(err)
@@ -155,7 +156,7 @@ func (s *Runtime) prepareMinIOData(ctx context.Context) (string, func(), error) 
 	// Reject legacy anonymous volumes and conflicting binds before provisioning
 	// or core's configuration fingerprint can remove their container.
 	if present {
-		if err = validateMinIOMount(existing, data); err != nil {
+		if err = validateMinIOMount(existing.Container, data); err != nil {
 			return fail(err)
 		}
 	}
