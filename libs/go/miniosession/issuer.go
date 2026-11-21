@@ -1,45 +1,42 @@
-package objectstorage
+// Package miniosession issues temporary credentials at the trusted composition root.
+package miniosession
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// MinIOReaderIssuer belongs to the trusted composition root. Its endpoint,
+// Issuer belongs to the trusted composition root. Its endpoint,
 // credentials, base and binder must come from deployment configuration and
 // verified caller context. Only the resulting short-lived binding is handed
 // to the gateway's bound read RPCs.
-type MinIOReaderIssuer struct {
-	Endpoint, Region, Bucket, Prefix, Base string
-	AccessKey, SecretKey                   string
-	Binder                                 Binder
+type Issuer struct {
+	Endpoint, Region, Bucket, Prefix string
+	AccessKey, SecretKey             string
 }
 
 // Issue returns a read credential for one scope of the admitted caller.
 // Even callers admitted for writes receive a SELECT-equivalent session here.
-func (issuer MinIOReaderIssuer) Issue(ctx context.Context, scope string) (*storagev0.Binding, error) {
-	if isNil(issuer.Binder) || issuer.Endpoint == "" || issuer.AccessKey == "" || issuer.SecretKey == "" {
-		return nil, errors.New("a MinIO reader issuer requires an endpoint, credentials and a binder")
+func (issuer Issuer) Issue(ctx context.Context, base string, binding objectstorage.Binding, scope string) (*storagev0.Binding, error) {
+	if issuer.Endpoint == "" || issuer.AccessKey == "" || issuer.SecretKey == "" {
+		return nil, errors.New("a MinIO reader issuer requires an endpoint and credentials")
 	}
-	binding, err := issuer.Binder.Bind(ctx)
+	binding, err := binding.Normalize()
 	if err != nil {
 		return nil, err
 	}
-	binding, err = binding.Normalize()
-	if err != nil {
-		return nil, err
-	}
-	scope, _, err = binding.place(Ref{Scope: scope})
-	if err != nil {
-		return nil, err
+	if !slices.Contains(binding.Reach, scope) {
+		return nil, objectstorage.ErrOutsideReach
 	}
 	binding.Reach = []string{scope}
-	binding.Access, binding.Shared = Read, Read
-	policy, err := S3SessionPolicy(issuer.Bucket, issuer.Prefix, issuer.Base, binding)
+	binding.Access, binding.Shared = objectstorage.Read, objectstorage.Read
+	policy, err := objectstorage.S3SessionPolicy(issuer.Bucket, issuer.Prefix, base, binding)
 	if err != nil {
 		return nil, err
 	}

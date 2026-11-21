@@ -12,7 +12,10 @@ github.com/codefly-dev/service-object-storage/libs/go/objectscopetest   Prove an
 ```
 
 It speaks to the gateway over `codefly/storage/v0`, like every other client.
-It links no cloud SDK.
+The Store links no cloud SDK. To issue scoped MinIO read sessions, pass
+`WithReaderSessions(miniosession.Issuer{...})` at the composition root. The
+issuer uses the MinIO SDK and the Store passes the resulting credential to
+the gateway for Get, Head and listing.
 
 ## The words
 
@@ -195,7 +198,7 @@ and erasure is complete only once the bucket's lifecycle rule expires them.
 |---|---|---|
 | **The Store** | every key it builds is inside the Binding; listings are confined on the way out and checked on the way back; a copy checks both ends | confine whoever holds the gateway client. The Store returns it to nobody |
 | **The gateway's prefix** (`SOS_PREFIX`) | no client of this gateway reaches another gateway's keys | tell one base, partition or principal from another |
-| **A session policy** (`S3SessionPolicy`) | the store itself refuses a credential outside the Binding. Proved on the pinned MinIO with a client that bypasses the gateway and the Store | apply today: the gateway does not yet assume a role per Binding. It also confines by prefix only, and with UUID-sized identifiers a strict Binding fits its 2048 bytes for one scope, not two (`ErrPolicyTooLarge`): the unit of a credential is a Binding and one scope |
+| **A session policy** (`S3SessionPolicy`) | the store itself refuses a credential outside the Binding. Proved on the pinned MinIO with a client that bypasses the gateway and the Store | cover writes or presigning through the configured gateway credential. Each issued read session covers one scope to fit the 2048-byte policy limit |
 | **A presigned URL** | one key, one method, one lifetime, signed over the path | bind a size or a type on upload; be revoked before it expires |
 
 `TestMinIOWithoutTheStoreNothingIsConfined` states the second row's limit as a
@@ -241,5 +244,5 @@ unset and the package still prints `ok`. Count `--- PASS`.
 - No multipart API: the gateway chooses multipart itself and the client never
   sees parts.
 - No object tags and no versions: the gateway's contract lists neither.
-- The gateway does not yet enforce a Binding on the store. `S3SessionPolicy`
-  is the policy it would assume a role with; GCS and Azure have no rendering.
+- Storage-side read sessions are available for MinIO. GCS and Azure have no
+  equivalent issuer. Writes and presigning still use the configured client.

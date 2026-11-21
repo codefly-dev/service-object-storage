@@ -25,6 +25,7 @@ import (
 	"time"
 
 	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
+	"github.com/codefly-dev/service-object-storage/libs/go/miniosession"
 	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
 
 	miniogo "github.com/minio/minio-go/v7"
@@ -316,18 +317,18 @@ func TestMinIOIssuedSessionConfinesGatewayReads(t *testing.T) {
 	c := newStack(t)
 	ctx := context.Background()
 	prefix := "issued-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "/"
-	issuer := objectstorage.MinIOReaderIssuer{
+	issuer := miniosession.Issuer{
 		Endpoint: "http://" + byName(mustEnv(t, "MINIO_ENDPOINT")), Region: "us-east-1", Bucket: mustEnv(t, "MINIO_BUCKET"),
-		Base: "files", Prefix: prefix, AccessKey: mustEnv(t, "MINIO_ACCESS_KEY"), SecretKey: mustEnv(t, "MINIO_SECRET_KEY"),
-		Binder: objectstorage.FixedBinder(objectstorage.Binding{Partition: "org", Principal: "human:amy", Reach: []string{"east", "west"}, Mode: objectstorage.Strict, Access: objectstorage.ReadWrite}),
+		Prefix: prefix, AccessKey: mustEnv(t, "MINIO_ACCESS_KEY"), SecretKey: mustEnv(t, "MINIO_SECRET_KEY"),
 	}
-	_, err := issuer.Issue(ctx, "elsewhere")
+	binding := objectstorage.Binding{Partition: "org", Principal: "human:amy", Reach: []string{"east", "west"}, Mode: objectstorage.Strict, Access: objectstorage.ReadWrite}
+	_, err := issuer.Issue(ctx, "files", binding, "elsewhere")
 	require.ErrorIs(t, err, objectstorage.ErrOutsideReach)
-	bound, err := issuer.Issue(ctx, "east")
+	bound, err := issuer.Issue(ctx, "files", binding, "east")
 	require.NoError(t, err)
-	codec, err := objectkey.New(issuer.Base)
+	codec, err := objectkey.New("files")
 	require.NoError(t, err)
-	store, err := objectstorage.NewStore(c, issuer.Base, issuer.Binder, objectstorage.WithMinIOReaderSessions(issuer))
+	store, err := objectstorage.NewStore(c, "files", objectstorage.FixedBinder(binding), objectstorage.WithReaderSessions(issuer))
 	require.NoError(t, err)
 	for _, row := range []struct {
 		scope, principal string

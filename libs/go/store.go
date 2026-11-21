@@ -36,7 +36,7 @@ type layout interface {
 }
 
 type config struct {
-	readerIssuer *MinIOReaderIssuer
+	readerIssuer ReaderSessionIssuer
 	presignLimit time.Duration
 }
 
@@ -56,14 +56,19 @@ func WithPresignLimit(limit time.Duration) Option {
 	}
 }
 
-// WithMinIOReaderSessions confines Get, Head and listing at the backend too.
-// The Store supplies its own base and the binding it already verified.
-func WithMinIOReaderSessions(issuer MinIOReaderIssuer) Option {
+// ReaderSessionIssuer supplies a short-lived, backend-confined credential
+// for one scope of the binding the Store verified.
+type ReaderSessionIssuer interface {
+	Issue(context.Context, string, Binding, string) (*storagev0.Binding, error)
+}
+
+// WithReaderSessions requires a confined session on Get, Head and listings.
+func WithReaderSessions(issuer ReaderSessionIssuer) Option {
 	return func(c *config) error {
-		if issuer.Endpoint == "" || issuer.Bucket == "" || issuer.AccessKey == "" || issuer.SecretKey == "" {
-			return errors.New("scoped MinIO reads require an endpoint, bucket and credentials")
+		if isNil(issuer) {
+			return errors.New("scoped reads require a session issuer")
 		}
-		c.readerIssuer = &issuer
+		c.readerIssuer = issuer
 		return nil
 	}
 }
@@ -356,9 +361,11 @@ func (s *Store) readerSession(ctx context.Context, binding Binding, scope string
 	if s.config.readerIssuer == nil {
 		return nil, nil
 	}
-	issuer := *s.config.readerIssuer
-	issuer.Base, issuer.Binder = s.base, FixedBinder(binding)
-	return issuer.Issue(ctx, scope)
+	session, err := s.config.readerIssuer.Issue(ctx, s.base, binding, scope)
+	if err == nil && session == nil {
+		return nil, errors.New("reader issuer returned no session")
+	}
+	return session, err
 }
 
 // Get opens an object the binding may read. The caller closes the reader.
