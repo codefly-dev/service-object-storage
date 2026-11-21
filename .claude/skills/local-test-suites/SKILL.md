@@ -50,6 +50,12 @@ Eight tests run:
   `TestGCSProbe` and `TestGCSBoundAccessToken` (bound List/Stat/Get/GetMany
   with an access-token credential).
 
+`libs/go` has its own MinIO tests behind the same tag and the same
+environment, run with `go test -tags integration -count=1 -v ./libs/go/...`:
+seven `TestMinIO*` tests (the confinement proof, the defects it must catch,
+case, presigned URLs, what is unconfined without the Store, the session policy
+against a raw client, and the listing MinIO hides). They skip the same way.
+
 The emulator accepts any caller, so the GCS tests prove the keyless client
 path, the prefix and that a bearer-token binding reaches the store. They never
 prove Workload Identity, a bucket grant or token validity.

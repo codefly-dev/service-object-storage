@@ -702,4 +702,5 @@ internal/server/             gRPC ObjectStorage implementation (binding.go: boun
 internal/egress/             public-destination guard for bound calls
 internal/config/             env configuration
 cmd/service-object-storage/  the server binary
+libs/go/                     client library for confined stores (see libs/go/README.md)
 ```

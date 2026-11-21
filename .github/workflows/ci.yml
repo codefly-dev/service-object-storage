@@ -71,7 +71,7 @@ jobs:
           MINIO_BUCKET: sos-test
           STORAGE_EMULATOR_HOST: localhost:4443
           GCS_BUCKET: sos-test
-        run: go test -tags integration ./internal/integration/...
+        run: go test -tags integration ./internal/integration/... ./libs/go/...
 
   agent-runtime-e2e:
     runs-on: ubuntu-latest
