@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/grpc"
 	"io"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -670,5 +672,31 @@ func TestSessionPolicy(t *testing.T) {
 	}
 	if _, err := objectstorage.S3SessionPolicy("bucket", "", "files", objectstorage.Binding{}); !errors.Is(err, objectstorage.ErrNoBinding) {
 		t.Errorf("no binding: %v", err)
+	}
+}
+
+type uploadContextClient struct {
+	storagev0.ObjectStorageClient
+	upload context.Context
+}
+
+func (c *uploadContextClient) Put(ctx context.Context, opts ...grpc.CallOption) (storagev0.ObjectStorage_PutClient, error) {
+	c.upload = ctx
+	return c.ObjectStorageClient.Put(ctx, opts...)
+}
+
+func TestSourceFailureCancelsUpload(t *testing.T) {
+	client := &uploadContextClient{ObjectStorageClient: gatewaytest.Memory(t)}
+	store, err := objectstorage.NewStore(client, "files", objectstorage.FixedBinder(strict("human:amy", "inst")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("input interrupted")
+	_, err = store.Put(context.Background(), objectstorage.Own("file"), io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(failure)), objectstorage.PutOptions{})
+	if !errors.Is(err, failure) {
+		t.Fatalf("source error: %v", err)
+	}
+	if client.upload.Err() != context.Canceled {
+		t.Fatal("unfinished upload context remained live")
 	}
 }

@@ -245,7 +245,9 @@ func (s *Store) send(ctx context.Context, key string, body io.Reader, options Pu
 	if body == nil {
 		return 0, "", nil, errors.New("object store: a write needs a body")
 	}
-	stream, err := s.client.Put(ctx)
+	upload, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := s.client.Put(upload)
 	if err != nil {
 		return 0, "", nil, err
 	}
