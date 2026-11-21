@@ -144,7 +144,7 @@ func (c *call) err(err error) error {
 func bindingSecrets(b *storagev0.Binding) []string {
 	secrets := []string{}
 	cred := b.GetCredential()
-	for _, value := range []string{cred.GetAccessKey().GetSecret(), cred.GetAccessToken(), string(cred.GetServiceAccountKey())} {
+	for _, value := range []string{cred.GetAccessKey().GetSecret(), cred.GetAccessKey().GetSessionToken(), cred.GetAccessToken(), string(cred.GetServiceAccountKey())} {
 		if value != "" {
 			secrets = append(secrets, value)
 		}
@@ -194,11 +194,15 @@ func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Comp
 				"kind gcs requires credential.service_account_key or credential.access_token")
 		}
 	case "azure":
+		if cred.GetAccessKey().GetSessionToken() != "" {
+			return backend.Config{}, nil, bindingInvalid(op, "kind azure does not accept an STS session token")
+		}
 		cfg.AzureAccount, cfg.AzureKey = cred.GetAccessKey().GetId(), cred.GetAccessKey().GetSecret()
 		if cfg.AzureAccount == "" || cfg.AzureKey == "" {
 			return backend.Config{}, nil, bindingInvalid(op, "kind azure requires credential.access_key (account and shared key)")
 		}
 	default:
+		cfg.SessionToken = cred.GetAccessKey().GetSessionToken()
 		cfg.AccessKey, cfg.SecretKey = cred.GetAccessKey().GetId(), cred.GetAccessKey().GetSecret()
 		if cfg.AccessKey == "" || cfg.SecretKey == "" {
 			return backend.Config{}, nil, bindingInvalid(op,

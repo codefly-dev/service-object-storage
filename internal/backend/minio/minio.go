@@ -68,7 +68,7 @@ func New(_ context.Context, cfg backend.Config) (backend.Backend, error) {
 	}
 
 	opts := &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, cfg.SessionToken),
 		Secure: secure,
 		Region: region,
 	}

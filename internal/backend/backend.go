@@ -30,8 +30,9 @@ type Config struct {
 	// UsePathStyle forces path-style addressing (required by MinIO).
 	UsePathStyle bool
 
-	AccessKey string
-	SecretKey string
+	AccessKey    string
+	SecretKey    string
+	SessionToken string
 
 	// GCSCredentialsFile is a service-account JSON path (empty = ADC).
 	GCSCredentialsFile string

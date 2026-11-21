@@ -123,6 +123,8 @@ message Credential {
 message AccessKey {
   string id = 1;
   string secret = 2 [debug_redact = true];
+  // Required with temporary S3 or MinIO credentials issued by STS.
+  string session_token = 3 [debug_redact = true];
 }
 
 message StatRequest {

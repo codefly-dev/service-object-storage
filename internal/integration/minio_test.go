@@ -24,6 +24,9 @@ import (
 	"testing"
 	"time"
 
+	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
+	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
+
 	miniogo "github.com/minio/minio-go/v7"
 	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/stretchr/testify/require"
@@ -307,4 +310,38 @@ func TestMinIOBoundGetMany(t *testing.T) {
 // localhost, never by address.
 func byName(endpoint string) string {
 	return "localhost:" + endpoint[strings.LastIndex(endpoint, ":")+1:]
+}
+
+func TestMinIOIssuedSessionConfinesGatewayReads(t *testing.T) {
+	c := newStack(t)
+	ctx := context.Background()
+	prefix := "issued-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "/"
+	issuer := objectstorage.MinIOReaderIssuer{
+		Endpoint: "http://" + byName(mustEnv(t, "MINIO_ENDPOINT")), Region: "us-east-1", Bucket: mustEnv(t, "MINIO_BUCKET"),
+		Base: "files", Prefix: prefix, AccessKey: mustEnv(t, "MINIO_ACCESS_KEY"), SecretKey: mustEnv(t, "MINIO_SECRET_KEY"),
+		Binder: objectstorage.FixedBinder(objectstorage.Binding{Partition: "org", Principal: "human:amy", Reach: []string{"east", "west"}, Mode: objectstorage.Strict, Access: objectstorage.ReadWrite}),
+	}
+	_, err := issuer.Issue(ctx, "elsewhere")
+	require.ErrorIs(t, err, objectstorage.ErrOutsideReach)
+	bound, err := issuer.Issue(ctx, "east")
+	require.NoError(t, err)
+	codec, err := objectkey.New(issuer.Base)
+	require.NoError(t, err)
+	for _, row := range []struct {
+		scope, principal string
+		allowed          bool
+	}{
+		{"east", "human:amy", true}, {"east", "human:bob", false}, {"west", "human:amy", false},
+	} {
+		key, err := codec.Key(objectkey.Key{Partition: "org", Scope: row.scope, Slot: objectkey.Principal(row.principal), Name: "test.txt"})
+		require.NoError(t, err)
+		_, err = put(t, c, prefix+key, []byte("stored"), nil)
+		require.NoError(t, err)
+		_, err = c.Stat(ctx, &storagev0.StatRequest{Binding: bound, Key: key})
+		if row.allowed {
+			require.NoError(t, err)
+		} else {
+			require.Equal(t, codes.PermissionDenied, status.Code(err))
+		}
+	}
 }

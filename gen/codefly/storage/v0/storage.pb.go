@@ -679,9 +679,11 @@ func (*Credential_ServiceAccountKey) isCredential_Kind() {}
 func (*Credential_AccessToken) isCredential_Kind() {}
 
 type AccessKey struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Secret        string                 `protobuf:"bytes,2,opt,name=secret,proto3" json:"secret,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Id     string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Secret string                 `protobuf:"bytes,2,opt,name=secret,proto3" json:"secret,omitempty"`
+	// Required with temporary S3 or MinIO credentials issued by STS.
+	SessionToken  string `protobuf:"bytes,3,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -726,6 +728,13 @@ func (x *AccessKey) GetId() string {
 func (x *AccessKey) GetSecret() string {
 	if x != nil {
 		return x.Secret
+	}
+	return ""
+}
+
+func (x *AccessKey) GetSessionToken() string {
+	if x != nil {
+		return x.SessionToken
 	}
 	return ""
 }
@@ -2808,10 +2817,11 @@ const file_codefly_storage_v0_storage_proto_rawDesc = "" +
 	"access_key\x18\x01 \x01(\v2\x1d.codefly.storage.v0.AccessKeyH\x00R\taccessKey\x125\n" +
 	"\x13service_account_key\x18\x02 \x01(\fB\x03\x80\x01\x01H\x00R\x11serviceAccountKey\x12(\n" +
 	"\faccess_token\x18\x03 \x01(\tB\x03\x80\x01\x01H\x00R\vaccessTokenB\x06\n" +
-	"\x04kind\"8\n" +
+	"\x04kind\"b\n" +
 	"\tAccessKey\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
-	"\x06secret\x18\x02 \x01(\tB\x03\x80\x01\x01R\x06secret\"\xb4\x01\n" +
+	"\x06secret\x18\x02 \x01(\tB\x03\x80\x01\x01R\x06secret\x12(\n" +
+	"\rsession_token\x18\x03 \x01(\tB\x03\x80\x01\x01R\fsessionToken\"\xb4\x01\n" +
 	"\vStatRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x1d\n" +
 	"\n" +

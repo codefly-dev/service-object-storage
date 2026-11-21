@@ -68,7 +68,7 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 	}
 	if cfg.AccessKey != "" {
 		optFns = append(optFns, config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
+			credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, cfg.SessionToken),
 		))
 	}
 
@@ -101,7 +101,7 @@ func New(ctx context.Context, cfg backend.Config) (backend.Backend, error) {
 // options, not LoadDefaultConfig, so no shared config file, environment
 // variable or ambient credential of the gateway's reaches the caller's store.
 func newBound(cfg backend.Config) *Backend {
-	creds := credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")
+	creds := credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, cfg.SessionToken)
 	client := s3.New(s3.Options{
 		Region:       cfg.Region,
 		Credentials:  creds,

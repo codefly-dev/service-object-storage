@@ -9,6 +9,15 @@ this one server — written once, all backends compiled in.
 
 > Design & rationale: [codefly-dev/service-object-storage#1](https://github.com/codefly-dev/service-object-storage/issues/1)
 
+## Scoped MinIO reads
+
+A trusted service can use the Go library's `MinIOReaderIssuer.Issue` with its verified caller binder and the requested scope. The issuer exchanges the service credential for a 15-minute STS session for that single scope. It grants read access even when the calling principal also has write privileges. Pass the resulting binding to Stat, Get, GetMany or List. MinIO checks the session policy on each operation.
+
+Temporary S3 and MinIO credentials on a bound read carry the STS token in
+`binding.credential.access_key.session_token` alongside the ID and secret.
+The caller obtains these credentials. Every request uses that session until
+the backend rejects it on expiry.
+
 ## Why
 
 `service-s3` and `service-minio` were the same engine (MinIO) wearing two
