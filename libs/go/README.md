@@ -195,7 +195,7 @@ and erasure is complete only once the bucket's lifecycle rule expires them.
 |---|---|---|
 | **The Store** | every key it builds is inside the Binding; listings are confined on the way out and checked on the way back; a copy checks both ends | confine whoever holds the gateway client. The Store returns it to nobody |
 | **The gateway's prefix** (`SOS_PREFIX`) | no client of this gateway reaches another gateway's keys | tell one base, partition or principal from another |
-| **A session policy** (`S3SessionPolicy`) | the store itself refuses a credential outside the Binding. Proved on the pinned MinIO with a client that bypasses the gateway and the Store | apply today: the gateway does not yet assume a role per Binding. It also confines by prefix only, and a wide reach does not fit its 2048 bytes (`ErrPolicyTooLarge`) |
+| **A session policy** (`S3SessionPolicy`) | the store itself refuses a credential outside the Binding. Proved on the pinned MinIO with a client that bypasses the gateway and the Store | apply today: the gateway does not yet assume a role per Binding. It also confines by prefix only, and with UUID-sized identifiers a strict Binding fits its 2048 bytes for one scope, not two (`ErrPolicyTooLarge`): the unit of a credential is a Binding and one scope |
 | **A presigned URL** | one key, one method, one lifetime, signed over the path | bind a size or a type on upload; be revoked before it expires |
 
 `TestMinIOWithoutTheStoreNothingIsConfined` states the second row's limit as a
