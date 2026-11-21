@@ -327,6 +327,8 @@ func TestMinIOIssuedSessionConfinesGatewayReads(t *testing.T) {
 	require.NoError(t, err)
 	codec, err := objectkey.New(issuer.Base)
 	require.NoError(t, err)
+	store, err := objectstorage.NewStore(c, issuer.Base, issuer.Binder, objectstorage.WithMinIOReaderSessions(issuer))
+	require.NoError(t, err)
 	for _, row := range []struct {
 		scope, principal string
 		allowed          bool
@@ -344,4 +346,17 @@ func TestMinIOIssuedSessionConfinesGatewayReads(t *testing.T) {
 			require.Equal(t, codes.PermissionDenied, status.Code(err))
 		}
 	}
+	ref := objectstorage.Ref{Scope: "east", Name: "test.txt"}
+	_, err = store.Head(ctx, ref)
+	require.NoError(t, err)
+	body, _, err := store.Get(ctx, ref)
+	require.NoError(t, err)
+	defer body.Close()
+	content, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, "stored", string(content))
+	page, err := store.List(ctx, objectstorage.Ref{Scope: "east"}, objectstorage.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, page.Objects, 1)
+
 }

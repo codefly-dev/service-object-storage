@@ -36,6 +36,7 @@ type layout interface {
 }
 
 type config struct {
+	readerIssuer *MinIOReaderIssuer
 	presignLimit time.Duration
 }
 
@@ -51,6 +52,18 @@ func WithPresignLimit(limit time.Duration) Option {
 			return fmt.Errorf("a presign limit is between 0 and %s", maxPresignLimit)
 		}
 		configuration.presignLimit = limit
+		return nil
+	}
+}
+
+// WithMinIOReaderSessions confines Get, Head and listing at the backend too.
+// The Store supplies its own base and the binding it already verified.
+func WithMinIOReaderSessions(issuer MinIOReaderIssuer) Option {
+	return func(c *config) error {
+		if issuer.Endpoint == "" || issuer.Bucket == "" || issuer.AccessKey == "" || issuer.SecretKey == "" {
+			return errors.New("scoped MinIO reads require an endpoint, bucket and credentials")
+		}
+		c.readerIssuer = &issuer
 		return nil
 	}
 }
@@ -339,6 +352,15 @@ func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, op
 	return info, nil
 }
 
+func (s *Store) readerSession(ctx context.Context, binding Binding, scope string) (*storagev0.Binding, error) {
+	if s.config.readerIssuer == nil {
+		return nil, nil
+	}
+	issuer := *s.config.readerIssuer
+	issuer.Base, issuer.Binder = s.base, FixedBinder(binding)
+	return issuer.Issue(ctx, scope)
+}
+
 // Get opens an object the binding may read. The caller closes the reader.
 func (s *Store) Get(ctx context.Context, ref Ref) (io.ReadCloser, Info, error) {
 	binding, err := s.bind(ctx)
@@ -349,12 +371,16 @@ func (s *Store) Get(ctx context.Context, ref Ref) (io.ReadCloser, Info, error) {
 	if err != nil {
 		return nil, Info{}, err
 	}
-	return open(ctx, s.client, at.key, objectkey.Key{Scope: at.scope, Slot: at.slot, Name: ref.Name})
+	session, err := s.readerSession(ctx, binding, at.scope)
+	if err != nil {
+		return nil, Info{}, err
+	}
+	return open(ctx, s.client, session, at.key, objectkey.Key{Scope: at.scope, Slot: at.slot, Name: ref.Name})
 }
 
-func open(ctx context.Context, client storagev0.ObjectStorageClient, physical string, key objectkey.Key) (io.ReadCloser, Info, error) {
+func open(ctx context.Context, client storagev0.ObjectStorageClient, session *storagev0.Binding, physical string, key objectkey.Key) (io.ReadCloser, Info, error) {
 	streaming, cancel := context.WithCancel(ctx)
-	stream, err := client.Get(streaming, &storagev0.GetRequest{Key: physical})
+	stream, err := client.Get(streaming, &storagev0.GetRequest{Key: physical, Binding: session})
 	if err != nil {
 		cancel()
 		return nil, Info{}, translate(err)
@@ -410,7 +436,11 @@ func (s *Store) Head(ctx context.Context, ref Ref) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	header, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: at.key})
+	session, err := s.readerSession(ctx, binding, at.scope)
+	if err != nil {
+		return Info{}, err
+	}
+	header, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: at.key, Binding: session})
 	if err != nil {
 		return Info{}, translate(err)
 	}
@@ -510,7 +540,7 @@ func (s *Store) List(ctx context.Context, in Ref, options ListOptions) (Page, er
 	if err != nil {
 		return Page{}, err
 	}
-	return s.list(ctx, binding, prefix, options, func(key objectkey.Key) bool {
+	return s.list(ctx, binding, scope, prefix, options, func(key objectkey.Key) bool {
 		return key.Scope == scope && key.Slot == slot
 	})
 }
@@ -532,11 +562,15 @@ func (s *Store) ListScope(ctx context.Context, scope string, options ListOptions
 	if err != nil {
 		return Page{}, err
 	}
-	return s.list(ctx, binding, prefix, options, func(key objectkey.Key) bool { return key.Scope == place })
+	return s.list(ctx, binding, place, prefix, options, func(key objectkey.Key) bool { return key.Scope == place })
 }
 
-func (s *Store) list(ctx context.Context, binding Binding, prefix string, options ListOptions, within func(objectkey.Key) bool) (Page, error) {
-	listed, err := s.client.List(ctx, &storagev0.ListRequest{Prefix: prefix, PageToken: options.Token, Limit: int32(max(options.Limit, 0))})
+func (s *Store) list(ctx context.Context, binding Binding, scope, prefix string, options ListOptions, within func(objectkey.Key) bool) (Page, error) {
+	session, err := s.readerSession(ctx, binding, scope)
+	if err != nil {
+		return Page{}, err
+	}
+	listed, err := s.client.List(ctx, &storagev0.ListRequest{Binding: session, Prefix: prefix, PageToken: options.Token, Limit: int32(max(options.Limit, 0))})
 	if err != nil {
 		return Page{}, translate(err)
 	}

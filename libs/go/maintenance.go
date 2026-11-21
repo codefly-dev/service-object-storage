@@ -321,7 +321,7 @@ func (m *Maintenance) ExportPrincipal(ctx context.Context, partition, principal 
 				return nil
 			}
 			return visit(entry.Info, func(ctx context.Context) (io.ReadCloser, error) {
-				body, _, err := open(ctx, m.client, entry.Physical, entry.Key)
+				body, _, err := open(ctx, m.client, nil, entry.Physical, entry.Key)
 				return body, err
 			})
 		}); err != nil {
