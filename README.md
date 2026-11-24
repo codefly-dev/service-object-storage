@@ -20,6 +20,38 @@ Temporary S3 and MinIO credentials on a bound read carry the STS token in
 The caller obtains these credentials. Every request uses that session until
 the backend rejects it on expiry.
 
+### What is proven, and what is not
+
+Proven, on the pinned MinIO only, with the real issuer
+(`internal/integration/minio_test.go`, tag `integration`):
+
+- `TestMinIOIssuedSessionConfinesGatewayReads`: a session issued for one scope
+  is refused `Stat` of another principal's object and of another scope.
+- `TestMinIOIssuedSessionCannotLeaveADocumentsContentScope`: over a
+  content-by-digest layout (a base, partition, scope, a Strict binding, the
+  content slot, and a second copy of each object at `<partition>/blobs/<digest>`
+  outside the base), a session issued for one scope reads and stats that
+  scope's content by digest and lists its own slot. Through the gateway's bound
+  reads it is refused `Stat`, `Get` and `List` in a sibling scope of the same
+  partition (the same bytes there included), in another partition and at the
+  keys outside the base; no parent prefix lists, and the content slot itself
+  does not list for a Strict binding. Held by a client on MinIO itself it is
+  refused `Put`, `Copy` (as source and as destination) and `Delete` everywhere,
+  its own scope included, because an issued session is read-only.
+
+Not proven:
+
+- Any backend other than MinIO. No session is issued for S3, GCS or Azure and
+  none of these tests ran against them.
+- Any consumer's delivery path. A session confines whoever holds it; a
+  consumer that reads or presigns with the gateway's own credential is not
+  confined by one. The tests show the session's reach beside a consumer's
+  route, not on it.
+- Writes, copies, deletes and presigning through the gateway: they use the
+  gateway's bucket-wide credential, and no write session can be issued.
+- `AssumeRole` from a MinIO user other than root, and the session's lifetime
+  bounds: the tests issue from the root credential for the fixed 900 seconds.
+
 ## Why
 
 `service-s3` and `service-minio` were the same engine (MinIO) wearing two

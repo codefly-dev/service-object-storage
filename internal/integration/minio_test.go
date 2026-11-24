@@ -361,3 +361,257 @@ func TestMinIOIssuedSessionConfinesGatewayReads(t *testing.T) {
 	require.Len(t, page.Objects, 1)
 
 }
+
+// boundGet reads key through the gateway's bound Get with the caller's
+// credential, and answers what the store answered.
+func boundGet(ctx context.Context, c storagev0.ObjectStorageClient, bound *storagev0.Binding, key string) ([]byte, error) {
+	stream, err := c.Get(ctx, &storagev0.GetRequest{Binding: bound, Key: key})
+	if err != nil {
+		return nil, err
+	}
+	var body []byte
+	for {
+		message, err := stream.Recv()
+		if err == io.EOF {
+			return body, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		body = append(body, message.GetData()...)
+	}
+}
+
+// Evidence for MinIO only: the pinned MinIO and miniosession's AssumeRole
+// session policy. It says nothing of S3, GCS or Azure, and nothing of a
+// consumer's delivery path: Document Store reads and presigns with the
+// gateway's own bucket-wide credential and issues no session today, so this
+// shows what a session over its key layout would reach, beside its route and
+// not on it.
+//
+// The layout is Document Store's own (its storage.ContentScope and
+// storage.DeriveKey): base "documents-content", partition = tenant, scope =
+// installation, a Strict binding of the principal "service:documents",
+// content by digest in the content slot, and the legacy copy every write
+// still makes at "<tenant>/blobs/<digest>". The session is issued by the real
+// issuer for one installation. It reads and stats the installation's content
+// by digest and lists its own slot; it is refused Get, Stat and List in a
+// sibling installation of the same tenant (the same bytes there included),
+// in another tenant and at the legacy keys, and no parent prefix lists for
+// it, so no sibling is enumerated. The digest is the capability inside the
+// scope: the content slot itself does not list. A session is read-only, so
+// held by a client on MinIO itself it is refused Put, Copy (as source or as
+// destination) and Delete everywhere, its own scope included, and every
+// object is afterwards as it was written.
+func TestMinIOIssuedSessionCannotLeaveADocumentsContentScope(t *testing.T) {
+	c := newStack(t)
+	ctx := context.Background()
+	const base, principal = "documents-content", "service:documents"
+	endpoint, bucket := mustEnv(t, "MINIO_ENDPOINT"), mustEnv(t, "MINIO_BUCKET")
+	run := strconv.FormatInt(time.Now().UnixNano(), 36)
+	tenant, otherTenant := "tenant-a-"+run, "tenant-b-"+run
+	const installation, sibling = "installation-a", "installation-b"
+	codec, err := objectkey.New(base)
+	require.NoError(t, err)
+
+	// Written as Document Store writes: PutContent through a Store bound as
+	// its PutScoped binds, then the legacy copy.
+	stored := map[string]string{}
+	content := func(tenant, scope, body string) string {
+		t.Helper()
+		binding := objectstorage.Binding{Partition: tenant, Principal: principal, Reach: []string{scope}, Mode: objectstorage.Strict, Access: objectstorage.ReadWrite}
+		store, err := objectstorage.NewStore(c, base, objectstorage.FixedBinder(binding))
+		require.NoError(t, err)
+		info, err := store.PutContent(ctx, scope, strings.NewReader(body), objectstorage.PutOptions{})
+		require.NoError(t, err)
+		key, err := codec.Key(objectkey.Key{Partition: tenant, Scope: scope, Slot: objectkey.Content(), Name: info.Ref.Name})
+		require.NoError(t, err)
+		legacy := tenant + "/blobs/" + info.Ref.Name
+		_, err = put(t, c, legacy, []byte(body), nil)
+		require.NoError(t, err)
+		stored[key], stored[legacy] = body, body
+		return key
+	}
+	first := content(tenant, installation, "first document of installation a "+run)
+	second := content(tenant, installation, "second document of installation a "+run)
+	inSibling := content(tenant, sibling, "document of installation b "+run)
+	// The same bytes in the sibling installation: the same digest, another key.
+	sameBytes := content(tenant, sibling, "first document of installation a "+run)
+	inOtherTenant := content(otherTenant, installation, "first document of installation a "+run)
+	digest := first[strings.LastIndex(first, "/")+1:]
+	require.Equal(t, digest, sameBytes[strings.LastIndex(sameBytes, "/")+1:])
+	require.NotEqual(t, first, sameBytes)
+	legacy, otherLegacy := tenant+"/blobs/"+digest, otherTenant+"/blobs/"+digest
+	slot := func(tenant, scope string, slot objectkey.Slot) string {
+		prefix, err := codec.SlotPrefix(tenant, scope, slot)
+		require.NoError(t, err)
+		return prefix
+	}
+	own := slot(tenant, installation, objectkey.Principal(principal))
+	_, err = put(t, c, own+"note.txt", []byte("own"), nil)
+	require.NoError(t, err)
+	stored[own+"note.txt"] = "own"
+	scopeOf := func(tenant, scope string) string {
+		prefix, err := codec.ScopePrefix(tenant, scope)
+		require.NoError(t, err)
+		return prefix
+	}
+	partition, err := codec.PartitionPrefix(tenant)
+	require.NoError(t, err)
+	otherPartition, err := codec.PartitionPrefix(otherTenant)
+	require.NoError(t, err)
+
+	issuer := miniosession.Issuer{
+		Endpoint: "http://" + byName(endpoint), Region: "us-east-1", Bucket: bucket,
+		AccessKey: mustEnv(t, "MINIO_ACCESS_KEY"), SecretKey: mustEnv(t, "MINIO_SECRET_KEY"),
+	}
+	binding := objectstorage.Binding{Partition: tenant, Principal: principal, Reach: []string{installation}, Mode: objectstorage.Strict, Access: objectstorage.ReadWrite}
+	_, err = issuer.Issue(ctx, base, binding, sibling)
+	require.ErrorIs(t, err, objectstorage.ErrOutsideReach)
+	bound, err := issuer.Issue(ctx, base, binding, installation)
+	require.NoError(t, err)
+
+	// Inside the scope, through the gateway's bound reads.
+	for _, key := range []string{first, second} {
+		info, err := c.Stat(ctx, &storagev0.StatRequest{Binding: bound, Key: key})
+		require.NoError(t, err, "stat %s", key)
+		require.Equal(t, int64(len(stored[key])), info.GetInfo().GetSize())
+		body, err := boundGet(ctx, c, bound, key)
+		require.NoError(t, err, "get %s", key)
+		require.Equal(t, stored[key], string(body))
+	}
+	listed, err := c.List(ctx, &storagev0.ListRequest{Binding: bound, Prefix: own})
+	require.NoError(t, err)
+	var names []string
+	for _, object := range listed.GetObjects() {
+		names = append(names, object.GetKey())
+	}
+	require.Contains(t, names, own+"note.txt")
+	for _, name := range names {
+		require.True(t, strings.HasPrefix(name, own), "the own slot listed %s", name)
+	}
+
+	// Outside it, through the same bound reads.
+	denied := func(what string, err error) {
+		t.Helper()
+		require.Equal(t, codes.PermissionDenied, status.Code(err), "%s: %v", what, err)
+	}
+	for what, key := range map[string]string{
+		"a sibling installation's content":                 inSibling,
+		"the same bytes in a sibling installation":         sameBytes,
+		"another tenant's content":                         inOtherTenant,
+		"the legacy copy of its own content":               legacy,
+		"another tenant's legacy copy":                     otherLegacy,
+		"a key of the sibling's own slot":                  slot(tenant, sibling, objectkey.Principal(principal)) + "note.txt",
+		"its own digest under the sibling's scope by name": scopeOf(tenant, sibling) + "_sha256/" + second[strings.LastIndex(second, "/")+1:],
+	} {
+		_, err := c.Stat(ctx, &storagev0.StatRequest{Binding: bound, Key: key})
+		denied("stat "+what, err)
+		body, err := boundGet(ctx, c, bound, key)
+		denied("get "+what, err)
+		require.Empty(t, body, "get %s delivered bytes", what)
+	}
+	for what, prefix := range map[string]string{
+		"its own content slot":                     slot(tenant, installation, objectkey.Content()),
+		"its own scope":                            scopeOf(tenant, installation),
+		"the sibling installation":                 scopeOf(tenant, sibling),
+		"the sibling's content slot":               slot(tenant, sibling, objectkey.Content()),
+		"the sibling's own slot":                   slot(tenant, sibling, objectkey.Principal(principal)),
+		"the tenant, parent of both":               partition,
+		"another tenant":                           otherPartition,
+		"another tenant's same installation":       scopeOf(otherTenant, installation),
+		"the base":                                 codec.BasePrefix(),
+		"the bucket":                               "",
+		"the legacy prefix":                        tenant + "/blobs/",
+		"the legacy tenant":                        tenant + "/",
+		"another tenant's legacy prefix":           otherTenant + "/blobs/",
+		"its own slot without the separator":       strings.TrimSuffix(own, "/"),
+		"the scope its installation's name begins": strings.TrimSuffix(scopeOf(tenant, installation), "/"),
+	} {
+		for _, delimiter := range []string{"", "/"} {
+			page, err := c.List(ctx, &storagev0.ListRequest{Binding: bound, Prefix: prefix, Delimiter: delimiter})
+			denied("list "+what, err)
+			require.Empty(t, page.GetObjects(), "list %s enumerated objects", what)
+			require.Empty(t, page.GetCommonPrefixes(), "list %s enumerated prefixes", what)
+		}
+	}
+
+	// The same credential on MinIO itself, past the gateway: it reads what it
+	// may, so a refusal below is the policy's and not a credential MinIO does
+	// not know, and it writes nothing anywhere.
+	key := bound.GetCredential().GetAccessKey()
+	raw, err := miniogo.New(endpoint, &miniogo.Options{Creds: miniocreds.NewStaticV4(key.GetId(), key.GetSecret(), key.GetSessionToken()), Region: "us-east-1"})
+	require.NoError(t, err)
+	_, err = raw.StatObject(ctx, bucket, first, miniogo.StatObjectOptions{})
+	require.NoError(t, err)
+	refused := func(what string, err error) {
+		t.Helper()
+		require.Error(t, err, "%s was allowed", what)
+		require.Equal(t, "AccessDenied", miniogo.ToErrorResponse(err).Code, "%s: %v", what, err)
+	}
+	read := func(key string) error {
+		object, err := raw.GetObject(ctx, bucket, key, miniogo.GetObjectOptions{})
+		if err != nil {
+			return err
+		}
+		defer object.Close()
+		_, err = io.ReadAll(object)
+		return err
+	}
+	write := func(key string) error {
+		_, err := raw.PutObject(ctx, bucket, key, strings.NewReader("overwritten"), int64(len("overwritten")), miniogo.PutObjectOptions{})
+		return err
+	}
+	copyTo := func(source, destination string) error {
+		_, err := raw.CopyObject(ctx, miniogo.CopyDestOptions{Bucket: bucket, Object: destination}, miniogo.CopySrcOptions{Bucket: bucket, Object: source})
+		return err
+	}
+	remove := func(key string) error { return raw.RemoveObject(ctx, bucket, key, miniogo.RemoveObjectOptions{}) }
+	list := func(prefix string) error {
+		for object := range raw.ListObjects(ctx, bucket, miniogo.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+			if object.Err != nil {
+				return object.Err
+			}
+		}
+		return nil
+	}
+	fresh := slot(tenant, installation, objectkey.Principal(principal)) + "written-by-the-session.txt"
+	for what, target := range map[string]string{
+		"a sibling installation's content": inSibling,
+		"the same bytes in the sibling":    sameBytes,
+		"another tenant's content":         inOtherTenant,
+		"the legacy copy":                  legacy,
+		"another tenant's legacy copy":     otherLegacy,
+	} {
+		refused("raw get of "+what, read(target))
+		_, err := raw.StatObject(ctx, bucket, target, miniogo.StatObjectOptions{})
+		require.Error(t, err, "raw stat of %s was allowed", what)
+		refused("put over "+what, write(target))
+		refused("delete of "+what, remove(target))
+		refused("copy from "+what+" into its own scope", copyTo(target, fresh))
+		refused("copy of its own content over "+what, copyTo(first, target))
+	}
+	for what, prefix := range map[string]string{
+		"the sibling installation": scopeOf(tenant, sibling), "the tenant": partition, "another tenant": otherPartition,
+		"the legacy prefix": tenant + "/blobs/", "the bucket": "", "its own content slot": slot(tenant, installation, objectkey.Content()),
+	} {
+		refused("raw list of "+what, list(prefix))
+	}
+	// Read-only inside its own scope too.
+	refused("put into its own slot", write(fresh))
+	refused("put over its own content", write(first))
+	refused("delete of its own content", remove(first))
+	refused("delete of its own object", remove(own+"note.txt"))
+	refused("copy within its own scope", copyTo(first, fresh))
+	refused("put of a new sibling key", write(scopeOf(tenant, sibling)+"_sha256/"+strings.Repeat("0", 64)))
+
+	// Nothing moved: every object is as it was written, and nothing was added.
+	for key, body := range stored {
+		got, _ := get(t, c, key)
+		require.Equal(t, body, string(got), "%s changed", key)
+	}
+	for _, added := range []string{fresh, scopeOf(tenant, sibling) + "_sha256/" + strings.Repeat("0", 64)} {
+		_, err := c.Stat(ctx, &storagev0.StatRequest{Key: added})
+		require.Equal(t, codes.NotFound, status.Code(err), "%s was written", added)
+	}
+}
