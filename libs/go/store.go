@@ -85,11 +85,12 @@ func WithReaderSessions(issuer ReaderSessionIssuer) Option {
 // Each call runs under one of the scope's three sessions, and no call can
 // use another's:
 //
-//	read         Get, Head, List, ListScope, PresignGet
-//	ingest       Put, the upload half of PutContent, PresignPut, PresignPost
-//	maintenance  Delete, Copy, and the promotion half of PutContent (the
-//	             check for existing content, the copy into place, and the
-//	             removal of the staged upload)
+//	read         Get, Head, List, ListScope, PresignGet, GetStaged
+//	ingest       Put, PutStaged, the upload half of PutContent, PresignPut,
+//	             PresignPost
+//	maintenance  Delete, Copy, DeleteStaged, and the promotion half of
+//	             PutContent (the copy into place and the removal of the
+//	             staged upload)
 //
 // The gateway must offer scoped sessions (SOS_SCOPED_SESSIONS=allow or
 // require) and grant this Store's base those modes; otherwise every call is
@@ -352,7 +353,17 @@ func streamError(stream storagev0.ObjectStorage_PutClient, err error) error {
 // of a scope in reach, and returns that digest as the reference's name. The
 // same bytes written twice are one object. The body is streamed to a staging
 // key of the binding's own principal while it is hashed, then copied in place
-// by the store unless the content is already there.
+// by the store.
+//
+// The copy is made whether or not the content is already there, so that
+// content is always modified when it was last written, not when it was first.
+// A writer that finds its bytes stored has decided to reference them and has
+// not recorded that yet; content left with its first age could be swept, as
+// old and unreferenced, in that gap. Written again, it is inside the sweep's
+// grace. The grace is a margin and not a lock: a caller whose writers can
+// take longer than it between storing and recording, or that wants no window
+// at all, takes its own lock around this call and holds the same lock in
+// Maintenance.SweepContentWith.
 func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, options PutOptions) (Info, error) {
 	binding, err := s.bind(ctx)
 	if err != nil {
@@ -393,21 +404,91 @@ func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, op
 	info := Info{Ref: refOf(content), Size: size, ContentType: options.ContentType}
 	// Promotion is maintenance: it reads what ingest wrote, which an ingest
 	// session may not.
-	promotion := s.in(binding, place, maintenanceSession)
-	existing, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: key, Scope: promotion})
-	switch {
-	case err == nil:
-		info.ETag, info.VersionID = existing.GetInfo().GetEtag(), existing.GetInfo().GetVersionId()
-		return info, nil
-	case status.Code(err) != codes.NotFound:
-		return Info{}, err
-	}
-	copied, err := s.client.Copy(ctx, &storagev0.CopyRequest{SourceKey: staging, DestKey: key, Scope: promotion})
+	copied, err := s.client.Copy(ctx, &storagev0.CopyRequest{SourceKey: staging, DestKey: key, Scope: s.in(binding, place, maintenanceSession)})
 	if err != nil {
 		return Info{}, translate(err)
 	}
 	info.ETag, info.VersionID = copied.GetEtag(), copied.GetVersionId()
 	return info, nil
+}
+
+// stagedKey is the key of one staged part: the staging slot of the binding's
+// own principal, in a scope it reaches. No argument names a principal, so no
+// caller addresses another's.
+func (s *Store) stagedKey(binding Binding, scope, id string) (string, string, error) {
+	place, _, err := binding.place(Ref{Scope: scope})
+	if err != nil {
+		return "", "", err
+	}
+	key, err := s.keys.Key(objectkey.Key{Partition: binding.Partition, Scope: place, Slot: objectkey.Principal(binding.Principal), Name: id, Staging: true})
+	return place, key, err
+}
+
+// PutStaged writes one staged part: bytes the binding's principal is holding
+// before they become an object, such as one part of an upload that arrives
+// in several calls. It lives in the principal's staging slot of a scope in
+// reach, under an id the caller chooses: 1 to 64 lowercase letters and
+// digits, unguessable if it must not be found (PutContent's own uploads use
+// 32 random hex digits in the same slot).
+//
+// A staged part is no object: no listing shows it, no reference names it,
+// and only GetStaged and DeleteStaged of the same principal, in the same
+// scope, reach it. Whoever stages removes what it staged;
+// Maintenance.SweepStaging reclaims what was abandoned. It returns the bytes
+// written.
+func (s *Store) PutStaged(ctx context.Context, scope, id string, body io.Reader, options PutOptions) (int64, error) {
+	binding, err := s.bind(ctx)
+	if err != nil {
+		return 0, err
+	}
+	place, key, err := s.stagedKey(binding, scope, id)
+	if err != nil {
+		return 0, err
+	}
+	if binding.Access != ReadWrite {
+		return 0, ErrReadOnly
+	}
+	size, _, _, err := s.send(ctx, s.in(binding, place, ingestSession), key, body, options, false)
+	return size, err
+}
+
+// GetStaged opens a staged part of the binding's own principal, and reports
+// its size. The caller closes the reader.
+func (s *Store) GetStaged(ctx context.Context, scope, id string) (io.ReadCloser, int64, error) {
+	binding, err := s.bind(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	place, key, err := s.stagedKey(binding, scope, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	session, err := s.readerSession(ctx, binding, place)
+	if err != nil {
+		return nil, 0, err
+	}
+	body, info, err := open(ctx, s.client, session, s.in(binding, place, readSession), key, objectkey.Key{})
+	return body, info.Size, err
+}
+
+// DeleteStaged removes a staged part of the binding's own principal.
+// Removing what is not there is not an error.
+func (s *Store) DeleteStaged(ctx context.Context, scope, id string) error {
+	binding, err := s.bind(ctx)
+	if err != nil {
+		return err
+	}
+	place, key, err := s.stagedKey(binding, scope, id)
+	if err != nil {
+		return err
+	}
+	if binding.Access != ReadWrite {
+		return ErrReadOnly
+	}
+	if _, err := s.client.Delete(ctx, &storagev0.DeleteRequest{Key: key, Scope: s.in(binding, place, maintenanceSession)}); err != nil && status.Code(err) != codes.NotFound {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) readerSession(ctx context.Context, binding Binding, scope string) (*storagev0.Binding, error) {

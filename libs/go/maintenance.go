@@ -8,6 +8,9 @@ import (
 	"sort"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
 )
@@ -340,33 +343,116 @@ func (m *Maintenance) SweepStaging(ctx context.Context, olderThan time.Duration)
 	})
 }
 
+// ErrContentInUse: content offered to a sweep was written again since the
+// sweep saw it. A writer has just decided to reference it, so it is not
+// removed.
+var ErrContentInUse = errors.New("object store: the content was written again and is in use")
+
 // SweepContent removes the content of a scope that nothing references any
 // more. Only the application knows what references a digest, so it answers:
 // referenced reports whether to keep one. Content younger than the grace is
 // kept unasked, because a writer stores the bytes before it records the
-// reference.
+// reference, and PutContent leaves content it finds already stored as young
+// as content it wrote.
+//
+// The answer and the delete are two steps here, with nothing held between
+// them. That is safe as long as no writer takes longer than the grace between
+// PutContent and recording its reference. A caller that cannot promise that,
+// or wants the decision linearized with its writers, uses SweepContentWith.
 func (m *Maintenance) SweepContent(ctx context.Context, partition, scope string, grace time.Duration, referenced func(digest string) (bool, error)) (Erasure, error) {
+	if referenced == nil {
+		return Erasure{}, errors.New("object store: a content sweep needs to be told what is referenced")
+	}
+	return m.SweepContentWith(ctx, partition, scope, grace, func(digest string, remove func() error) error {
+		keep, err := referenced(digest)
+		if err != nil || keep {
+			return err
+		}
+		if err := remove(); err != nil && !errors.Is(err, ErrContentInUse) {
+			return err
+		}
+		return nil
+	})
+}
+
+// SweepContentWith offers each digest of a scope older than the grace to
+// decide, with the means to remove it: decide calls remove to delete that
+// content, or returns without calling it to keep it. The delete is made by
+// remove, before remove returns, so it runs inside whatever critical section
+// decide holds. That is the point: a caller serializes its sweeper with its
+// writers by taking, in decide, the lock its writers take around PutContent
+// and the record of their intent to reference the digest (for example a
+// database advisory lock keyed on partition, scope and digest), rechecking
+// under it that nothing references the digest, and removing under it. Either
+// the writer's intent precedes the recheck and the content is kept, or its
+// PutContent follows the delete and writes the bytes again.
+//
+// Without such a lock remove is still careful, and not atomic: it looks at
+// the content again and returns ErrContentInUse, removing nothing, when it
+// was written again since the sweep listed it. A write that lands between
+// that look and the delete is not seen; only the caller's lock closes that.
+//
+// remove returns nil for content already gone, and an error once decide has
+// returned. An error from decide stops the sweep and is returned.
+func (m *Maintenance) SweepContentWith(ctx context.Context, partition, scope string, grace time.Duration, decide func(digest string, remove func() error) error) (Erasure, error) {
+	var erasure Erasure
+	if decide == nil {
+		return erasure, errors.New("object store: a content sweep needs someone to decide")
+	}
 	prefix, err := m.codec.SlotPrefix(partition, scope, objectkey.Content())
 	if err != nil {
-		return Erasure{}, err
+		return erasure, err
 	}
+	capabilities, err := m.client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	if err != nil {
+		return erasure, translate(err)
+	}
+	erasure.VersionsMayRemain = capabilities.GetVersions()
 	cutoff := time.Now().Add(-grace)
-	var asked error
-	erasure, err := m.erase(ctx, prefix, func(entry Entry) bool {
-		if asked != nil || entry.Problem != nil || entry.Info.Modified.IsZero() || entry.Info.Modified.After(cutoff) {
-			return true
+	// Collect first, decide after: a listing is not deleted from under itself.
+	var candidates []Entry
+	if err := m.walk(ctx, prefix, func(entry Entry) error {
+		if entry.Problem == nil && !entry.Info.Modified.IsZero() && !entry.Info.Modified.After(cutoff) {
+			candidates = append(candidates, entry)
 		}
-		keep, err := referenced(entry.Key.Name)
-		if err != nil {
-			asked = err
-			return true
-		}
-		return keep
-	})
-	if asked != nil {
-		return Erasure{}, asked
+		return nil
+	}); err != nil {
+		return erasure, err
 	}
-	return erasure, err
+	for _, entry := range candidates {
+		deciding := true
+		remove := func() error {
+			if !deciding {
+				return errors.New("object store: a sweep's remove is used inside its decision, and this one is over")
+			}
+			current, err := m.client.Stat(ctx, &storagev0.StatRequest{Key: entry.Physical})
+			if status.Code(err) == codes.NotFound {
+				return nil
+			}
+			if err != nil {
+				return translate(err)
+			}
+			if modified := current.GetInfo().GetLastModifiedUnixMs(); modified <= 0 || time.UnixMilli(modified).After(cutoff) {
+				return ErrContentInUse
+			}
+			if _, err := m.client.Delete(ctx, &storagev0.DeleteRequest{Key: entry.Physical}); err != nil && status.Code(err) != codes.NotFound {
+				if erasure.Failed == nil {
+					erasure.Failed = map[string]string{}
+				}
+				erasure.Failed[entry.Physical] = err.Error()
+				return translate(err)
+			}
+			erasure.Objects++
+			erasure.Bytes += current.GetInfo().GetSize()
+			return nil
+		}
+		err := decide(entry.Key.Name, remove)
+		deciding = false
+		if err != nil {
+			return erasure, err
+		}
+	}
+	return erasure, nil
 }
 
 // Known is what an audit holds a base's layout to. A nil function accepts

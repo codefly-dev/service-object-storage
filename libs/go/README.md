@@ -157,12 +157,74 @@ body, _, err := store.Get(ctx, objectstorage.Content(digest).In(scope))
 ```
 
 The body streams to a staging key of the caller's own principal while it is
-hashed, and the store copies it in place unless that digest is already there.
+hashed, and the store copies it in place, over the same bytes when that digest
+is already there, so that reused content is as young as new content.
 The same bytes from two principals are one object. Whoever in the scope can
 name a digest can read it, and a strict binding cannot list them: **the row
 that holds the digest is what decides who reads the bytes.** Use it for bytes
 whose row can be shared or change hands; use the principal's own slot for
 bytes that are one principal's for good.
+
+### Staged parts
+
+```go
+n, err := store.PutStaged(ctx, scope, id, part, objectstorage.PutOptions{IfAbsent: true})
+body, size, err := store.GetStaged(ctx, scope, id)
+err = store.DeleteStaged(ctx, scope, id)
+```
+
+Bytes a principal holds before they become an object, such as one part of an
+upload that arrives in several calls. A part lives in the staging slot of the
+binding's own principal, in a scope it reaches, under an id the caller
+chooses: 1 to 64 lowercase letters and digits, unguessable if it must not be
+found. It is no object: no listing shows it, no reference names it, and no
+other principal reaches it, a privileged one included, because no argument
+names a principal. Whoever stages removes what it staged, and
+`Maintenance.SweepStaging` reclaims what was abandoned, so its age must exceed
+the longest upload. Under gateway sessions a part is written by the ingest
+session, read by the read session and removed by the maintenance session.
+
+### Sweeping content while writers reuse it
+
+A writer stores bytes before it records the row that references them, so a
+sweep must not remove content in that gap. Two things protect it.
+
+**The grace.** `PutContent` leaves content it found already stored as young as
+content it wrote, and `SweepContent` keeps anything younger than its grace
+unasked. That is a margin: it holds as long as no writer takes longer than the
+grace between `PutContent` and its row.
+
+**An intent and a lock**, for a caller that wants no window. The sweeper and
+the writers share one lock per (partition, scope, digest), a database advisory
+lock for example:
+
+```go
+// Writer. The digest is known first (hashed, or declared by the uploader).
+lock(partition, scope, digest)       // a short transaction of its own, committed:
+insertIntent(partition, scope, digest, expiresAt)
+unlock()
+info, err := store.PutContent(ctx, scope, body, objectstorage.PutOptions{})
+// ... then, in the transaction that writes the row: delete the intent.
+
+// Sweeper.
+_, err = maintain.SweepContentWith(ctx, partition, scope, grace,
+	func(digest string, remove func() error) error {
+		lock(partition, scope, digest)
+		defer unlock()
+		if referenced(digest) || hasLiveIntent(digest) {
+			return nil               // kept: remove is not called
+		}
+		return remove()              // deleted before remove returns, under the lock
+	})
+```
+
+Either the intent precedes the sweeper's recheck and the content is kept, or
+the writer gets the lock after the delete and its `PutContent` writes the
+bytes again. `remove` works only inside its decision. It returns
+`ErrContentInUse`, removing nothing, when the content was written again since
+the sweep listed it; without the caller's lock that look and the delete are
+still two steps. `SweepContent` is `SweepContentWith` with no lock: the
+grace alone.
 
 ## Maintenance: a principal leaves
 
@@ -189,7 +251,8 @@ touch `_shared` or `_sha256`, which hold nothing of a principal's by name.
 leaves the bytes behind a marker, the gateway cannot list or purge versions,
 and erasure is complete only once the bucket's lifecycle rule expires them.
 
-`Maintenance` also has `EraseScope`, `ErasePartition`, `SweepStaging`, `Walk`,
+`Maintenance` also has `EraseScope`, `ErasePartition`, `SweepStaging`,
+`SweepContentWith`, `Walk`,
 `Partitions`, `Scopes`, `Principals` and `Audit`.
 
 ## What is enforced, and by what
@@ -217,7 +280,8 @@ short-lived credential of the store's own confined to
 `files/<partition>/<scope>/`, in one of three modes: read (`Get`, `Head`,
 `List`, `ListScope`, `PresignGet`), ingest (`Put`, the upload of `PutContent`,
 `PresignPut`, `PresignPutTyped`, `PresignPost`) and maintenance (`Delete`,
-`Copy`, the promotion of `PutContent`). The Store holds no credential and
+`Copy`, `DeleteStaged`, the promotion of `PutContent`); `PutStaged` is ingest
+and `GetStaged` read. The Store holds no credential and
 issues none. The gateway must run scoped sessions and grant the base those
 modes; otherwise every call is refused (`FAILED_PRECONDITION` or
 `PERMISSION_DENIED`), never served with the gateway's own credential. A copy
@@ -256,7 +320,7 @@ convention shows up there.
 ```bash
 go test ./libs/go/...            # the codec, the Store and the proof over the in-memory backend
 MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
-  go test -tags integration -count=1 -v ./libs/go/...   # the same, on MinIO; expect 7 more --- PASS, 0 --- SKIP
+  go test -tags integration -count=1 -v ./libs/go/...   # the same, on MinIO; expect 8 more --- PASS, 0 --- SKIP
 ```
 
 Like `internal/integration`, the MinIO tests skip when `MINIO_ENDPOINT` is

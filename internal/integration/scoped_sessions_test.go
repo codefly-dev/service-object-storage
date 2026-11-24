@@ -848,6 +848,23 @@ func TestMinIOStoreWithGatewaySessionsOnAGatewayThatRequiresThem(t *testing.T) {
 	require.Len(t, page.Objects, 2)
 	require.Zero(t, page.Skipped, "the staged upload was removed")
 	require.NoError(t, store.Delete(ctx, objectstorage.Own("notes/one.txt")))
+	// A staged part: written under the ingest session, read under the read
+	// session, removed under the maintenance session, and no object.
+	staged, err := store.PutStaged(ctx, "installation-a", "upload1part0001", strings.NewReader("a part"), objectstorage.PutOptions{})
+	require.NoError(t, err)
+	require.Equal(t, int64(len("a part")), staged)
+	part, size, err := store.GetStaged(ctx, "installation-a", "upload1part0001")
+	require.NoError(t, err)
+	content, err = io.ReadAll(part)
+	require.NoError(t, err)
+	_ = part.Close()
+	require.Equal(t, "a part", string(content))
+	require.Equal(t, int64(len("a part")), size)
+	_, _, err = sibling.GetStaged(ctx, "installation-b", "upload1part0001")
+	require.ErrorIs(t, err, objectstorage.ErrNotFound, "a staged part is found in its own scope only")
+	require.NoError(t, store.DeleteStaged(ctx, "installation-a", "upload1part0001"))
+	_, _, err = store.GetStaged(ctx, "installation-a", "upload1part0001")
+	require.ErrorIs(t, err, objectstorage.ErrNotFound)
 	for _, exchange := range stack.wire.since(mark) {
 		require.NotEqual(t, stack.rootKey, exchange.accessKey, "the Store reached MinIO with the gateway's own credential: %+v", exchange)
 	}

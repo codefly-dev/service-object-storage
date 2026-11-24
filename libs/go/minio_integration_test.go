@@ -524,3 +524,81 @@ func TestMinIOHidesWhatIsUnderAnObjectAndTheConventionNeverWritesOne(t *testing.
 		}
 	}
 }
+
+// On MinIO itself: content a writer finds already stored is modified again,
+// so a sweep in the gap before the writer's row keeps it; the sweep's remove
+// refuses content written again since it was listed; and the delete is made
+// inside the caller's decision.
+func TestMinIOReusedContentIsYoungAgainForTheSweep(t *testing.T) {
+	// MinIO reports a HEAD's modification time to the second.
+	const grace = 3 * time.Second
+	client, _ := gatewaytest.LiveMinIO(t)
+	const base = "sweep" // the gateway of this test has a prefix of its own
+	store, err := objectstorage.NewStore(client, base, fromContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintain, err := objectstorage.NewMaintenance(client, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amy := bound(strict("human:amy", "inst"))
+	write := func(body string) objectstorage.Ref {
+		t.Helper()
+		info, err := store.PutContent(amy, "inst", strings.NewReader(body), objectstorage.PutOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info.Ref
+	}
+	nothing := func(string) (bool, error) { return false, nil }
+
+	reused, raced, abandoned := write("reused"), write("raced"), write("abandoned")
+	time.Sleep(grace + 2*time.Second)
+
+	// The writer finds its bytes there; its row is not committed.
+	if again := write("reused"); again != reused {
+		t.Fatalf("the same bytes are %v and %v", reused, again)
+	}
+	var removedInside bool
+	swept, err := maintain.SweepContentWith(context.Background(), "org", "inst", grace, func(digest string, remove func() error) error {
+		switch digest {
+		case reused.Name:
+			t.Errorf("the sweep offered content written again within the grace")
+			return nil
+		case raced.Name:
+			// Written again after the sweep listed it, before it removes.
+			write("raced")
+			if err := remove(); !errors.Is(err, objectstorage.ErrContentInUse) {
+				t.Errorf("removing content written again since the listing: %v", err)
+			}
+			return nil
+		}
+		if err := remove(); err != nil {
+			return err
+		}
+		_, err := store.Head(amy, objectstorage.Content(digest).In("inst"))
+		removedInside = errors.Is(err, objectstorage.ErrNotFound)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swept.Objects != 1 || !removedInside {
+		t.Fatalf("the sweep removed %d object(s), inside the decision: %v", swept.Objects, removedInside)
+	}
+	for name, ref := range map[string]objectstorage.Ref{"reused": reused, "raced": raced} {
+		if got := get(t, store, amy, ref); got != name {
+			t.Fatalf("%s content reads %q", name, got)
+		}
+	}
+	if _, err := store.Head(amy, abandoned); !errors.Is(err, objectstorage.ErrNotFound) {
+		t.Fatalf("abandoned content survived: %v", err)
+	}
+
+	// Left for the grace with still no reference, the rest is swept.
+	time.Sleep(grace + 2*time.Second)
+	if swept, err := maintain.SweepContent(context.Background(), "org", "inst", grace, nothing); err != nil || swept.Objects != 2 {
+		t.Fatalf("the sweep of abandoned content removed %d, %v", swept.Objects, err)
+	}
+}

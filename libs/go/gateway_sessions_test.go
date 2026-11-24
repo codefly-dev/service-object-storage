@@ -131,11 +131,13 @@ func TestAStoreWithGatewaySessionsNamesItsScopeAndModeOnEveryCall(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	expect("PutContent", "Put "+west+"ingest", "Stat "+west+"maintenance", "Copy "+west+"maintenance", "Delete "+west+"maintenance")
+	expect("PutContent", "Put "+west+"ingest", "Copy "+west+"maintenance", "Delete "+west+"maintenance")
 	if _, err := store.PutContent(ctx, "west", strings.NewReader("content"), objectstorage.PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	expect("PutContent of existing content", "Put "+west+"ingest", "Stat "+west+"maintenance", "Delete "+west+"maintenance")
+	// Content already there is copied over again, so that it is as young as
+	// content just written.
+	expect("PutContent of existing content", "Put "+west+"ingest", "Copy "+west+"maintenance", "Delete "+west+"maintenance")
 
 	body, _, err := store.Get(ctx, content.Ref)
 	if err != nil {
