@@ -582,6 +582,11 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	if len(s.composedEndpoints) > 0 {
 		envs = append(envs, resources.Env("SOS_COMPOSED_ENDPOINTS", strings.Join(s.composedEndpoints, ",")))
 	}
+	scoped, err := scopedEnvironment(s.Settings)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot configure scoped sessions")
+	}
+	envs = append(envs, scoped...)
 	runner.WithEnvironmentVariables(ctx, envs...)
 	if err = runner.Init(ctx); err != nil {
 		return s.Wool.Wrapf(err, "cannot start gateway")

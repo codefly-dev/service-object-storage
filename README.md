@@ -9,7 +9,250 @@ this one server — written once, all backends compiled in.
 
 > Design & rationale: [codefly-dev/service-object-storage#1](https://github.com/codefly-dev/service-object-storage/issues/1)
 
-## Scoped MinIO reads
+## Scoped sessions
+
+The gateway holds one credential that reaches its whole bucket. A caller can
+ask that a call **not** be made with it: the call names a `Scope` (a base, a
+partition, a scope, and a mode), the gateway obtains from the store's own
+issuer a short-lived credential whose grant is that scope's key prefix and
+that mode, and makes the call with it. A key outside the scope is then refused
+by the store, not by a check in the gateway or in the caller, so a bug or a
+forged key above the gateway cannot leave the scope. The caller never holds
+the bucket-wide credential, and never holds the scoped one either: it names a
+scope and a key.
+
+The unit is **(caller, base, partition, scope, mode)**. Partition and scope
+are the two identifiers of the key convention in [`libs/go`](libs/go/README.md)
+(a tenant and an installation, for a consumer that uses them so); the scope's
+keys are everything under `<base>/<partition>/<scope>/`. Which record a caller
+may see inside a scope is not a storage decision and is not made here.
+
+Three modes, three separate sessions, each with its own grant:
+
+| Mode | The store allows, under the scope's prefix | It refuses |
+|---|---|---|
+| `read` | get, stat, range, list | every write, copy and delete |
+| `ingest` | put, multipart included | every read, stat, list, copy and delete, of its own writes too |
+| `maintenance` | copy and delete, and the get, stat and list they need | anything across the scope's edge, in either direction |
+
+The gateway does not decide which RPC a mode may call: it picks the session
+and the store answers. `Scope` is a field of `StatRequest`, `GetRequest`,
+`GetManyRequest`, `ListRequest`, `PutHeader`, `DeleteRequest`,
+`DeleteManyRequest`, `CopyRequest` and `PresignRequest`. Keys are what they are
+without one, relative to the gateway's bucket and prefix. A scope and a
+[binding](#reading-a-callers-own-bucket-bound-calls) never travel together,
+and the bound-read caps do not apply to a scoped call.
+
+### Turning it on
+
+Off by default: a gateway that is told nothing behaves exactly as before, and
+refuses a call that names a scope rather than serve it with its own
+credential.
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `SOS_SCOPED_SESSIONS` | `off` | `off` \| `allow` (a call may name a scope; one that names none runs with the gateway's credential as before) \| `require` (a call on the configured bucket must name one; `Watch` and `Native` are refused, `Capabilities` and `Ready` still answer) |
+| `SOS_SCOPED_GRANTS` | — | required unless `off`. JSON: `[{"base":"files","modes":["read","ingest","maintenance"],"partitions":["tenant-a"]}]`. One entry per base; `partitions` is optional |
+| `SOS_SCOPED_SESSION_TTL` | `15m` | lifetime asked of the issuer, `15m` to `1h` |
+| `SOS_SCOPED_SESSION_CACHE` | `1024` | most sessions held, `1` to `65536` |
+| `SOS_SCOPED_PRESIGN` | `false` | allow a URL signed by a scope's session (the direct mode below) |
+| `SOS_SCOPED_PRESIGN_MAX_EXPIRY` | `5m` | longest lifetime such a URL may be asked for, at most the session lifetime |
+
+As a codefly service, the same switches are settings in `service.codefly.yaml`
+(`scoped-sessions`, `scoped-grants`, `scoped-presign`); a local run delivers
+them to the gateway, and a deployment refuses to render them.
+
+`Capabilities` reports `scoped_sessions` (`off`, `allow`, `require`) and
+`scoped_session_issuer` (`qualified`), so a consumer can fail at start instead
+of on its first call.
+
+### Who the caller is
+
+The gateway authenticates one caller: the holder of its token, or in the
+deployed profile whoever the network admits (see
+[Authentication](#authentication)). `SOS_SCOPED_GRANTS` says what that caller
+may ask for: which bases, in which modes, and optionally in which partitions.
+A base, a mode or a partition outside the grant is refused
+(`SCOPE_NOT_GRANTED`).
+
+What the gateway **cannot** do today is verify that a partition or a scope
+belongs to the request's end user: nothing it authenticates carries one. So
+scoped sessions confine each call to the scope it *declares*. A forged or
+mistaken **key** cannot leave that scope; a consumer that declares the wrong
+**scope** gets a session for the scope it declared. Binding the declaration
+to a signed per-request identity is the `sessions.Authorizer` seam and is not
+built; `partitions` in a grant is the narrowing available now, for a gateway
+that serves one tenant.
+
+### How a consumer adopts it
+
+With the Go library, one option at the composition root:
+
+```go
+store, err := objectstorage.NewStore(client, "files", binder, objectstorage.WithGatewaySessions())
+```
+
+Every call of that Store then names the partition and scope of the object it
+addresses, and the mode of its verb: `Get`, `Head`, `List`, `ListScope` and
+`PresignGet` read; `Put`, the upload half of `PutContent`, `PresignPut`,
+`PresignPutTyped` and `PresignPost` ingest; `Delete`, `Copy` and the promotion
+half of `PutContent` (the check for existing content, the copy into place, the
+removal of the staged upload) are maintenance. The gateway needs
+`SOS_SCOPED_SESSIONS=allow` or `require` and a grant of the Store's base in
+the three modes (fewer if the consumer uses fewer). A copy between two scopes
+is refused: one session is one scope.
+
+Without the library, set `scope` on the request:
+
+```go
+client.Stat(ctx, &storagev0.StatRequest{Key: key, Scope: &storagev0.Scope{
+	Base: "files", Partition: tenant, Scope: installation, Mode: storagev0.ScopeMode_SCOPE_MODE_READ,
+}})
+```
+
+Adopt under `allow`, then move the gateway to `require` once nothing of the
+consumer calls without a scope: under `require` the consumer has no
+bucket-wide path left. What does not fit a scope stops working there and has
+to be moved first: keys outside any base (a layout that predates the key
+convention), `Watch`, and the library's cross-partition `Maintenance`, which
+lists whole bases.
+
+### Refusals
+
+| Reason | Code | When |
+|---|---|---|
+| `SCOPED_SESSIONS_UNAVAILABLE` | `FAILED_PRECONDITION` | the gateway runs no scoped sessions, or not for presigning |
+| `SCOPE_REQUIRED` | `PERMISSION_DENIED` | `require`, and the call named no scope |
+| `SCOPE_INVALID` | `INVALID_ARGUMENT` | no mode, an identifier the key convention cannot write, or a scope beside a binding |
+| `SCOPE_NOT_GRANTED` | `PERMISSION_DENIED` | the base, mode or partition is not in the caller's grant |
+| `SCOPE_POLICY_TOO_LARGE` | `FAILED_PRECONDITION` | the scope's grant exceeds the store's limit on one session (2,048 bytes on MinIO and S3). Refused; no wider grant is issued in its place. Reachable only with identifiers near the convention's 240-byte cap under a long `SOS_PREFIX` |
+| `SCOPE_ISSUER_UNAVAILABLE` | `UNAVAILABLE` | the issuer did not answer with a session |
+| `CREDENTIAL_REJECTED`, metadata `scoped=true`, `mode`, `store_code` | `PERMISSION_DENIED` | **the store** refused the call under the scope's session: a key outside the scope, or a verb outside the mode. `store_code` is the store's own code (`AccessDenied`) |
+| `PRESIGN_REFUSED` | `INVALID_ARGUMENT` | a presign outside its bounds (below) |
+
+Every one of them is fail-closed: there is no path from a scoped call to the
+gateway's own credential.
+
+### Operating it
+
+- **Lifetime.** A session lives `SOS_SCOPED_SESSION_TTL` (15 minutes, the
+  shortest MinIO and S3 issue; the test suite shows MinIO refusing one
+  minute). Nothing revokes one early.
+- **Cache.** One session per (caller, base, partition, scope, mode), reused
+  until one minute before it expires, then re-issued on the next call. A call
+  already running keeps the session it started with, so a single call that
+  outlives that last minute (a very large streamed object) can be cut off by
+  the store. At most `SOS_SCOPED_SESSION_CACHE` sessions are held; past that
+  the one nearest its expiry is dropped and simply issued again when needed.
+  The cache is per replica and in memory.
+- **Cost.** One issuer exchange per new session (a few milliseconds against a
+  local MinIO), none per call after that.
+- **The issuer is down.** Calls that need a new session fail `UNAVAILABLE`
+  (`SCOPE_ISSUER_UNAVAILABLE`), each after at most 10 seconds; calls whose
+  session is cached keep working until it expires. A failure is not cached:
+  the next call asks again. Readiness does not report the issuer.
+- **The issuing identity** is the gateway's own store credential (the MinIO
+  root user locally). A session's permissions are the intersection of the
+  inline policy and that identity's, so the policy can only narrow.
+
+### The direct mode: presigned URLs
+
+A URL signed by a scope's session is the one way bytes move without passing
+through the gateway, and it is a capability nothing takes back before it
+expires. It is its own opt-in (`SOS_SCOPED_PRESIGN=true`), and a scoped
+`Presign` is refused unless all of these hold:
+
+- one method: `GET` signed by the `read` session, `PUT` or `POST` by `ingest`;
+- one object: the key parses, under the key convention, as an object of the
+  declared scope. A prefix, a sibling scope's key and a key outside the base
+  are refused. The store refuses the URL on any other path, the bucket's
+  listing included: a URL lists nothing;
+- a stated lifetime of at least one second and at most
+  `SOS_SCOPED_PRESIGN_MAX_EXPIRY`. It is refused, not clamped, and the URL
+  dies with its session whichever comes first.
+
+Upload bounds, with or without a scope, are bound or refused, never dropped:
+
+| Request | MinIO | S3, GCS, Azure, mem |
+|---|---|---|
+| `PUT` with `content_type` | signed into the URL; the upload must send exactly that header | `UNIMPLEMENTED` |
+| `POST` with `content_length_max` (and optionally `content_length_min`, `content_type`) | a form upload whose policy the store checks; `form_fields` go before the file | `UNIMPLEMENTED` |
+| `PUT` with a size bound | `PRESIGN_REFUSED`: a signed `PUT` cannot bound a size | same |
+
+### What is verified, and on what
+
+**Only MinIO is qualified.** The gateway refuses to start with
+`SOS_SCOPED_SESSIONS` on any other backend, and the Builder refuses to render
+it for a deployment, because the only way to serve a scoped call there would
+be the bucket-wide credential.
+
+| | MinIO | S3 | GCS | Azure |
+|---|---|---|---|---|
+| Issuer | STS `AssumeRole`, inline session policy. **Qualified** | not built | not built | not built |
+| Scope to grant, rendered | `sessions.S3SessionPolicy` | same renderer; unit-tested as a document | `sessions.GCSAccessBoundary`; unit-tested as a document | `sessions.AzureUserDelegationSAS`; unit-tested as a description |
+| Gateway accepts `SOS_SCOPED_SESSIONS` | yes | **refuses to start** | **refuses to start** | **refuses to start** |
+| `read`: get, stat, range, list inside; refused outside | **verified** | unverified | unverified | unverified |
+| `read` cannot put, copy, delete | **verified** | unverified | unverified | unverified |
+| `ingest`: put and multipart inside; cannot read, list, delete, or write outside | **verified** | unverified | unverified | unverified |
+| `maintenance`: copy, delete inside; refused across the edge | **verified** | unverified | unverified | unverified |
+| Overlarge policy refused | **verified** | unit only | unit only | n/a |
+| Re-issue before expiry; no session crosses callers or scopes | **verified** | n/a | n/a | n/a |
+| Session refused by the store after its expiry | **verified** (opt-in test, a real 15-minute wait) | unverified | unverified | unverified |
+| Scoped presign: one key, one method, lifetime, no list | **verified** | unverified | unverified | unverified |
+| Upload type and size bounds | **verified** | not built | not built | not built |
+
+"Verified" means `internal/integration/scoped_sessions_test.go` (tag
+`integration`) against the pinned MinIO, with the real issuer, through the
+gateway's scoped path. Each refusal is asserted as MinIO's: the exchange
+between the gateway and MinIO is recorded, and a refused call must show a 403
+from MinIO on a request signed by a session, never by the gateway's key.
+Replacing the session with the gateway's own credential fails nine of the ten
+tests (the tenth is the opt-in expiry wait).
+
+Not verified, on MinIO either:
+
+- The built gateway image and the agent's runtime: the tests run the server in
+  process. The settings' delivery to the container is unit-tested, not run.
+- `AssumeRole` from a MinIO user other than root.
+- A versioned bucket: no mode grants a version-specific verb, and none was
+  tried.
+- Any load: the cache under many scopes, or the issuer under a burst.
+
+What each remaining provider would be qualified with. Nothing below was run;
+it is the narrowest mechanism each documents, as rendered by `internal/sessions`:
+
+- **S3.** STS `AssumeRole` on a role that holds the bucket, with the same
+  inline session policy: the session's permissions are the intersection of the
+  role's and the policy's. 2,048 bytes of policy, 15 minutes to the role's
+  maximum (1 hour when the gateway's own identity is itself a role). To
+  qualify: a role the gateway's identity may assume, and this suite against
+  it.
+  [Session policies](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html#policies_session),
+  [AssumeRole](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html).
+- **GCS.** A downscoped token under a Credential Access Boundary: one rule on
+  the bucket whose condition holds `resource.name` to the scope's prefix and,
+  for listing, the `objectListPrefix` API attribute, which confines a listing
+  only inside a boundary. `objectViewer` for read, `objectCreator` for ingest
+  (it cannot overwrite), `objectAdmin` for maintenance. Requires uniform
+  bucket-level access; lives as long as the source token (about an hour).
+  [Downscoping with Credential Access Boundaries](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials).
+  A keyless gateway cannot presign at all, scoped or not.
+- **Azure.** A user-delegation SAS with `sr=d` on the scope's directory,
+  `sdd` its depth, permissions `rl` / `cw` / `rcwdl`. `sr=d` needs a
+  hierarchical namespace: on a flat account nothing narrower than a container
+  is available and scoped sessions stay off. It also needs the gateway to
+  authenticate with Microsoft Entra ID; today it holds the account's shared
+  key, which cannot request a delegation key.
+  [Create a user delegation SAS](https://learn.microsoft.com/en-us/rest/api/storageservices/create-user-delegation-sas).
+
+The links are the providers' own pages; none was exercised from here.
+
+## Caller-issued MinIO read sessions
+
+The earlier, narrower form, kept for callers that hold a MinIO credential of
+their own: the caller issues the session and passes it as a binding. It
+confines reads only. [Scoped sessions](#scoped-sessions) supersede it for the
+gateway's own bucket: there the gateway issues, and writes are covered.
 
 Construct a Store with `WithReaderSessions` to use a scope-limited session for each Get, Head, List and ListScope. These methods use the bound gateway read limits, including its 5 MiB object limit. Credential issuance errors propagate to the caller. Writes and presigning continue to use the configured gateway client.
 
@@ -47,8 +290,8 @@ Not proven:
   consumer that reads or presigns with the gateway's own credential is not
   confined by one. The tests show the session's reach beside a consumer's
   route, not on it.
-- Writes, copies, deletes and presigning through the gateway: they use the
-  gateway's bucket-wide credential, and no write session can be issued.
+- Writes, copies, deletes and presigning with a caller-issued session: this
+  issuer issues read sessions only. Gateway-issued sessions cover them.
 - `AssumeRole` from a MinIO user other than root, and the session's lifetime
   bounds: the tests issue from the root credential for the fixed 900 seconds.
 
@@ -358,6 +601,8 @@ notifications, Azure Event Grid) instead.
 | `SOS_PROBE_KEY` | — | required for `stat`; the object headed (need not exist) |
 | `SOS_PROBE_INTERVAL` | `10s` | how often readiness is re-probed |
 | `SOS_PROBE_TIMEOUT` | `5s` | per-probe deadline |
+| `SOS_PRESIGN_MAX_EXPIRY` | backend maximum (7 days) | caps the lifetime of a presigned URL |
+| `SOS_SCOPED_*` | off | scoped sessions: see [Turning it on](#turning-it-on) |
 | `SOS_COMPOSED_ENDPOINTS` | — | written by the agent's Runtime, not an operator: the composed dependencies a binding may name although not public (see [the guard's exception](#the-guards-one-exception-composed-dependencies)) |
 
 ## Readiness

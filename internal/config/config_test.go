@@ -293,3 +293,99 @@ func TestFromEnv_RefusesAnAddressAsComposedEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, cfg.Composed["host.docker.internal:45420"])
 }
+
+// Scoped sessions are off unless asked for, and off changes nothing: the
+// other SOS_SCOPED_* settings are not even read.
+func TestFromEnv_ScopedSessionsAreOffByDefault(t *testing.T) {
+	probeEnv(t)
+	cfg, err := config.FromEnv()
+	require.NoError(t, err)
+	require.Equal(t, "off", cfg.Scoped.Mode)
+	require.Empty(t, cfg.Scoped.Grants)
+
+	t.Setenv("SOS_SCOPED_SESSIONS", "off")
+	t.Setenv("SOS_SCOPED_GRANTS", "not read")
+	cfg, err = config.FromEnv()
+	require.NoError(t, err)
+	require.Equal(t, "off", cfg.Scoped.Mode)
+}
+
+func TestFromEnv_ScopedSessionsOnMinIO(t *testing.T) {
+	probeEnv(t)
+	t.Setenv("SOS_SCOPED_SESSIONS", "require")
+	t.Setenv("SOS_SCOPED_GRANTS", `[{"base":"files","modes":["read","ingest","maintenance"]}]`)
+	cfg, err := config.FromEnv()
+	require.NoError(t, err)
+	require.Equal(t, "require", cfg.Scoped.Mode)
+	require.Len(t, cfg.Scoped.Grants, 1)
+	require.Equal(t, 15*time.Minute, cfg.Scoped.TTL)
+	require.Equal(t, 1024, cfg.Scoped.CacheSize)
+	require.False(t, cfg.Scoped.Presign, "the direct mode is its own opt-in")
+	require.Equal(t, 5*time.Minute, cfg.Scoped.PresignMax)
+
+	t.Setenv("SOS_SCOPED_SESSION_TTL", "30m")
+	t.Setenv("SOS_SCOPED_SESSION_CACHE", "16")
+	t.Setenv("SOS_SCOPED_PRESIGN", "true")
+	t.Setenv("SOS_SCOPED_PRESIGN_MAX_EXPIRY", "90s")
+	cfg, err = config.FromEnv()
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Minute, cfg.Scoped.TTL)
+	require.Equal(t, 16, cfg.Scoped.CacheSize)
+	require.True(t, cfg.Scoped.Presign)
+	require.Equal(t, 90*time.Second, cfg.Scoped.PresignMax)
+}
+
+// A setting that would leave the gateway claiming a bound it does not hold
+// is refused at start, naming the variable.
+func TestFromEnv_RefusesUnusableScopedSettings(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"SOS_SCOPED_SESSIONS":           {"SOS_SCOPED_SESSIONS": "on"},
+		"SOS_SCOPED_GRANTS":             {"SOS_SCOPED_GRANTS": ""},
+		"SOS_SCOPED_GRANTS: ":           {"SOS_SCOPED_GRANTS": `[{"base":"files","modes":["write"]}]`},
+		"SOS_SCOPED_SESSION_TTL":        {"SOS_SCOPED_SESSION_TTL": "5m"},
+		"SOS_SCOPED_SESSION_TTL ":       {"SOS_SCOPED_SESSION_TTL": "2h"},
+		"SOS_SCOPED_SESSION_TTL:":       {"SOS_SCOPED_SESSION_TTL": "soon"},
+		"SOS_SCOPED_SESSION_CACHE":      {"SOS_SCOPED_SESSION_CACHE": "0"},
+		"SOS_SCOPED_SESSION_CACHE ":     {"SOS_SCOPED_SESSION_CACHE": "many"},
+		"SOS_SCOPED_PRESIGN":            {"SOS_SCOPED_PRESIGN": "maybe"},
+		"SOS_SCOPED_PRESIGN_MAX_EXPIRY": {"SOS_SCOPED_PRESIGN_MAX_EXPIRY": "16m"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			probeEnv(t)
+			t.Setenv("SOS_SCOPED_SESSIONS", "allow")
+			t.Setenv("SOS_SCOPED_GRANTS", `[{"base":"files","modes":["read"]}]`)
+			for key, value := range env {
+				t.Setenv(key, value)
+			}
+			_, err := config.FromEnv()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), strings.TrimRight(name, " :"))
+		})
+	}
+}
+
+// The gateway refuses scoped sessions on a store whose issuer was never
+// qualified. The alternative would be serving scoped calls with the
+// bucket-wide credential while reporting them as scoped.
+func TestFromEnv_RefusesScopedSessionsWithoutAQualifiedIssuer(t *testing.T) {
+	for _, kind := range []string{"s3", "gcs", "azure", "mem"} {
+		for _, mode := range []string{"allow", "require"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				probeEnv(t)
+				t.Setenv("SOS_BACKEND", kind)
+				t.Setenv("SOS_AZURE_ACCOUNT", "account")
+				t.Setenv("SOS_SCOPED_SESSIONS", mode)
+				t.Setenv("SOS_SCOPED_GRANTS", `[{"base":"files","modes":["read"]}]`)
+				_, err := config.FromEnv()
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "SOS_SCOPED_SESSIONS="+mode)
+				require.Contains(t, err.Error(), kind)
+
+				// Off, the same backend starts as it always did.
+				t.Setenv("SOS_SCOPED_SESSIONS", "off")
+				_, err = config.FromEnv()
+				require.NoError(t, err)
+			})
+		}
+	}
+}

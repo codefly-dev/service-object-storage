@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
@@ -40,6 +39,7 @@ type Server struct {
 	hub       *events.Hub
 	readiness Readiness
 	composed  egress.Composed
+	scoped    Scoped
 }
 
 // New builds a Server over be, publishing write events to hub and answering
@@ -61,7 +61,7 @@ func (s *Server) AdmitComposed(composed egress.Composed) *Server {
 func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storagev0.GetHeader, error) {
 	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
 	defer cancel()
-	c, err := s.backendFor(ctx, req.GetBinding())
+	c, err := s.backendFor(ctx, req.GetBinding(), req.GetScope())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -85,7 +85,7 @@ func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storage
 func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_GetServer) error {
 	ctx, cancel := boundCall(stream.Context(), req.GetBinding(), boundOperationTimeout)
 	defer cancel()
-	c, err := s.backendFor(ctx, req.GetBinding())
+	c, err := s.backendFor(ctx, req.GetBinding(), req.GetScope())
 	if err != nil {
 		return toStatus(err)
 	}
@@ -132,7 +132,7 @@ func (s *Server) GetMany(req *storagev0.GetManyRequest, stream storagev0.ObjectS
 	}
 	ctx, cancel := boundCall(stream.Context(), req.GetBinding(), boundBatchTimeout)
 	defer cancel()
-	c, err := s.backendFor(ctx, req.GetBinding())
+	c, err := s.backendFor(ctx, req.GetBinding(), req.GetScope())
 	if err != nil {
 		return toStatus(err)
 	}
@@ -235,21 +235,31 @@ func streamBody(body io.Reader, expect int64, classify func(error) error, send f
 }
 
 func (s *Server) Delete(ctx context.Context, req *storagev0.DeleteRequest) (*storagev0.DeleteResult, error) {
-	err := s.be.Delete(ctx, req.GetKey(), backend.DeleteOptions{
+	c, err := s.backendFor(ctx, nil, req.GetScope())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	defer c.Release()
+	err = c.Delete(ctx, req.GetKey(), backend.DeleteOptions{
 		VersionID: req.GetVersionId(),
 		IfMatch:   req.GetIfMatch(),
 	})
 	if err != nil {
-		return nil, toStatus(err)
+		return nil, toStatus(c.err(err))
 	}
 	s.hub.Publish(events.Event{Key: req.GetKey(), Op: events.OpDelete, VersionID: req.GetVersionId()})
 	return &storagev0.DeleteResult{}, nil
 }
 
 func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyRequest) (*storagev0.DeleteManyResult, error) {
-	entries, err := s.be.DeleteMany(ctx, req.GetKeys())
-	if err != nil && len(entries) == 0 {
+	c, err := s.backendFor(ctx, nil, req.GetScope())
+	if err != nil {
 		return nil, toStatus(err)
+	}
+	defer c.Release()
+	entries, err := c.DeleteMany(ctx, req.GetKeys())
+	if err != nil && len(entries) == 0 {
+		return nil, toStatus(c.err(err))
 	}
 	out := &storagev0.DeleteManyResult{Entries: make([]*storagev0.DeleteEntry, 0, len(entries))}
 	for _, e := range entries {
@@ -266,7 +276,7 @@ func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyReques
 func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storagev0.ListResult, error) {
 	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
 	defer cancel()
-	c, err := s.backendFor(ctx, req.GetBinding())
+	c, err := s.backendFor(ctx, req.GetBinding(), req.GetScope())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -303,27 +313,46 @@ func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storage
 }
 
 func (s *Server) Copy(ctx context.Context, req *storagev0.CopyRequest) (*storagev0.CopyResult, error) {
-	res, err := s.be.Copy(ctx, req.GetSourceKey(), req.GetDestKey(), backend.CopyOptions{
+	c, err := s.backendFor(ctx, nil, req.GetScope())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	defer c.Release()
+	res, err := c.Copy(ctx, req.GetSourceKey(), req.GetDestKey(), backend.CopyOptions{
 		IfNoneMatch: req.GetIfNoneMatch(),
 	})
 	if err != nil {
-		return nil, toStatus(err)
+		return nil, toStatus(c.err(err))
 	}
 	s.hub.Publish(events.Event{Key: req.GetDestKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
 	return &storagev0.CopyResult{Etag: res.ETag, VersionId: res.VersionID}, nil
 }
 
 func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*storagev0.PresignResult, error) {
-	exp := time.Duration(req.GetExpirySeconds()) * time.Second
-	res, err := s.be.Presign(ctx, req.GetKey(), presignMethodFromProto(req.GetMethod()), exp)
+	if req.GetScope() != nil {
+		if err := s.checkScopedPresign(req); err != nil {
+			return nil, toStatus(err)
+		}
+	}
+	c, err := s.backendFor(ctx, nil, req.GetScope())
 	if err != nil {
 		return nil, toStatus(err)
+	}
+	defer c.Release()
+	res, err := presign(ctx, c, req)
+	if err != nil {
+		return nil, toStatus(c.err(err))
+	}
+	// A URL signed by a session dies with it, whatever lifetime it states.
+	if !c.expires.IsZero() && c.expires.Before(res.ExpiresAt) {
+		res.ExpiresAt = c.expires
 	}
 	return &storagev0.PresignResult{
 		Method:          presignMethodToProto(res.Method),
 		Url:             res.URL,
 		Headers:         res.Headers,
 		ExpiresAtUnixMs: unixMS(res.ExpiresAt),
+		FormFields:      res.FormFields,
 	}, nil
 }
 
@@ -331,7 +360,13 @@ func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*s
 // that falls behind is dropped by the hub (its channel closes), which surfaces
 // here as RESOURCE_EXHAUSTED so the client reconciles before re-watching.
 // Delivery is best-effort — see the WriteEvent proto contract.
+//
+// Events name keys across every scope and nothing confines a stream to one,
+// so where scoped sessions are required Watch is refused.
 func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStorage_WatchServer) error {
+	if err := s.ownCredentialAllowed(); err != nil {
+		return toStatus(err)
+	}
 	sub := s.hub.Subscribe(req.GetPrefix())
 	defer sub.Close()
 	// The header marks the subscription as live. Writes served by this replica
@@ -364,8 +399,13 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
 	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
 	defer cancel()
-	c, err := s.backendFor(ctx, req.GetBinding())
-	if err != nil {
+	var c *call
+	var err error
+	if req.GetBinding() == nil {
+		// What the gateway's own store offers is not a call on it: it is
+		// answered whether or not a scope is required.
+		c = &call{Backend: s.be, Release: func() {}}
+	} else if c, err = s.backendFor(ctx, req.GetBinding(), nil); err != nil {
 		return nil, toStatus(err)
 	}
 	defer c.Release()
@@ -383,6 +423,11 @@ func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRe
 	}
 	out := toProtoCapabilities(caps)
 	out.MaxGetManyItems = maxGetManyItems
+	out.ScopedSessions = string(ScopedOff)
+	if s.scopedAvailable() == nil {
+		out.ScopedSessions = string(s.scoped.Mode)
+		out.ScopedSessionIssuer = string(s.scoped.Manager.Issuer().Qualification())
+	}
 	return out, nil
 }
 
@@ -413,6 +458,9 @@ func (s *Server) Ready(ctx context.Context, _ *storagev0.ReadyRequest) (*storage
 }
 
 func (s *Server) Native(ctx context.Context, req *storagev0.NativeRequest) (*storagev0.NativeResult, error) {
+	if err := s.ownCredentialAllowed(); err != nil {
+		return nil, toStatus(err)
+	}
 	values, err := s.be.Native(ctx, req.GetVerb(), req.GetParams())
 	if err != nil {
 		return nil, toStatus(err)

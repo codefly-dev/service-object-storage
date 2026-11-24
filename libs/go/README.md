@@ -199,11 +199,34 @@ and erasure is complete only once the bucket's lifecycle rule expires them.
 | **The Store** | every key it builds is inside the Binding; listings are confined on the way out and checked on the way back; a copy checks both ends | confine whoever holds the gateway client. The Store returns it to nobody |
 | **The gateway's prefix** (`SOS_PREFIX`) | no client of this gateway reaches another gateway's keys | tell one base, partition or principal from another |
 | **A session policy** (`S3SessionPolicy`) | the store itself refuses a credential outside the Binding. Proved on the pinned MinIO with a client that bypasses the gateway and the Store | cover writes or presigning through the configured gateway credential. Each issued read session covers one scope to fit the 2048-byte policy limit |
-| **A presigned URL** | one key, one method, one lifetime, signed over the path | bind a size or a type on upload; be revoked before it expires |
+| **A gateway session** (`WithGatewaySessions`) | the store itself refuses every call of the Store outside the object's partition and scope, reads, writes, copies and deletes alike; the Store holds no credential. Proved on the pinned MinIO through the gateway | tell one principal's objects from another's inside a scope: the session's unit is the scope, the Store still decides the rest. Exist on any store but MinIO |
+| **A presigned URL** | one key, one method, one lifetime, signed over the path. `PresignPutTyped` binds the content type and `PresignPost` the size, on MinIO | bind a size or a type on any other store (the gateway refuses rather than sign unbounded); be revoked before it expires |
 
 `TestMinIOWithoutTheStoreNothingIsConfined` states the second row's limit as a
 test: today the gateway client reads any key, and the gateway's credential
 reads the whole bucket.
+
+## Gateway sessions
+
+```go
+store, err := objectstorage.NewStore(client, "files", binder, objectstorage.WithGatewaySessions())
+```
+
+Every call then names its scope to the gateway, which makes it with a
+short-lived credential of the store's own confined to
+`files/<partition>/<scope>/`, in one of three modes: read (`Get`, `Head`,
+`List`, `ListScope`, `PresignGet`), ingest (`Put`, the upload of `PutContent`,
+`PresignPut`, `PresignPutTyped`, `PresignPost`) and maintenance (`Delete`,
+`Copy`, the promotion of `PutContent`). The Store holds no credential and
+issues none. The gateway must run scoped sessions and grant the base those
+modes; otherwise every call is refused (`FAILED_PRECONDITION` or
+`PERMISSION_DENIED`), never served with the gateway's own credential. A copy
+between two scopes is `ErrOutsideReach`. It excludes `WithReaderSessions`, and
+unlike it has no 5 MiB read cap. `Maintenance` is not scoped: it walks whole
+bases, which no session covers, so it needs a gateway in `allow` mode.
+
+The service's README has the gateway's settings, the refusals and what was
+verified: MinIO only.
 
 ## In a module's own suite
 
@@ -244,5 +267,5 @@ unset and the package still prints `ok`. Count `--- PASS`.
 - No multipart API: the gateway chooses multipart itself and the client never
   sees parts.
 - No object tags and no versions: the gateway's contract lists neither.
-- Storage-side read sessions are available for MinIO. GCS and Azure have no
-  equivalent issuer. Writes and presigning still use the configured client.
+- Storage-side sessions are available for MinIO only. S3, GCS and Azure have
+  no qualified issuer, and a gateway on one of them refuses scoped sessions.

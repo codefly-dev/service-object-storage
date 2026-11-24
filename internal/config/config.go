@@ -13,6 +13,7 @@ import (
 	"github.com/codefly-dev/core/callertoken"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/egress"
+	"github.com/codefly-dev/service-object-storage/internal/sessions"
 )
 
 // Config is the fully resolved server configuration.
@@ -33,6 +34,27 @@ type Config struct {
 	// public. The agent's Runtime writes it from the dependency network mappings
 	// codefly resolved; it is not an operator setting. See egress.Composed.
 	Composed egress.Composed
+	// Scoped is the scoped-session configuration; its zero Mode is "off".
+	Scoped ScopedConfig
+}
+
+// ScopedConfig is SOS_SCOPED_*: whether calls run under sessions confined to
+// one scope, and their bounds. Off is the default, and with it a gateway
+// behaves exactly as it did before scoped sessions existed.
+type ScopedConfig struct {
+	// Mode is SOS_SCOPED_SESSIONS: "off", "allow" or "require".
+	Mode string
+	// Grants is SOS_SCOPED_GRANTS: what the authenticated caller may ask
+	// sessions for.
+	Grants sessions.Grants
+	// TTL is SOS_SCOPED_SESSION_TTL, the lifetime asked of the issuer.
+	TTL time.Duration
+	// CacheSize is SOS_SCOPED_SESSION_CACHE, the most sessions held.
+	CacheSize int
+	// Presign is SOS_SCOPED_PRESIGN: whether a URL may be signed by a
+	// scope's session. PresignMax is SOS_SCOPED_PRESIGN_MAX_EXPIRY.
+	Presign    bool
+	PresignMax time.Duration
 }
 
 // HealthConfig paces the background probe that drives the gRPC health service.
@@ -114,6 +136,9 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	cfg.Backend.Prefix = prefix
+	if cfg.Scoped, err = scopedFromEnv(cfg.Backend); err != nil {
+		return Config{}, err
+	}
 	// MinIO addresses buckets path-style by default.
 	if cfg.Backend.Kind == "minio" && os.Getenv("SOS_USE_PATH_STYLE") == "" {
 		cfg.Backend.UsePathStyle = true
@@ -171,4 +196,76 @@ func envDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// defaultScopedPresignMax is how long a URL signed by a scope's session may
+// live when SOS_SCOPED_PRESIGN_MAX_EXPIRY is unset.
+const defaultScopedPresignMax = 5 * time.Minute
+
+// scopedFromEnv resolves SOS_SCOPED_*. Everything that would leave a gateway
+// claiming scoped sessions it cannot honour is refused here, at start: a
+// store whose issuer is not qualified above all, because the only way to
+// serve a scoped call on it would be the bucket-wide credential.
+func scopedFromEnv(store backend.Config) (ScopedConfig, error) {
+	scoped := ScopedConfig{Mode: env("SOS_SCOPED_SESSIONS", "off")}
+	switch scoped.Mode {
+	case "off":
+		return scoped, nil
+	case "allow", "require":
+	default:
+		return ScopedConfig{}, fmt.Errorf("unknown SOS_SCOPED_SESSIONS %q (want off, allow or require)", scoped.Mode)
+	}
+	issuer, err := sessions.IssuerFor(store)
+	if err != nil {
+		return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_SESSIONS=%s: %w", scoped.Mode, err)
+	}
+	if issuer.Qualification() != sessions.Qualified {
+		return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_SESSIONS=%s cannot be served on SOS_BACKEND=%s: its session issuer is %s, "+
+			"and the gateway does not fall back to its bucket-wide credential. Leave SOS_SCOPED_SESSIONS off on this backend until its issuer is qualified",
+			scoped.Mode, store.Kind, issuer.Qualification())
+	}
+	if scoped.Grants, err = sessions.ParseGrants(os.Getenv("SOS_SCOPED_GRANTS")); err != nil {
+		return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_GRANTS: %w", err)
+	}
+	if len(scoped.Grants) == 0 {
+		return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_SESSIONS=%s requires SOS_SCOPED_GRANTS: with no grant every scoped call is refused", scoped.Mode)
+	}
+	if scoped.TTL, err = strictDuration("SOS_SCOPED_SESSION_TTL", sessions.DefaultTTL); err != nil {
+		return ScopedConfig{}, err
+	}
+	if scoped.TTL < sessions.MinTTL || scoped.TTL > sessions.MaxTTL {
+		return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_SESSION_TTL must be between %s and %s, got %s", sessions.MinTTL, sessions.MaxTTL, scoped.TTL)
+	}
+	scoped.CacheSize = sessions.DefaultCacheSize
+	if raw := os.Getenv("SOS_SCOPED_SESSION_CACHE"); raw != "" {
+		if scoped.CacheSize, err = strconv.Atoi(raw); err != nil || scoped.CacheSize < 1 || scoped.CacheSize > sessions.MaxCacheSize {
+			return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_SESSION_CACHE must be between 1 and %d, got %q", sessions.MaxCacheSize, raw)
+		}
+	}
+	if raw := os.Getenv("SOS_SCOPED_PRESIGN"); raw != "" {
+		if scoped.Presign, err = strconv.ParseBool(raw); err != nil {
+			return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_PRESIGN must be true or false, got %q", raw)
+		}
+	}
+	if scoped.PresignMax, err = strictDuration("SOS_SCOPED_PRESIGN_MAX_EXPIRY", defaultScopedPresignMax); err != nil {
+		return ScopedConfig{}, err
+	}
+	if scoped.PresignMax < time.Second || scoped.PresignMax > scoped.TTL {
+		return ScopedConfig{}, fmt.Errorf("SOS_SCOPED_PRESIGN_MAX_EXPIRY must be between 1s and the session lifetime %s, got %s", scoped.TTL, scoped.PresignMax)
+	}
+	return scoped, nil
+}
+
+// strictDuration reads a duration and refuses one it cannot parse: a bound
+// that silently became its default is not the bound the operator set.
+func strictDuration(key string, def time.Duration) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return parsed, nil
 }

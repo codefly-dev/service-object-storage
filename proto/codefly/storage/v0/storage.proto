@@ -120,6 +120,49 @@ message Credential {
   }
 }
 
+// ScopeMode selects which of a scope's three storage identities a call runs
+// under. They are separate sessions with separate grants: none holds what
+// another holds beyond what is listed.
+enum ScopeMode {
+  SCOPE_MODE_UNSPECIFIED = 0;
+  // READ reads and lists objects of the scope. It writes and deletes nothing.
+  SCOPE_MODE_READ = 1;
+  // INGEST writes objects of the scope, multipart included. It reads, lists
+  // and deletes nothing.
+  SCOPE_MODE_INGEST = 2;
+  // MAINTENANCE copies and deletes inside the scope, and reads and lists what
+  // it needs to do so.
+  SCOPE_MODE_MAINTENANCE = 3;
+}
+
+// Scope confines one call on the gateway's OWN configured bucket to one scope
+// of the key convention (libs/go/objectkey): the keys under
+// "<base>/<partition>/<scope>/". The gateway obtains a short-lived credential
+// from the store's issuer whose grant is that prefix and that mode, and makes
+// the call with it instead of its own credential, so a key outside the scope
+// is refused by the store itself, whatever key the request names. The caller
+// holds neither credential.
+//
+// Keys in a scoped request are what they are without one: relative to the
+// gateway's bucket and prefix. A scope is not a binding and the two never
+// travel together. A gateway that does not offer scoped sessions, or whose
+// store has no qualified issuer, refuses a scoped call with
+// FAILED_PRECONDITION (SCOPED_SESSIONS_UNAVAILABLE): it never falls back to
+// its own credential. A scope the authenticated caller was not granted is
+// PERMISSION_DENIED (SCOPE_NOT_GRANTED), one whose session policy would exceed
+// the store's limit is FAILED_PRECONDITION (SCOPE_POLICY_TOO_LARGE), and an
+// issuer that does not answer is UNAVAILABLE (SCOPE_ISSUER_UNAVAILABLE).
+message Scope {
+  // base is the key convention's base: one segment of lowercase letters,
+  // digits and hyphens.
+  string base = 1;
+  // partition is the wall no call crosses (a tenant).
+  string partition = 2;
+  // scope is the scope inside the partition (an installation).
+  string scope = 3;
+  ScopeMode mode = 4;
+}
+
 message AccessKey {
   string id = 1;
   string secret = 2 [debug_redact = true];
@@ -135,6 +178,8 @@ message StatRequest {
   string if_match = 4;
   // binding, when set, reads a bucket named by the caller — see Binding.
   Binding binding = 5;
+  // scope, when set, runs the call under a scoped session — see Scope.
+  Scope scope = 6;
 }
 
 message GetRequest {
@@ -146,6 +191,8 @@ message GetRequest {
   int64 if_modified_since_unix_ms = 6;
   // binding, when set, reads a bucket named by the caller — see Binding.
   Binding binding = 7;
+  // scope, when set, runs the call under a scoped session — see Scope.
+  Scope scope = 8;
 }
 
 // GetResponse streams: the first message carries the header (info +
@@ -176,6 +223,8 @@ message GetManyRequest {
   // binding, when set, reads a bucket named by the caller — see Binding. The
   // bound caps apply to every item.
   Binding binding = 2;
+  // scope, when set, runs every item under one scoped session — see Scope.
+  Scope scope = 3;
 }
 
 message GetManyItem {
@@ -241,6 +290,8 @@ message PutHeader {
   string if_match = 7;
   // total_size is a hint (-1 = unknown / streaming).
   int64 total_size = 8;
+  // scope, when set, runs the write under a scoped session — see Scope.
+  Scope scope = 9;
 }
 
 message PutResult {
@@ -253,12 +304,16 @@ message DeleteRequest {
   string key = 1;
   string version_id = 2;
   string if_match = 3;
+  // scope, when set, runs the delete under a scoped session — see Scope.
+  Scope scope = 4;
 }
 
 message DeleteResult {}
 
 message DeleteManyRequest {
   repeated string keys = 1;
+  // scope, when set, runs the deletes under one scoped session — see Scope.
+  Scope scope = 2;
 }
 
 // DeleteManyResult reports per-key outcomes — batch delete is not atomic on any
@@ -280,6 +335,8 @@ message ListRequest {
   int32 limit = 4;
   // binding, when set, lists a bucket named by the caller — see Binding.
   Binding binding = 5;
+  // scope, when set, runs the call under a scoped session — see Scope.
+  Scope scope = 6;
 }
 
 // ListResult — objects plus synthetic common_prefixes ("directories"). Ordering
@@ -295,6 +352,9 @@ message CopyRequest {
   string dest_key = 2;
   // if_none_match = "*" means copy-only-if-dest-absent.
   string if_none_match = 3;
+  // scope, when set, runs the copy under a scoped session: both keys must be
+  // in it — see Scope.
+  Scope scope = 4;
 }
 
 message CopyResult {
@@ -306,12 +366,39 @@ enum PresignMethod {
   PRESIGN_METHOD_UNSPECIFIED = 0;
   PRESIGN_METHOD_GET = 1;
   PRESIGN_METHOD_PUT = 2;
+  // POST is a browser form upload whose policy the store checks: the one
+  // method that can bound the size of what is uploaded. It needs
+  // content_length_max, and a store that cannot sign one answers UNIMPLEMENTED.
+  PRESIGN_METHOD_POST = 3;
 }
 
+// PresignRequest signs a URL for exactly one key and one method. A URL is a
+// capability nothing can take back before it expires.
+//
+// With a scope, the URL is signed by the scope's session, so the store also
+// refuses it outside the scope and it dies with the session. A scoped presign
+// is the gateway's opt-in direct mode and is bounded: the gateway must have
+// it enabled, GET needs a READ scope and PUT or POST an INGEST scope, the key
+// must be an object of the scope under the key convention, and
+// expiry_seconds must be explicit and within the gateway's scoped presign
+// limit; anything else is refused, never clamped. A URL lists nothing.
 message PresignRequest {
   string key = 1;
   PresignMethod method = 2;
   int64 expiry_seconds = 3;
+  // scope, when set, signs with a scoped session — see above and Scope.
+  Scope scope = 4;
+  // content_type, on PUT or POST, is the exact Content-Type the upload must
+  // carry: PUT signs the header (returned in headers, and the upload must
+  // send it), POST states it in the policy. A store that cannot bind it
+  // answers UNIMPLEMENTED rather than sign an unbounded URL.
+  string content_type = 5;
+  // content_length_max, on POST, is the most bytes the upload may carry; the
+  // store refuses a larger body. It is refused on PUT, where no store this
+  // gateway signs for can bound a size.
+  int64 content_length_max = 6;
+  // content_length_min, on POST, is the fewest bytes; 0 means none.
+  int64 content_length_min = 7;
 }
 
 // PresignResult is a time-limited URL the client fetches directly over plain
@@ -321,6 +408,9 @@ message PresignResult {
   string url = 2;
   map<string, string> headers = 3;
   int64 expires_at_unix_ms = 4;
+  // form_fields, on POST, are the fields the multipart form must carry, in
+  // addition to the file itself, which goes last under the name "file".
+  map<string, string> form_fields = 5;
 }
 
 // WriteOp is the mutating operation a WriteEvent reports.
@@ -400,6 +490,14 @@ message BackendCapabilities {
   // max_get_many_items is the most items one GetManyRequest may carry; more is
   // INVALID_ARGUMENT. It applies with or without a binding.
   int32 max_get_many_items = 14;
+  // scoped_sessions is whether this gateway runs calls under scoped sessions:
+  // "" or "off" (a scoped call is refused), "allow" (a call may carry a
+  // Scope), or "require" (a call on the configured bucket must carry one).
+  string scoped_sessions = 15;
+  // scoped_session_issuer is the qualification of the store's session issuer:
+  // "qualified", or "unqualified" where the mechanism is described and was
+  // never proven against the real store, which keeps scoped sessions off.
+  string scoped_session_issuer = 16;
 }
 
 message ReadyRequest {}
@@ -451,7 +549,11 @@ message NativeResult {
 // Act on the reason, not the code — one code covers refusals that call for
 // different actions:
 //   PERMISSION_DENIED   DESTINATION_REFUSED (the guard: refuse the source),
-//                       CREDENTIAL_REJECTED (the store: re-authorise)
+//                       CREDENTIAL_REJECTED (the store: re-authorise; under a
+//                       Scope it is the store refusing a key outside the
+//                       scope or a verb outside the mode, and carries
+//                       metadata scoped=true, mode, store_code),
+//                       SCOPE_NOT_GRANTED, SCOPE_REQUIRED
 //   RESOURCE_EXHAUSTED  STORE_THROTTLED (back off; carries a
 //                       google.rpc.RetryInfo — the store's Retry-After, or a
 //                       1 s default, metadata retry_delay_source=store|default),
@@ -460,13 +562,15 @@ message NativeResult {
 //                       LISTING_TOO_LONG (entries, max_entries),
 //                       WATCH_CONSUMER_BEHIND (reconcile, then re-watch)
 //   NOT_FOUND           OBJECT_NOT_FOUND, BUCKET_NOT_FOUND
-//   INVALID_ARGUMENT    BINDING_INVALID, TOO_MANY_ITEMS (max_items),
-//                       INVALID_ARGUMENT
+//   INVALID_ARGUMENT    BINDING_INVALID, SCOPE_INVALID, PRESIGN_REFUSED,
+//                       TOO_MANY_ITEMS (max_items), INVALID_ARGUMENT
 //   UNAVAILABLE         OPERATION_DEADLINE (per_operation, per_get_many),
-//                       ENDPOINT_UNRESOLVED, STORE_UNAVAILABLE
+//                       ENDPOINT_UNRESOLVED, STORE_UNAVAILABLE,
+//                       SCOPE_ISSUER_UNAVAILABLE
 //   ABORTED             BODY_SIZE_MISMATCH (declared_bytes, sent_bytes)
 //   INTERNAL            LISTING_INCOMPLETE, INTERNAL
-//   FAILED_PRECONDITION PRECONDITION_FAILED;  ALREADY_EXISTS ALREADY_EXISTS;
+//   FAILED_PRECONDITION PRECONDITION_FAILED, SCOPED_SESSIONS_UNAVAILABLE,
+//                       SCOPE_POLICY_TOO_LARGE;  ALREADY_EXISTS ALREADY_EXISTS;
 //   UNIMPLEMENTED       UNSUPPORTED
 service ObjectStorage {
   rpc Stat(StatRequest) returns (GetHeader);

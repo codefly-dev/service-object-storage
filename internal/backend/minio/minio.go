@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -181,7 +182,9 @@ func mapErr(op string, err error) error {
 	case resp.StatusCode == 409:
 		return serr.Wrap(serr.AlreadyExists, op, err)
 	case resp.StatusCode == 403, resp.Code == "AccessDenied":
-		return serr.Wrap(serr.PermissionDenied, op, err)
+		// store_code is the store's own word for the refusal, so a caller can
+		// tell that the store said no from a check made above it.
+		return serr.Wrap(serr.PermissionDenied, op, err).WithReason(serr.ReasonCredentialRejected, map[string]string{"store_code": resp.Code})
 	case resp.StatusCode == 429, resp.StatusCode == 503, resp.Code == "SlowDown":
 		return serr.Wrap(serr.Throttled, op, err)
 	default:
@@ -522,6 +525,61 @@ func (b *Backend) Presign(ctx context.Context, key string, method backend.Presig
 		URL:       u.String(),
 		ExpiresAt: time.Now().Add(expiry),
 	}, nil
+}
+
+// PresignBounded signs a URL that binds the upload's type (PUT: the signed
+// Content-Type header; POST: the policy) and, for POST, its size range. The
+// store checks both when the URL is used. A PUT cannot bound a size here: a
+// SigV4 query signature covers headers, not a length range.
+func (b *Backend) PresignBounded(ctx context.Context, key string, bounds backend.PresignBounds) (*backend.PresignResult, error) {
+	const op = "minio.PresignBounded"
+	expiry := bounds.Expiry
+	if expiry <= 0 || expiry > presignHardMax {
+		expiry = presignHardMax
+	}
+	if b.presignMax > 0 && expiry > b.presignMax {
+		expiry = b.presignMax
+	}
+	expires := time.Now().Add(expiry)
+	switch bounds.Method {
+	case backend.PresignPut:
+		if bounds.ContentLengthMax > 0 || bounds.ContentLengthMin > 0 {
+			return nil, serr.New(serr.Unsupported, op, "a presigned PUT cannot bound the size of its body; use POST")
+		}
+		if bounds.ContentType == "" {
+			return nil, serr.New(serr.InvalidArgument, op, "a bounded PUT names its content type")
+		}
+		headers := http.Header{}
+		headers.Set("Content-Type", bounds.ContentType)
+		u, err := b.client.PresignHeader(ctx, http.MethodPut, b.bucket, key, expiry, url.Values{}, headers)
+		if err != nil {
+			return nil, mapErr(op, err)
+		}
+		return &backend.PresignResult{Method: backend.PresignPut, URL: u.String(), ExpiresAt: expires,
+			Headers: map[string]string{"Content-Type": bounds.ContentType}}, nil
+	case backend.PresignPost:
+		if bounds.ContentLengthMax <= 0 || bounds.ContentLengthMin < 0 || bounds.ContentLengthMin > bounds.ContentLengthMax {
+			return nil, serr.New(serr.InvalidArgument, op, "a presigned POST needs a size range: 0 <= min <= max, max > 0")
+		}
+		policy := minio.NewPostPolicy()
+		steps := []error{policy.SetBucket(b.bucket), policy.SetKey(key), policy.SetExpires(expires.UTC()),
+			policy.SetContentLengthRange(bounds.ContentLengthMin, bounds.ContentLengthMax)}
+		if bounds.ContentType != "" {
+			steps = append(steps, policy.SetContentType(bounds.ContentType))
+		}
+		for _, err := range steps {
+			if err != nil {
+				return nil, serr.Wrap(serr.InvalidArgument, op, err)
+			}
+		}
+		u, fields, err := b.client.PresignedPostPolicy(ctx, policy)
+		if err != nil {
+			return nil, mapErr(op, err)
+		}
+		return &backend.PresignResult{Method: backend.PresignPost, URL: u.String(), ExpiresAt: expires, FormFields: fields}, nil
+	default:
+		return nil, serr.New(serr.InvalidArgument, op, "only an upload is bounded")
+	}
 }
 
 // Native is the escape hatch for backend-specific verbs; none are offered.

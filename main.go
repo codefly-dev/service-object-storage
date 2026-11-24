@@ -127,6 +127,17 @@ type Settings struct {
 	// consumer can be handed a shared, provisioned bucket. Empty is the whole
 	// bucket.
 	Prefix string `yaml:"prefix"`
+	// ScopedSessions is whether the gateway runs calls under storage sessions
+	// confined to one scope: "off" (the default; nothing changes), "allow" (a
+	// call may name a scope) or "require" (a call must). Only the local MinIO
+	// has a qualified issuer: on any other backend the gateway refuses to
+	// start with it on, and a deployment refuses to render it.
+	ScopedSessions string `yaml:"scoped-sessions"`
+	// ScopedGrants are the bases and modes the consumer may ask sessions for.
+	ScopedGrants []ScopedGrant `yaml:"scoped-grants"`
+	// ScopedPresign lets a URL be signed by a scope's session (the opt-in
+	// direct mode). Without it a scoped presign is refused.
+	ScopedPresign bool `yaml:"scoped-presign"`
 }
 
 // resolved holds the effective configuration after defaults and runtime

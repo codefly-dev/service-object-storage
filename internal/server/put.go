@@ -53,6 +53,14 @@ func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
 	ctx, cancel := context.WithCancelCause(stream.Context())
 	defer cancel(nil)
 
+	// The credential is settled before a byte of the body is read: a scoped
+	// write that cannot have its session is refused without buffering one.
+	c, err := s.backendFor(ctx, nil, header.GetScope())
+	if err != nil {
+		return toStatus(err)
+	}
+	defer c.Release()
+
 	body, size, refusal, err := s.putBody(cancel, stream, header.GetTotalSize())
 	if err != nil {
 		return err
@@ -66,7 +74,7 @@ func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
 		IfMatch:         header.GetIfMatch(),
 		Size:            size,
 	}
-	res, err := s.be.Put(ctx, header.GetKey(), body, opts)
+	res, err := c.Put(ctx, header.GetKey(), body, opts)
 	if closer, ok := body.(interface{ CloseWithError(error) error }); ok {
 		// Unblock a receiver still writing; it exits on the failed write.
 		_ = closer.CloseWithError(errPutFinished)
@@ -78,7 +86,7 @@ func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
 		return rerr
 	}
 	if err != nil {
-		return toStatus(err)
+		return toStatus(c.err(err))
 	}
 	s.hub.Publish(events.Event{Key: header.GetKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
 	return stream.SendAndClose(&storagev0.PutResult{

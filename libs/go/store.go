@@ -36,8 +36,9 @@ type layout interface {
 }
 
 type config struct {
-	readerIssuer ReaderSessionIssuer
-	presignLimit time.Duration
+	readerIssuer    ReaderSessionIssuer
+	gatewaySessions bool
+	presignLimit    time.Duration
 }
 
 // Option configures a Store or a Maintenance.
@@ -69,6 +70,35 @@ func WithReaderSessions(issuer ReaderSessionIssuer) Option {
 			return errors.New("scoped reads require a session issuer")
 		}
 		c.readerIssuer = issuer
+		return nil
+	}
+}
+
+// WithGatewaySessions makes every call of the Store name its scope to the
+// gateway, which then makes the call with a short-lived credential of the
+// store's own, confined to that scope: the partition and the scope of the
+// object, under this Store's base. The Store holds no credential and issues
+// none. A key outside the scope is refused by the object store itself, so
+// the Store's own checks stop being the only thing between a caller and the
+// rest of the bucket.
+//
+// Each call runs under one of the scope's three sessions, and no call can
+// use another's:
+//
+//	read         Get, Head, List, ListScope, PresignGet
+//	ingest       Put, the upload half of PutContent, PresignPut, PresignPost
+//	maintenance  Delete, Copy, and the promotion half of PutContent (the
+//	             check for existing content, the copy into place, and the
+//	             removal of the staged upload)
+//
+// The gateway must offer scoped sessions (SOS_SCOPED_SESSIONS=allow or
+// require) and grant this Store's base those modes; otherwise every call is
+// refused, never served with the gateway's own credential. It excludes
+// WithReaderSessions: there the caller issues the credential, here nobody
+// outside the gateway holds one.
+func WithGatewaySessions() Option {
+	return func(c *config) error {
+		c.gatewaySessions = true
 		return nil
 	}
 }
@@ -108,6 +138,9 @@ func NewStore(client storagev0.ObjectStorageClient, base string, binder Binder, 
 			return nil, err
 		}
 	}
+	if configuration.gatewaySessions && configuration.readerIssuer != nil {
+		return nil, errors.New("a store uses gateway sessions or its own reader sessions, not both")
+	}
 	return &Store{client: client, keys: codec, base: base, binder: binder, config: configuration}, nil
 }
 
@@ -123,6 +156,21 @@ func isNil(value any) bool {
 		return false
 	}
 }
+
+// in is the scope a call names to the gateway, or nil when the Store was not
+// built with gateway sessions.
+func (s *Store) in(binding Binding, scope string, mode storagev0.ScopeMode) *storagev0.Scope {
+	if !s.config.gatewaySessions {
+		return nil
+	}
+	return &storagev0.Scope{Base: s.base, Partition: binding.Partition, Scope: scope, Mode: mode}
+}
+
+const (
+	readSession        = storagev0.ScopeMode_SCOPE_MODE_READ
+	ingestSession      = storagev0.ScopeMode_SCOPE_MODE_INGEST
+	maintenanceSession = storagev0.ScopeMode_SCOPE_MODE_MAINTENANCE
+)
 
 // Base is the base this Store is confined to.
 func (s *Store) Base() string { return s.base }
@@ -230,7 +278,7 @@ func (s *Store) Put(ctx context.Context, ref Ref, body io.Reader, options PutOpt
 	if err != nil {
 		return Info{}, err
 	}
-	size, _, result, err := s.send(ctx, at.key, body, options, false)
+	size, _, result, err := s.send(ctx, s.in(binding, at.scope, ingestSession), at.key, body, options, false)
 	if err != nil {
 		return Info{}, err
 	}
@@ -241,7 +289,7 @@ func (s *Store) Put(ctx context.Context, ref Ref, body io.Reader, options PutOpt
 }
 
 // send streams a body to one key, hashing it on the way when asked.
-func (s *Store) send(ctx context.Context, key string, body io.Reader, options PutOptions, hash bool) (int64, string, *storagev0.PutResult, error) {
+func (s *Store) send(ctx context.Context, scope *storagev0.Scope, key string, body io.Reader, options PutOptions, hash bool) (int64, string, *storagev0.PutResult, error) {
 	if body == nil {
 		return 0, "", nil, errors.New("object store: a write needs a body")
 	}
@@ -251,7 +299,7 @@ func (s *Store) send(ctx context.Context, key string, body io.Reader, options Pu
 	if err != nil {
 		return 0, "", nil, err
 	}
-	header := &storagev0.PutHeader{Key: key, ContentType: options.ContentType, UserMetadata: options.Metadata, TotalSize: -1}
+	header := &storagev0.PutHeader{Key: key, ContentType: options.ContentType, UserMetadata: options.Metadata, TotalSize: -1, Scope: scope}
 	if options.Size > 0 {
 		header.TotalSize = options.Size
 	}
@@ -331,9 +379,9 @@ func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, op
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), stagingCleanup)
 		defer cancel()
-		_, _ = s.client.Delete(cleanup, &storagev0.DeleteRequest{Key: staging})
+		_, _ = s.client.Delete(cleanup, &storagev0.DeleteRequest{Key: staging, Scope: s.in(binding, place, maintenanceSession)})
 	}()
-	size, digest, _, err := s.send(ctx, staging, body, PutOptions{ContentType: options.ContentType, Metadata: options.Metadata, Size: options.Size}, true)
+	size, digest, _, err := s.send(ctx, s.in(binding, place, ingestSession), staging, body, PutOptions{ContentType: options.ContentType, Metadata: options.Metadata, Size: options.Size}, true)
 	if err != nil {
 		return Info{}, err
 	}
@@ -343,7 +391,10 @@ func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, op
 		return Info{}, err
 	}
 	info := Info{Ref: refOf(content), Size: size, ContentType: options.ContentType}
-	existing, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: key})
+	// Promotion is maintenance: it reads what ingest wrote, which an ingest
+	// session may not.
+	promotion := s.in(binding, place, maintenanceSession)
+	existing, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: key, Scope: promotion})
 	switch {
 	case err == nil:
 		info.ETag, info.VersionID = existing.GetInfo().GetEtag(), existing.GetInfo().GetVersionId()
@@ -351,7 +402,7 @@ func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, op
 	case status.Code(err) != codes.NotFound:
 		return Info{}, err
 	}
-	copied, err := s.client.Copy(ctx, &storagev0.CopyRequest{SourceKey: staging, DestKey: key})
+	copied, err := s.client.Copy(ctx, &storagev0.CopyRequest{SourceKey: staging, DestKey: key, Scope: promotion})
 	if err != nil {
 		return Info{}, translate(err)
 	}
@@ -384,12 +435,12 @@ func (s *Store) Get(ctx context.Context, ref Ref) (io.ReadCloser, Info, error) {
 	if err != nil {
 		return nil, Info{}, err
 	}
-	return open(ctx, s.client, session, at.key, objectkey.Key{Scope: at.scope, Slot: at.slot, Name: ref.Name})
+	return open(ctx, s.client, session, s.in(binding, at.scope, readSession), at.key, objectkey.Key{Scope: at.scope, Slot: at.slot, Name: ref.Name})
 }
 
-func open(ctx context.Context, client storagev0.ObjectStorageClient, session *storagev0.Binding, physical string, key objectkey.Key) (io.ReadCloser, Info, error) {
+func open(ctx context.Context, client storagev0.ObjectStorageClient, session *storagev0.Binding, scope *storagev0.Scope, physical string, key objectkey.Key) (io.ReadCloser, Info, error) {
 	streaming, cancel := context.WithCancel(ctx)
-	stream, err := client.Get(streaming, &storagev0.GetRequest{Key: physical, Binding: session})
+	stream, err := client.Get(streaming, &storagev0.GetRequest{Key: physical, Binding: session, Scope: scope})
 	if err != nil {
 		cancel()
 		return nil, Info{}, translate(err)
@@ -449,7 +500,7 @@ func (s *Store) Head(ctx context.Context, ref Ref) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	header, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: at.key, Binding: session})
+	header, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: at.key, Binding: session, Scope: s.in(binding, at.scope, readSession)})
 	if err != nil {
 		return Info{}, translate(err)
 	}
@@ -467,7 +518,7 @@ func (s *Store) Delete(ctx context.Context, ref Ref) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.client.Delete(ctx, &storagev0.DeleteRequest{Key: at.key}); err != nil && status.Code(err) != codes.NotFound {
+	if _, err := s.client.Delete(ctx, &storagev0.DeleteRequest{Key: at.key, Scope: s.in(binding, at.scope, maintenanceSession)}); err != nil && status.Code(err) != codes.NotFound {
 		return err
 	}
 	return nil
@@ -495,7 +546,11 @@ func (s *Store) Copy(ctx context.Context, from, to Ref, options CopyOptions) (In
 	if err != nil {
 		return Info{}, fmt.Errorf("copy destination: %w", err)
 	}
-	request := &storagev0.CopyRequest{SourceKey: source.key, DestKey: destination.key}
+	// One session is one scope: the store cannot be asked to copy across two.
+	if s.config.gatewaySessions && source.scope != destination.scope {
+		return Info{}, fmt.Errorf("%w: a copy under gateway sessions stays inside one scope", ErrOutsideReach)
+	}
+	request := &storagev0.CopyRequest{SourceKey: source.key, DestKey: destination.key, Scope: s.in(binding, destination.scope, maintenanceSession)}
 	if options.IfAbsent {
 		request.IfNoneMatch = "*"
 	}
@@ -579,7 +634,7 @@ func (s *Store) list(ctx context.Context, binding Binding, scope, prefix string,
 	if err != nil {
 		return Page{}, err
 	}
-	listed, err := s.client.List(ctx, &storagev0.ListRequest{Binding: session, Prefix: prefix, PageToken: options.Token, Limit: int32(max(options.Limit, 0))})
+	listed, err := s.client.List(ctx, &storagev0.ListRequest{Binding: session, Scope: s.in(binding, scope, readSession), Prefix: prefix, PageToken: options.Token, Limit: int32(max(options.Limit, 0))})
 	if err != nil {
 		return Page{}, translate(err)
 	}
@@ -601,32 +656,72 @@ func (s *Store) list(ctx context.Context, binding Binding, scope, prefix string,
 // Presigned is a URL that reads or writes exactly one object, for as long as
 // it lives, with no credential. Whoever holds it holds that.
 type Presigned struct {
-	URL     string
-	Method  string
+	URL    string
+	Method string
+	// Headers are headers the request must carry as given: a bound content
+	// type is one.
 	Headers map[string]string
+	// Fields, for a POST, are the form fields to send before the file, which
+	// goes last under the name "file".
+	Fields  map[string]string
 	Expires time.Time
+}
+
+// UploadBounds are what a presigned upload binds beyond its key and its
+// lifetime. The object store checks them when the URL is used.
+type UploadBounds struct {
+	// ContentType is the exact content type the upload must carry.
+	ContentType string
+	// MaxBytes is the most bytes a POST may carry; MinBytes the fewest.
+	MaxBytes int64
+	MinBytes int64
 }
 
 // PresignGet signs a URL that reads one object the binding may read.
 func (s *Store) PresignGet(ctx context.Context, ref Ref, lifetime time.Duration) (Presigned, error) {
-	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_GET)
+	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_GET, UploadBounds{})
 }
 
 // PresignPut signs a URL that writes one object the binding may write. The
 // gateway signs the key and the lifetime and nothing else: neither a size nor
-// a content type is bound to the URL.
+// a content type is bound to the URL. PresignPutTyped binds the type and
+// PresignPost the size.
 func (s *Store) PresignPut(ctx context.Context, ref Ref, lifetime time.Duration) (Presigned, error) {
-	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_PUT)
+	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_PUT, UploadBounds{})
 }
 
-func (s *Store) presign(ctx context.Context, ref Ref, lifetime time.Duration, method storagev0.PresignMethod) (Presigned, error) {
+// PresignPutTyped signs a URL that writes one object the binding may write,
+// and only with the given content type: the upload sends the returned header
+// as is, and the store refuses any other. It bounds no size; PresignPost does.
+func (s *Store) PresignPutTyped(ctx context.Context, ref Ref, lifetime time.Duration, contentType string) (Presigned, error) {
+	if contentType == "" {
+		return Presigned{}, errors.New("object store: a typed upload names its content type")
+	}
+	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_PUT, UploadBounds{ContentType: contentType})
+}
+
+// PresignPost signs a form upload of one object the binding may write, whose
+// size, and content type when given, the store checks. It is the one upload
+// URL that bounds how much is written. A gateway whose store cannot sign one
+// refuses; it never signs an unbounded URL in its place.
+func (s *Store) PresignPost(ctx context.Context, ref Ref, lifetime time.Duration, bounds UploadBounds) (Presigned, error) {
+	if bounds.MaxBytes <= 0 || bounds.MinBytes < 0 || bounds.MinBytes > bounds.MaxBytes {
+		return Presigned{}, errors.New("object store: a form upload states the most bytes it may carry")
+	}
+	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_POST, bounds)
+}
+
+func (s *Store) presign(ctx context.Context, ref Ref, lifetime time.Duration, method storagev0.PresignMethod, bounds UploadBounds) (Presigned, error) {
 	binding, err := s.bind(ctx)
 	if err != nil {
 		return Presigned{}, err
 	}
-	may, verb := binding.mayRead, "GET"
-	if method == storagev0.PresignMethod_PRESIGN_METHOD_PUT {
-		may, verb = binding.mayWrite, "PUT"
+	may, verb, mode := binding.mayRead, "GET", readSession
+	switch method {
+	case storagev0.PresignMethod_PRESIGN_METHOD_PUT:
+		may, verb, mode = binding.mayWrite, "PUT", ingestSession
+	case storagev0.PresignMethod_PRESIGN_METHOD_POST:
+		may, verb, mode = binding.mayWrite, "POST", ingestSession
 	}
 	at, err := s.resolve(binding, ref, may)
 	if err != nil {
@@ -636,9 +731,12 @@ func (s *Store) presign(ctx context.Context, ref Ref, lifetime time.Duration, me
 	if lifetime < time.Second || lifetime > s.config.presignLimit {
 		return Presigned{}, fmt.Errorf("%w: asked for %s, the limit is %s", ErrPresignExpiry, lifetime, s.config.presignLimit)
 	}
-	signed, err := s.client.Presign(ctx, &storagev0.PresignRequest{Key: at.key, Method: method, ExpirySeconds: int64(lifetime / time.Second)})
+	signed, err := s.client.Presign(ctx, &storagev0.PresignRequest{
+		Key: at.key, Method: method, ExpirySeconds: int64(lifetime / time.Second), Scope: s.in(binding, at.scope, mode),
+		ContentType: bounds.ContentType, ContentLengthMax: bounds.MaxBytes, ContentLengthMin: bounds.MinBytes,
+	})
 	if err != nil {
 		return Presigned{}, translate(err)
 	}
-	return Presigned{URL: signed.GetUrl(), Method: verb, Headers: signed.GetHeaders(), Expires: time.UnixMilli(signed.GetExpiresAtUnixMs())}, nil
+	return Presigned{URL: signed.GetUrl(), Method: verb, Headers: signed.GetHeaders(), Fields: signed.GetFormFields(), Expires: time.UnixMilli(signed.GetExpiresAtUnixMs())}, nil
 }

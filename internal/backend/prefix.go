@@ -116,6 +116,15 @@ func (p *prefixed) Presign(ctx context.Context, key string, method PresignMethod
 	return p.inner.Presign(ctx, p.key(key), method, expiry)
 }
 
+// PresignBounded signs under the prefix when the store can bind an upload.
+func (p *prefixed) PresignBounded(ctx context.Context, key string, bounds PresignBounds) (*PresignResult, error) {
+	inner, ok := p.inner.(BoundedPresigner)
+	if !ok {
+		return nil, serr.New(serr.Unsupported, "presign", p.inner.Name()+" cannot bind an upload's type or size into a presigned URL")
+	}
+	return inner.PresignBounded(ctx, p.key(key), bounds)
+}
+
 // Native is refused under a prefix. Its parameters are opaque here, so a verb
 // that addressed keys would reach outside the prefix; failing closed means a
 // future native verb has to be taught the prefix before it is offered here.

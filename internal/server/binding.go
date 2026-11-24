@@ -14,6 +14,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/egress"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
+	"github.com/codefly-dev/service-object-storage/internal/sessions"
 )
 
 // The caps on a bound call. They bound what one caller-named store can make the
@@ -66,14 +67,33 @@ type call struct {
 	// guard and secrets are set for a bound call only.
 	guard   *egress.Guard
 	secrets []string
+	// scope and expires are set for a scoped call only: the scope whose
+	// session the backend holds, and when the store stops honouring it.
+	scope   *sessions.Scope
+	expires time.Time
 }
 
 // backendFor returns the call an RPC runs against. Without a binding it is the
 // gateway's configured backend. With one, it is a backend opened for this call
 // alone, through a guarded client, from the binding's own credential. A
 // returned error has already passed through the call's error policy.
-func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding) (*call, error) {
+//
+// With a scope, it is a backend holding the scope's session (see scopedCall),
+// and a scope never travels with a binding: one names the gateway's own
+// bucket, the other somebody else's. Where scoped sessions are required, a
+// call that names neither is refused instead of running with the gateway's
+// own credential.
+func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding, scope *storagev0.Scope) (*call, error) {
+	if scope != nil {
+		if b != nil {
+			return nil, scopeInvalid("a call names a binding or a scope, never both")
+		}
+		return s.scopedCall(ctx, scope)
+	}
 	if b == nil {
+		if err := s.ownCredentialAllowed(); err != nil {
+			return nil, err
+		}
 		return &call{Backend: s.be, Release: func() {}}, nil
 	}
 	c := &call{secrets: bindingSecrets(b)}
@@ -102,6 +122,9 @@ func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding) (*call, e
 // normalized code and the store's own words are otherwise kept. An unbound
 // call's errors pass through unchanged.
 func (c *call) err(err error) error {
+	if err != nil && c.scope != nil {
+		return c.scopedErr(err)
+	}
 	if err == nil || c.secrets == nil {
 		return err
 	}
@@ -253,4 +276,15 @@ func (c *capReader) Read(p []byte) (int, error) {
 		return 0, errObjectTooLarge
 	}
 	return n, err
+}
+
+// ownCredentialAllowed refuses a call that would run with the gateway's own
+// credential where scoped sessions are required.
+func (s *Server) ownCredentialAllowed() error {
+	if s.scoped.Mode != ScopedRequire {
+		return nil
+	}
+	return serr.New(serr.PermissionDenied, "scope",
+		"this gateway requires a scope on every call to its bucket; the call was not made").
+		WithReason(serr.ReasonScopeRequired, nil)
 }
