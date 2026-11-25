@@ -70,10 +70,11 @@ go test -race ./...    # its own CI job: events hub, Watch and readiness monitor
 Integration against a real MinIO, behind the `integration` build tag:
 
 ```bash
-docker run -d --name minio -p 9000:9000 \
+# Docker picks the host port; the suite is told which one it was.
+docker run -d --name minio -p 127.0.0.1::9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
   ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
-MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
+MINIO_ENDPOINT=$(docker port minio 9000/tcp) MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
   go test -tags integration -count=1 ./internal/integration/... ./libs/go/...
 ```

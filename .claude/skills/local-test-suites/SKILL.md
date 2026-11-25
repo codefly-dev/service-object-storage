@@ -19,15 +19,17 @@ tiers exist, and only the tier you actually ran is evidence:
 ## Integration
 
 ```bash
-docker run -d --name minio -p 9000:9000 \
+docker run -d --name minio -p 127.0.0.1::9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
   ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
 docker run -d --name fake-gcs -p 4443:4443 \
   fsouza/fake-gcs-server@sha256:d47b4cf8b87006cab8fbbecfa5f06a2a3c5722e464abddc0d107729663d40ec4 \
   -scheme http -public-host localhost:4443
-for i in $(seq 1 30); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+# Docker picked MinIO's host port; ask it which.
+MINIO_ENDPOINT=$(docker port minio 9000/tcp)
+for i in $(seq 1 30); do curl -sf "http://$MINIO_ENDPOINT/minio/health/live" && break; sleep 1; done
 
-MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
+MINIO_ENDPOINT=$MINIO_ENDPOINT MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
 STORAGE_EMULATOR_HOST=localhost:4443 GCS_BUCKET=sos-test \
   go test -tags integration -count=1 -v ./internal/integration/...

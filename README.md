@@ -971,12 +971,12 @@ go build ./...
 go vet ./...
 go test ./...            # unit tests (mem backend)
 
-# integration against real MinIO
-docker run -d --name m -p 9000:9000 ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
-MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
+# integration against real MinIO, on a host port Docker picks
+docker run -d --name minio -p 127.0.0.1::9000 ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
+MINIO_ENDPOINT=$(docker port minio 9000/tcp) MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
   go test -tags integration ./internal/integration/...
-docker rm -f m
+docker rm -f minio
 ```
 
 ## Layout

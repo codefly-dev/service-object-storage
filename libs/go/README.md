@@ -319,7 +319,8 @@ convention shows up there.
 
 ```bash
 go test ./libs/go/...            # the codec, the Store and the proof over the in-memory backend
-MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
+# a MinIO started as in AGENTS.md, on a host port Docker picked
+MINIO_ENDPOINT=$(docker port minio 9000/tcp) MINIO_ACCESS_KEY=minioadmin MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
   go test -tags integration -count=1 -v ./libs/go/...   # the same, on MinIO; expect 8 more --- PASS, 0 --- SKIP
 ```
 
