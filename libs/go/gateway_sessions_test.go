@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
 	"github.com/codefly-dev/service-object-storage/libs/go/internal/gatewaytest"
 	"github.com/codefly-dev/service-object-storage/libs/go/miniosession"
@@ -22,12 +22,12 @@ import (
 // to a gateway that runs no scoped sessions: what is under test is what the
 // Store asks for, not what a gateway does with it.
 type scopes struct {
-	storagev0.ObjectStorageClient
+	storagev1.ObjectStorageClient
 	mu   sync.Mutex
 	seen []string
 }
 
-func (s *scopes) note(rpc string, scope *storagev0.Scope) {
+func (s *scopes) note(rpc string, scope *storagev1.Scope) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if scope == nil {
@@ -46,48 +46,48 @@ func (s *scopes) take() []string {
 	return seen
 }
 
-func (s *scopes) Stat(ctx context.Context, in *storagev0.StatRequest, opts ...grpc.CallOption) (*storagev0.GetHeader, error) {
+func (s *scopes) Stat(ctx context.Context, in *storagev1.StatRequest, opts ...grpc.CallOption) (*storagev1.GetHeader, error) {
 	s.note("Stat", in.GetScope())
 	in.Scope = nil
 	return s.ObjectStorageClient.Stat(ctx, in, opts...)
 }
 
-func (s *scopes) Get(ctx context.Context, in *storagev0.GetRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[storagev0.GetResponse], error) {
+func (s *scopes) Get(ctx context.Context, in *storagev1.GetRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[storagev1.GetResponse], error) {
 	s.note("Get", in.GetScope())
 	in.Scope = nil
 	return s.ObjectStorageClient.Get(ctx, in, opts...)
 }
 
-func (s *scopes) List(ctx context.Context, in *storagev0.ListRequest, opts ...grpc.CallOption) (*storagev0.ListResult, error) {
+func (s *scopes) List(ctx context.Context, in *storagev1.ListRequest, opts ...grpc.CallOption) (*storagev1.ListResult, error) {
 	s.note("List", in.GetScope())
 	in.Scope = nil
 	return s.ObjectStorageClient.List(ctx, in, opts...)
 }
 
-func (s *scopes) Delete(ctx context.Context, in *storagev0.DeleteRequest, opts ...grpc.CallOption) (*storagev0.DeleteResult, error) {
+func (s *scopes) Delete(ctx context.Context, in *storagev1.DeleteRequest, opts ...grpc.CallOption) (*storagev1.DeleteResult, error) {
 	s.note("Delete", in.GetScope())
 	in.Scope = nil
 	return s.ObjectStorageClient.Delete(ctx, in, opts...)
 }
 
-func (s *scopes) Copy(ctx context.Context, in *storagev0.CopyRequest, opts ...grpc.CallOption) (*storagev0.CopyResult, error) {
+func (s *scopes) Copy(ctx context.Context, in *storagev1.CopyRequest, opts ...grpc.CallOption) (*storagev1.CopyResult, error) {
 	s.note("Copy", in.GetScope())
 	in.Scope = nil
 	return s.ObjectStorageClient.Copy(ctx, in, opts...)
 }
 
-func (s *scopes) Presign(ctx context.Context, in *storagev0.PresignRequest, opts ...grpc.CallOption) (*storagev0.PresignResult, error) {
+func (s *scopes) Presign(ctx context.Context, in *storagev1.PresignRequest, opts ...grpc.CallOption) (*storagev1.PresignResult, error) {
 	s.note("Presign", in.GetScope())
 	in.Scope = nil
 	return s.ObjectStorageClient.Presign(ctx, in, opts...)
 }
 
 type scopedPut struct {
-	grpc.ClientStreamingClient[storagev0.PutRequest, storagev0.PutResult]
+	grpc.ClientStreamingClient[storagev1.PutRequest, storagev1.PutResult]
 	owner *scopes
 }
 
-func (p scopedPut) Send(request *storagev0.PutRequest) error {
+func (p scopedPut) Send(request *storagev1.PutRequest) error {
 	if header := request.GetHeader(); header != nil {
 		p.owner.note("Put", header.GetScope())
 		header.Scope = nil
@@ -95,7 +95,7 @@ func (p scopedPut) Send(request *storagev0.PutRequest) error {
 	return p.ClientStreamingClient.Send(request)
 }
 
-func (s *scopes) Put(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[storagev0.PutRequest, storagev0.PutResult], error) {
+func (s *scopes) Put(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[storagev1.PutRequest, storagev1.PutResult], error) {
 	stream, err := s.ObjectStorageClient.Put(ctx, opts...)
 	return scopedPut{stream, s}, err
 }
@@ -227,7 +227,7 @@ func TestAStoreWithGatewaySessionsIsRefusedByAGatewayWithoutThem(t *testing.T) {
 	refused("Delete", store.Delete(ctx, objectstorage.Own("a.txt")))
 	_, err = store.PresignGet(ctx, objectstorage.Own("a.txt"), time.Minute)
 	refused("PresignGet", err)
-	listed, err := client.List(ctx, &storagev0.ListRequest{})
+	listed, err := client.List(ctx, &storagev1.ListRequest{})
 	if err != nil || len(listed.GetObjects()) != 0 {
 		t.Fatalf("a refused Store left objects behind: %v %v", listed.GetObjects(), err)
 	}

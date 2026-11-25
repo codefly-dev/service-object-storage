@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/config"
@@ -37,7 +37,7 @@ func TestGracefulStop_EscalatesOnStuckRPC(t *testing.T) {
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
 	be := openMem(t)
-	storagev0.RegisterObjectStorageServer(s, server.New(be, events.NewHub(), probetest.Monitor(t, be)))
+	storagev1.RegisterObjectStorageServer(s, server.New(be, events.NewHub(), probetest.Monitor(t, be)))
 	go func() { _ = s.Serve(lis) }()
 
 	conn, err := grpc.NewClient(
@@ -47,14 +47,14 @@ func TestGracefulStop_EscalatesOnStuckRPC(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	client := storagev0.NewObjectStorageClient(conn)
+	client := storagev1.NewObjectStorageClient(conn)
 
 	// Open a Put and send only the header — the server handler now blocks in
 	// Recv waiting for more frames, keeping the RPC in flight.
 	st, err := client.Put(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{
-		Kind: &storagev0.PutRequest_Header{Header: &storagev0.PutHeader{Key: "k", TotalSize: 1024}},
+	require.NoError(t, st.Send(&storagev1.PutRequest{
+		Kind: &storagev1.PutRequest_Header{Header: &storagev1.PutHeader{Key: "k", TotalSize: 1024}},
 	}))
 
 	grace := 300 * time.Millisecond
@@ -100,6 +100,6 @@ func TestServeHealthAnswersKubernetesProbes(t *testing.T) {
 
 	require.Equal(t, healthv1.HealthCheckResponse_SERVING, check(""), "liveness serves while the process serves")
 	require.Eventually(t, func() bool {
-		return check(storagev0.ObjectStorage_ServiceDesc.ServiceName) == healthv1.HealthCheckResponse_SERVING
+		return check(storagev1.ObjectStorage_ServiceDesc.ServiceName) == healthv1.HealthCheckResponse_SERVING
 	}, 5*time.Second, 20*time.Millisecond, "readiness must follow the backend probe")
 }

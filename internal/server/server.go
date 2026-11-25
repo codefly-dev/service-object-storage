@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"io"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/egress"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -34,7 +34,7 @@ type Readiness interface {
 
 // Server is the ObjectStorage service implementation.
 type Server struct {
-	storagev0.UnimplementedObjectStorageServer
+	storagev1.UnimplementedObjectStorageServer
 	be        backend.Backend
 	hub       *events.Hub
 	readiness Readiness
@@ -58,7 +58,7 @@ func (s *Server) AdmitComposed(composed egress.Composed) *Server {
 
 // Stat returns object metadata, honoring conditional headers by comparing the
 // fetched ETag (NotModified is carried in the header, not as an error).
-func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storagev0.GetHeader, error) {
+func (s *Server) Stat(ctx context.Context, req *storagev1.StatRequest) (*storagev1.GetHeader, error) {
 	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
 	defer cancel()
 	c, err := s.backendFor(ctx, req.GetBinding(), req.GetScope())
@@ -71,18 +71,18 @@ func (s *Server) Stat(ctx context.Context, req *storagev0.StatRequest) (*storage
 		return nil, toStatus(c.err(err))
 	}
 	if inm := req.GetIfNoneMatch(); inm != "" && inm == info.ETag {
-		return &storagev0.GetHeader{Info: toProtoInfo(info), NotModified: true}, nil
+		return &storagev1.GetHeader{Info: toProtoInfo(info), NotModified: true}, nil
 	}
 	if im := req.GetIfMatch(); im != "" && im != info.ETag {
 		return nil, refuse(codes.FailedPrecondition, "if-match: etag mismatch", serr.ReasonPreconditionFailed, nil, 0)
 	}
-	return &storagev0.GetHeader{Info: toProtoInfo(info)}, nil
+	return &storagev1.GetHeader{Info: toProtoInfo(info)}, nil
 }
 
 // Get streams an object: a header frame (info / not_modified) followed by data
 // frames. This is the proxy byte path; large objects that should skip the proxy
 // use the Presign RPC instead. A bound Get is capped at maxBoundObjectBytes.
-func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_GetServer) error {
+func (s *Server) Get(req *storagev1.GetRequest, stream storagev1.ObjectStorage_GetServer) error {
 	ctx, cancel := boundCall(stream.Context(), req.GetBinding(), boundOperationTimeout)
 	defer cancel()
 	c, err := s.backendFor(ctx, req.GetBinding(), req.GetScope())
@@ -95,8 +95,8 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 		return toStatus(c.err(err))
 	}
 	if res.NotModified {
-		return stream.Send(&storagev0.GetResponse{
-			Kind: &storagev0.GetResponse_Header{Header: &storagev0.GetHeader{
+		return stream.Send(&storagev1.GetResponse{
+			Kind: &storagev1.GetResponse_Header{Header: &storagev1.GetHeader{
 				Info: toProtoInfo(&res.Info), NotModified: true,
 			}},
 		})
@@ -109,13 +109,13 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 		res.Body = &capReader{ReadCloser: res.Body, left: maxBoundObjectBytes}
 	}
 
-	if err := stream.Send(&storagev0.GetResponse{
-		Kind: &storagev0.GetResponse_Header{Header: &storagev0.GetHeader{Info: toProtoInfo(&res.Info)}},
+	if err := stream.Send(&storagev1.GetResponse{
+		Kind: &storagev1.GetResponse_Header{Header: &storagev1.GetHeader{Info: toProtoInfo(&res.Info)}},
 	}); err != nil {
 		return err
 	}
 	return streamBody(res.Body, -1, c.err, func(chunk []byte) error {
-		return stream.Send(&storagev0.GetResponse{Kind: &storagev0.GetResponse_Data{Data: chunk}})
+		return stream.Send(&storagev1.GetResponse{Kind: &storagev1.GetResponse_Data{Data: chunk}})
 	})
 }
 
@@ -125,7 +125,7 @@ func (s *Server) Get(req *storagev0.GetRequest, stream storagev0.ObjectStorage_G
 // gone, over the bound cap — is that item's header outcome and the stream
 // moves on. Anything else ends the stream with its status: above all a missing
 // bucket or container, which would otherwise read as every object deleted.
-func (s *Server) GetMany(req *storagev0.GetManyRequest, stream storagev0.ObjectStorage_GetManyServer) error {
+func (s *Server) GetMany(req *storagev1.GetManyRequest, stream storagev1.ObjectStorage_GetManyServer) error {
 	if n := len(req.GetItems()); n > maxGetManyItems {
 		return refuse(codes.InvalidArgument, fmt.Sprintf("get-many: %d items, at most %d per call", n, maxGetManyItems),
 			serr.ReasonTooManyItems, map[string]string{"max_items": fmt.Sprint(maxGetManyItems)}, 0)
@@ -145,10 +145,10 @@ func (s *Server) GetMany(req *storagev0.GetManyRequest, stream storagev0.ObjectS
 	return nil
 }
 
-func getManyItem(ctx context.Context, stream storagev0.ObjectStorage_GetManyServer, c *call, index int32, item *storagev0.GetManyItem, bound bool) error {
-	header := &storagev0.GetManyHeader{Index: index}
+func getManyItem(ctx context.Context, stream storagev1.ObjectStorage_GetManyServer, c *call, index int32, item *storagev1.GetManyItem, bound bool) error {
+	header := &storagev1.GetManyHeader{Index: index}
 	sendHeader := func() error {
-		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Header{Header: header}})
+		return stream.Send(&storagev1.GetManyResponse{Kind: &storagev1.GetManyResponse_Header{Header: header}})
 	}
 	ctx, cancel := c.operation(ctx)
 	defer cancel()
@@ -158,9 +158,9 @@ func getManyItem(ctx context.Context, stream storagev0.ObjectStorage_GetManyServ
 		case errors.Is(err, serr.ErrBucketNotFound):
 			return toStatus(c.err(err))
 		case serr.CodeOf(err) == serr.PreconditionFailed:
-			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED
+			header.Outcome = storagev1.GetManyOutcome_GET_MANY_OUTCOME_CHANGED
 		case serr.CodeOf(err) == serr.NotFound:
-			header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND
+			header.Outcome = storagev1.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND
 		default:
 			return toStatus(c.err(err))
 		}
@@ -168,7 +168,7 @@ func getManyItem(ctx context.Context, stream storagev0.ObjectStorage_GetManyServ
 	}
 	defer res.Body.Close()
 	tooLarge := func() error {
-		header.Outcome = storagev0.GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE
+		header.Outcome = storagev1.GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE
 		return sendHeader()
 	}
 	if bound && res.Info.Size > maxBoundObjectBytes {
@@ -188,12 +188,12 @@ func getManyItem(ctx context.Context, stream storagev0.ObjectStorage_GetManyServ
 		}
 		res.Info.Size, body = int64(len(buf)), bytes.NewReader(buf)
 	}
-	header.Outcome, header.Info = storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK, toProtoInfo(&res.Info)
+	header.Outcome, header.Info = storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK, toProtoInfo(&res.Info)
 	if err := sendHeader(); err != nil {
 		return err
 	}
 	return streamBody(body, res.Info.Size, c.err, func(chunk []byte) error {
-		return stream.Send(&storagev0.GetManyResponse{Kind: &storagev0.GetManyResponse_Data{Data: chunk}})
+		return stream.Send(&storagev1.GetManyResponse{Kind: &storagev1.GetManyResponse_Data{Data: chunk}})
 	})
 }
 
@@ -234,7 +234,7 @@ func streamBody(body io.Reader, expect int64, classify func(error) error, send f
 	}
 }
 
-func (s *Server) Delete(ctx context.Context, req *storagev0.DeleteRequest) (*storagev0.DeleteResult, error) {
+func (s *Server) Delete(ctx context.Context, req *storagev1.DeleteRequest) (*storagev1.DeleteResult, error) {
 	c, err := s.backendFor(ctx, nil, req.GetScope())
 	if err != nil {
 		return nil, toStatus(err)
@@ -248,10 +248,10 @@ func (s *Server) Delete(ctx context.Context, req *storagev0.DeleteRequest) (*sto
 		return nil, toStatus(c.err(err))
 	}
 	s.hub.Publish(events.Event{Key: req.GetKey(), Op: events.OpDelete, VersionID: req.GetVersionId()})
-	return &storagev0.DeleteResult{}, nil
+	return &storagev1.DeleteResult{}, nil
 }
 
-func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyRequest) (*storagev0.DeleteManyResult, error) {
+func (s *Server) DeleteMany(ctx context.Context, req *storagev1.DeleteManyRequest) (*storagev1.DeleteManyResult, error) {
 	c, err := s.backendFor(ctx, nil, req.GetScope())
 	if err != nil {
 		return nil, toStatus(err)
@@ -261,19 +261,19 @@ func (s *Server) DeleteMany(ctx context.Context, req *storagev0.DeleteManyReques
 	if err != nil && len(entries) == 0 {
 		return nil, toStatus(c.err(err))
 	}
-	out := &storagev0.DeleteManyResult{Entries: make([]*storagev0.DeleteEntry, 0, len(entries))}
+	out := &storagev1.DeleteManyResult{Entries: make([]*storagev1.DeleteEntry, 0, len(entries))}
 	for _, e := range entries {
 		if e.Error == "" {
 			s.hub.Publish(events.Event{Key: e.Key, Op: events.OpDelete})
 		}
-		out.Entries = append(out.Entries, &storagev0.DeleteEntry{Key: e.Key, Error: e.Error})
+		out.Entries = append(out.Entries, &storagev1.DeleteEntry{Key: e.Key, Error: e.Error})
 	}
 	return out, nil
 }
 
 // List enumerates a prefix. A bound List returns at most maxBoundListLimit
 // objects per page.
-func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storagev0.ListResult, error) {
+func (s *Server) List(ctx context.Context, req *storagev1.ListRequest) (*storagev1.ListResult, error) {
 	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
 	defer cancel()
 	c, err := s.backendFor(ctx, req.GetBinding(), req.GetScope())
@@ -301,10 +301,10 @@ func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storage
 			fmt.Sprintf("the store returned %d entries for a page of at most %d; refusing the over-long listing", n, limit)).
 			WithReason(serr.ReasonListingTooLong, map[string]string{"entries": fmt.Sprint(n), "max_entries": fmt.Sprint(limit)}))
 	}
-	out := &storagev0.ListResult{
+	out := &storagev1.ListResult{
 		CommonPrefixes: res.CommonPrefixes,
 		NextPageToken:  res.NextPageToken,
-		Objects:        make([]*storagev0.ObjectInfo, 0, len(res.Objects)),
+		Objects:        make([]*storagev1.ObjectInfo, 0, len(res.Objects)),
 	}
 	for i := range res.Objects {
 		out.Objects = append(out.Objects, toProtoInfo(&res.Objects[i]))
@@ -312,7 +312,7 @@ func (s *Server) List(ctx context.Context, req *storagev0.ListRequest) (*storage
 	return out, nil
 }
 
-func (s *Server) Copy(ctx context.Context, req *storagev0.CopyRequest) (*storagev0.CopyResult, error) {
+func (s *Server) Copy(ctx context.Context, req *storagev1.CopyRequest) (*storagev1.CopyResult, error) {
 	c, err := s.backendFor(ctx, nil, req.GetScope())
 	if err != nil {
 		return nil, toStatus(err)
@@ -325,10 +325,10 @@ func (s *Server) Copy(ctx context.Context, req *storagev0.CopyRequest) (*storage
 		return nil, toStatus(c.err(err))
 	}
 	s.hub.Publish(events.Event{Key: req.GetDestKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
-	return &storagev0.CopyResult{Etag: res.ETag, VersionId: res.VersionID}, nil
+	return &storagev1.CopyResult{Etag: res.ETag, VersionId: res.VersionID}, nil
 }
 
-func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*storagev0.PresignResult, error) {
+func (s *Server) Presign(ctx context.Context, req *storagev1.PresignRequest) (*storagev1.PresignResult, error) {
 	if req.GetScope() != nil {
 		if err := s.checkScopedPresign(req); err != nil {
 			return nil, toStatus(err)
@@ -347,7 +347,7 @@ func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*s
 	if !c.expires.IsZero() && c.expires.Before(res.ExpiresAt) {
 		res.ExpiresAt = c.expires
 	}
-	return &storagev0.PresignResult{
+	return &storagev1.PresignResult{
 		Method:          presignMethodToProto(res.Method),
 		Url:             res.URL,
 		Headers:         res.Headers,
@@ -363,7 +363,7 @@ func (s *Server) Presign(ctx context.Context, req *storagev0.PresignRequest) (*s
 //
 // Events name keys across every scope and nothing confines a stream to one,
 // so where scoped sessions are required Watch is refused.
-func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStorage_WatchServer) error {
+func (s *Server) Watch(req *storagev1.WatchRequest, stream storagev1.ObjectStorage_WatchServer) error {
 	if err := s.ownCredentialAllowed(); err != nil {
 		return toStatus(err)
 	}
@@ -396,7 +396,7 @@ func (s *Server) Watch(req *storagev0.WatchRequest, stream storagev0.ObjectStora
 // configuration, not of whether it is currently reachable — that is Ready. For
 // a binding it reports the bound kind and the caps a bound call runs under;
 // qualifying the bound endpoint resolves its name, and nothing is dialed.
-func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRequest) (*storagev0.BackendCapabilities, error) {
+func (s *Server) Capabilities(ctx context.Context, req *storagev1.CapabilitiesRequest) (*storagev1.BackendCapabilities, error) {
 	ctx, cancel := boundCall(ctx, req.GetBinding(), boundOperationTimeout)
 	defer cancel()
 	var c *call
@@ -413,7 +413,7 @@ func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRe
 	if req.GetBinding() != nil {
 		// A bound call reaches only Stat, Get, GetMany and List, so only the read
 		// surface is reported: no write, presign or native verb is reachable.
-		return &storagev0.BackendCapabilities{
+		return &storagev1.BackendCapabilities{
 			Backend:         caps.Backend,
 			Versions:        caps.Versions,
 			MaxObjectBytes:  maxBoundObjectBytes,
@@ -438,9 +438,9 @@ func (s *Server) Capabilities(ctx context.Context, req *storagev0.CapabilitiesRe
 // SOS_PROBE_TIMEOUT could not reach. checked_at_unix_ms carries how fresh the
 // answer is, so a caller can judge staleness rather than be told a stored
 // verdict was measured now.
-func (s *Server) Ready(ctx context.Context, _ *storagev0.ReadyRequest) (*storagev0.Readiness, error) {
+func (s *Server) Ready(ctx context.Context, _ *storagev1.ReadyRequest) (*storagev1.Readiness, error) {
 	v := s.readiness.Verdict()
-	res := &storagev0.Readiness{Backend: s.be.Name(), Ready: v.Ready}
+	res := &storagev1.Readiness{Backend: s.be.Name(), Ready: v.Ready}
 	if v.CheckedAt.IsZero() {
 		// The monitor probes once at startup, so this is the narrow window
 		// before that first probe lands. Reporting it as unready with a stated
@@ -457,7 +457,7 @@ func (s *Server) Ready(ctx context.Context, _ *storagev0.ReadyRequest) (*storage
 	return res, nil
 }
 
-func (s *Server) Native(ctx context.Context, req *storagev0.NativeRequest) (*storagev0.NativeResult, error) {
+func (s *Server) Native(ctx context.Context, req *storagev1.NativeRequest) (*storagev1.NativeResult, error) {
 	if err := s.ownCredentialAllowed(); err != nil {
 		return nil, toStatus(err)
 	}
@@ -465,7 +465,7 @@ func (s *Server) Native(ctx context.Context, req *storagev0.NativeRequest) (*sto
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	return &storagev0.NativeResult{Values: values}, nil
+	return &storagev1.NativeResult{Values: values}, nil
 }
 
 func serrWrapInternal(err error) error {

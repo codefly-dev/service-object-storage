@@ -17,7 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/probetest"
@@ -27,12 +27,12 @@ import (
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/minio"
 )
 
-func serve(t *testing.T, be backend.Backend) storagev0.ObjectStorageClient {
+func serve(t *testing.T, be backend.Backend) storagev1.ObjectStorageClient {
 	t.Helper()
 	hub := events.NewHub()
 	listener := bufconn.Listen(1 << 20)
 	grpcServer := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(grpcServer, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev1.RegisterObjectStorageServer(grpcServer, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = grpcServer.Serve(listener) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
@@ -43,11 +43,11 @@ func serve(t *testing.T, be backend.Backend) storagev0.ObjectStorageClient {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close(); grpcServer.Stop(); hub.Close(); _ = be.Close() })
-	return storagev0.NewObjectStorageClient(conn)
+	return storagev1.NewObjectStorageClient(conn)
 }
 
 // Memory is a gateway over the in-memory backend.
-func Memory(t *testing.T) storagev0.ObjectStorageClient {
+func Memory(t *testing.T) storagev1.ObjectStorageClient {
 	t.Helper()
 	be, err := backend.Open(context.Background(), backend.Config{Kind: "mem", Bucket: "test"})
 	if err != nil {
@@ -76,7 +76,7 @@ func (m MinIO) Raw(t *testing.T, accessKey, secretKey, sessionToken string) *min
 
 // LiveMinIO is a gateway over the MinIO the environment names, confined to a
 // prefix of this test's own, or a skip when the environment names none.
-func LiveMinIO(t *testing.T) (storagev0.ObjectStorageClient, MinIO) {
+func LiveMinIO(t *testing.T) (storagev1.ObjectStorageClient, MinIO) {
 	t.Helper()
 	store := MinIO{}
 	for name, into := range map[string]*string{

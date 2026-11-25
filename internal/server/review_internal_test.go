@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 )
 
@@ -37,9 +37,9 @@ func TestReviewGCSCredentialRestrictions(t *testing.T) {
 		{"token_exchange", serviceAccountKey(t, srv.URL), codes.PermissionDenied, serr.ReasonDestinationRefused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b := &storagev0.Binding{Kind: "gcs", Bucket: "tenant", Credential: &storagev0.Credential{
-				Kind: &storagev0.Credential_ServiceAccountKey{ServiceAccountKey: tc.key}}}
-			_, err := (&Server{}).Stat(context.Background(), &storagev0.StatRequest{Binding: b, Key: "key"})
+			b := &storagev1.Binding{Kind: "gcs", Bucket: "tenant", Credential: &storagev1.Credential{
+				Kind: &storagev1.Credential_ServiceAccountKey{ServiceAccountKey: tc.key}}}
+			_, err := (&Server{}).Stat(context.Background(), &storagev1.StatRequest{Binding: b, Key: "key"})
 			if status.Code(err) != tc.code || reached.Load() != 0 {
 				t.Fatalf("status %v (want %v), listener reached %d times: %v", status.Code(err), tc.code, reached.Load(), err)
 			}

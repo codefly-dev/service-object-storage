@@ -1,6 +1,6 @@
 # service-object-storage
 
-A gRPC gateway serving a uniform object-storage API (`codefly/storage/v0`) over
+A gRPC gateway serving a uniform object-storage API (`codefly/storage/v1`) over
 S3 / GCS / Azure Blob / MinIO, plus the codefly service agent
 (`codefly.dev/object-storage`) that runs it. Clients speak the gRPC contract and
 never link a cloud SDK.
@@ -21,7 +21,7 @@ and the local/deployed profiles. This file is how to work in the repo.
 
 ## What this repo owns
 
-- The contract and its stubs: `proto/codefly/storage/v0`, `gen/`.
+- The contract and its stubs: `proto/codefly/storage/v1`, `gen/`.
 - The gateway server: `cmd/service-object-storage` and `internal/**` — the
   backends, the per-replica Watch event hub, auth configuration, the readiness probe,
   and the normalization of backend errors to gRPC codes.

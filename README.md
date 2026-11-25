@@ -105,8 +105,8 @@ is refused: one session is one scope.
 Without the library, set `scope` on the request:
 
 ```go
-client.Stat(ctx, &storagev0.StatRequest{Key: key, Scope: &storagev0.Scope{
-	Base: "files", Partition: tenant, Scope: installation, Mode: storagev0.ScopeMode_SCOPE_MODE_READ,
+client.Stat(ctx, &storagev1.StatRequest{Key: key, Scope: &storagev1.Scope{
+	Base: "files", Partition: tenant, Scope: installation, Mode: storagev1.ScopeMode_SCOPE_MODE_READ,
 }})
 ```
 
@@ -305,7 +305,7 @@ names the real backend. Because the app only ever speaks the uniform API, you
 **test on MinIO and ship on S3**; the MinIO↔S3 gap is absorbed and tested once,
 here, not in every app.
 
-## The API (`codefly/storage/v0`)
+## The API (`codefly/storage/v1`)
 
 The honest intersection across all four backends (the surface OpenDAL /
 `gocloud.dev/blob` / Rust `object_store` converged on). Anything backend-specific
@@ -653,10 +653,10 @@ adds load of its own:
   becomes one LIST per request and the resulting throttling degrades real
   traffic. The agent's `Start` waits on this before reporting the service up.
 - **gRPC health service** (`grpc.health.v1`) — the same probe publishes the
-  serving status of `codefly.storage.v0.ObjectStorage`.
+  serving status of `codefly.storage.v1.ObjectStorage`.
 
 **Which Kubernetes probe checks what, and why.** The **startup** probe checks
-`codefly.storage.v0.ObjectStorage`, so a replica must prove real access to the
+`codefly.storage.v1.ObjectStorage`, so a replica must prove real access to the
 bucket before it joins rotation — a bad bucket or credential stalls the rollout
 while the previous pods keep serving. **Readiness and liveness check the overall
 (`""`) service**, which stays `SERVING` while the process serves.
@@ -768,7 +768,7 @@ general authentication design.
 This repo ships a **codefly service agent** (`codefly.dev/object-storage`) so the
 gateway runs as a first-class codefly service — the way `codefly.dev/postgres`
 does. A consumer declares it as a `service-dependency` and dials
-the `codefly/storage/v0` gRPC endpoint; it never links a cloud SDK.
+the `codefly/storage/v1` gRPC endpoint; it never links a cloud SDK.
 
 - **Local / test**: the agent's Runtime starts a **MinIO** container with persistent
   custody (explicit bootstrap creates the initial bucket), and runs the gateway container (`SOS_BACKEND=minio`) pointed at it —
@@ -982,7 +982,7 @@ docker rm -f minio
 ## Layout
 
 ```
-proto/codefly/storage/v0/    the uniform API
+proto/codefly/storage/v1/    the uniform API
 gen/                         generated gRPC stubs
 internal/backend/            Backend interface + s3, gcs, azure, minio, mem
 internal/events/             in-process write-event hub behind Watch

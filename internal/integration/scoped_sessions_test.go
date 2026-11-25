@@ -43,7 +43,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/probetest"
@@ -147,7 +147,7 @@ func asCaller(name string) context.Context {
 }
 
 type scopedStack struct {
-	client          storagev0.ObjectStorageClient
+	client          storagev1.ObjectStorageClient
 	wire            *wire
 	clock           *testClock
 	manager         *sessions.Manager
@@ -198,14 +198,14 @@ func newScopedStack(t *testing.T, mode server.ScopedMode, prefix string, presign
 	srv := server.New(own, hub, probetest.Monitor(t, own)).WithScoped(server.Scoped{Mode: mode, Manager: stack.manager, Presign: presign})
 	listener := bufconn.Listen(1 << 20)
 	grpcServer := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(grpcServer, srv)
+	storagev1.RegisterObjectStorageServer(grpcServer, srv)
 	go func() { _ = grpcServer.Serve(listener) }()
 	conn, err := grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close(); grpcServer.Stop(); hub.Close(); _ = own.Close() })
-	stack.client = storagev0.NewObjectStorageClient(conn)
+	stack.client = storagev1.NewObjectStorageClient(conn)
 	return stack
 }
 
@@ -231,14 +231,14 @@ func (s *scopedStack) stored(t *testing.T, key string) (string, bool) {
 	return string(body), true
 }
 
-func in(tenant, installation string, mode storagev0.ScopeMode) *storagev0.Scope {
-	return &storagev0.Scope{Base: scopedBase, Partition: tenant, Scope: installation, Mode: mode}
+func in(tenant, installation string, mode storagev1.ScopeMode) *storagev1.Scope {
+	return &storagev1.Scope{Base: scopedBase, Partition: tenant, Scope: installation, Mode: mode}
 }
 
 const (
-	readMode        = storagev0.ScopeMode_SCOPE_MODE_READ
-	ingestMode      = storagev0.ScopeMode_SCOPE_MODE_INGEST
-	maintenanceMode = storagev0.ScopeMode_SCOPE_MODE_MAINTENANCE
+	readMode        = storagev1.ScopeMode_SCOPE_MODE_READ
+	ingestMode      = storagev1.ScopeMode_SCOPE_MODE_INGEST
+	maintenanceMode = storagev1.ScopeMode_SCOPE_MODE_MAINTENANCE
 )
 
 func reasonOf(err error) (string, map[string]string) {
@@ -255,7 +255,7 @@ func reasonOf(err error) (string, map[string]string) {
 // AccessDenied carried to the caller. A gateway-side check would leave no 403
 // on the wire, and a call made with the gateway's own key would not be
 // refused at all.
-func (s *scopedStack) refusedByMinIO(t *testing.T, what string, mode storagev0.ScopeMode, call func() error) {
+func (s *scopedStack) refusedByMinIO(t *testing.T, what string, mode storagev1.ScopeMode, call func() error) {
 	t.Helper()
 	mark := s.wire.mark()
 	err := call()
@@ -276,7 +276,7 @@ func (s *scopedStack) refusedByMinIO(t *testing.T, what string, mode storagev0.S
 	require.True(t, denied, "%s: MinIO answered no 403: %+v", what, exchanges)
 }
 
-func drain(stream storagev0.ObjectStorage_GetClient, err error) ([]byte, error) {
+func drain(stream storagev1.ObjectStorage_GetClient, err error) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -293,19 +293,19 @@ func drain(stream storagev0.ObjectStorage_GetClient, err error) ([]byte, error) 
 	}
 }
 
-func putScoped(c storagev0.ObjectStorageClient, with *storagev0.Scope, key string, body []byte, declared bool) error {
+func putScoped(c storagev1.ObjectStorageClient, with *storagev1.Scope, key string, body []byte, declared bool) error {
 	stream, err := c.Put(context.Background())
 	if err != nil {
 		return err
 	}
-	header := &storagev0.PutHeader{Key: key, Scope: with, TotalSize: -1}
+	header := &storagev1.PutHeader{Key: key, Scope: with, TotalSize: -1}
 	if declared {
 		header.TotalSize = int64(len(body))
 	}
-	if err := stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: header}}); err == nil {
+	if err := stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: header}}); err == nil {
 		for offset := 0; offset < len(body); offset += 1 << 20 {
 			end := min(offset+1<<20, len(body))
-			if stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: body[offset:end]}}) != nil {
+			if stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: body[offset:end]}}) != nil {
 				break
 			}
 		}
@@ -401,18 +401,18 @@ func TestMinIOScopedReadSessionIsConfinedToItsTenantAndInstallationByMinIO(t *te
 	// Inside the scope.
 	mark := stack.wire.mark()
 	for _, key := range []string{l.own, l.second, l.note} {
-		header, err := c.Stat(ctx, &storagev0.StatRequest{Key: key, Scope: scope})
+		header, err := c.Stat(ctx, &storagev1.StatRequest{Key: key, Scope: scope})
 		require.NoError(t, err, "stat %s", key)
 		require.Equal(t, int64(len(l.bodies[key])), header.GetInfo().GetSize())
 		require.Equal(t, key, header.GetInfo().GetKey())
-		body, err := drain(c.Get(ctx, &storagev0.GetRequest{Key: key, Scope: scope}))
+		body, err := drain(c.Get(ctx, &storagev1.GetRequest{Key: key, Scope: scope}))
 		require.NoError(t, err, "get %s", key)
 		require.Equal(t, l.bodies[key], string(body))
-		part, err := drain(c.Get(ctx, &storagev0.GetRequest{Key: key, Scope: scope, Range: &storagev0.ByteRange{Offset: 1, Length: 2}}))
+		part, err := drain(c.Get(ctx, &storagev1.GetRequest{Key: key, Scope: scope, Range: &storagev1.ByteRange{Offset: 1, Length: 2}}))
 		require.NoError(t, err, "range %s", key)
 		require.Equal(t, l.bodies[key][1:3], string(part))
 	}
-	listed, err := c.List(ctx, &storagev0.ListRequest{Prefix: l.scopePrefix, Scope: scope})
+	listed, err := c.List(ctx, &storagev1.ListRequest{Prefix: l.scopePrefix, Scope: scope})
 	require.NoError(t, err)
 	var names []string
 	for _, object := range listed.GetObjects() {
@@ -430,21 +430,21 @@ func TestMinIOScopedReadSessionIsConfinedToItsTenantAndInstallationByMinIO(t *te
 	// Outside it: MinIO refuses each verb.
 	for what, key := range l.outside() {
 		stack.refusedByMinIO(t, "stat of "+what, readMode, func() error {
-			_, err := c.Stat(ctx, &storagev0.StatRequest{Key: key, Scope: scope})
+			_, err := c.Stat(ctx, &storagev1.StatRequest{Key: key, Scope: scope})
 			return err
 		})
 		stack.refusedByMinIO(t, "get of "+what, readMode, func() error {
-			body, err := drain(c.Get(ctx, &storagev0.GetRequest{Key: key, Scope: scope}))
+			body, err := drain(c.Get(ctx, &storagev1.GetRequest{Key: key, Scope: scope}))
 			require.Empty(t, body, "get of %s delivered bytes", what)
 			return err
 		})
 		stack.refusedByMinIO(t, "range of "+what, readMode, func() error {
-			body, err := drain(c.Get(ctx, &storagev0.GetRequest{Key: key, Scope: scope, Range: &storagev0.ByteRange{Offset: 0, Length: 1}}))
+			body, err := drain(c.Get(ctx, &storagev1.GetRequest{Key: key, Scope: scope, Range: &storagev1.ByteRange{Offset: 0, Length: 1}}))
 			require.Empty(t, body, "range of %s delivered bytes", what)
 			return err
 		})
 		stack.refusedByMinIO(t, "get-many of "+what, readMode, func() error {
-			stream, err := c.GetMany(ctx, &storagev0.GetManyRequest{Items: []*storagev0.GetManyItem{{Key: key}}, Scope: scope})
+			stream, err := c.GetMany(ctx, &storagev1.GetManyRequest{Items: []*storagev1.GetManyItem{{Key: key}}, Scope: scope})
 			require.NoError(t, err)
 			_, err = stream.Recv()
 			return err
@@ -464,7 +464,7 @@ func TestMinIOScopedReadSessionIsConfinedToItsTenantAndInstallationByMinIO(t *te
 	} {
 		for _, delimiter := range []string{"", "/"} {
 			stack.refusedByMinIO(t, "list of "+what, readMode, func() error {
-				page, err := c.List(ctx, &storagev0.ListRequest{Prefix: prefix, Delimiter: delimiter, Scope: scope})
+				page, err := c.List(ctx, &storagev1.ListRequest{Prefix: prefix, Delimiter: delimiter, Scope: scope})
 				require.Empty(t, page.GetObjects(), "list of %s enumerated objects", what)
 				require.Empty(t, page.GetCommonPrefixes(), "list of %s enumerated prefixes", what)
 				return err
@@ -474,16 +474,16 @@ func TestMinIOScopedReadSessionIsConfinedToItsTenantAndInstallationByMinIO(t *te
 
 	// The control: each refused key is served to the scope that holds it, on
 	// the same path, so the refusals above are the scope's and not the key's.
-	body, err := drain(c.Get(ctx, &storagev0.GetRequest{Key: l.inSibling, Scope: in(l.tenant, l.sibling, readMode)}))
+	body, err := drain(c.Get(ctx, &storagev1.GetRequest{Key: l.inSibling, Scope: in(l.tenant, l.sibling, readMode)}))
 	require.NoError(t, err)
 	require.Equal(t, l.bodies[l.inSibling], string(body))
-	body, err = drain(c.Get(ctx, &storagev0.GetRequest{Key: l.inOtherTenant, Scope: in(l.otherTenant, l.installation, readMode)}))
+	body, err = drain(c.Get(ctx, &storagev1.GetRequest{Key: l.inOtherTenant, Scope: in(l.otherTenant, l.installation, readMode)}))
 	require.NoError(t, err)
 	require.Equal(t, l.bodies[l.inOtherTenant], string(body))
 	// And the gateway's own credential, which a scoped call never uses, would
 	// have read them all: without the session nothing is confined.
 	for _, key := range l.outside() {
-		_, err := c.Stat(ctx, &storagev0.StatRequest{Key: key})
+		_, err := c.Stat(ctx, &storagev1.StatRequest{Key: key})
 		require.NoError(t, err)
 	}
 }
@@ -509,16 +509,16 @@ func TestMinIOScopedReadSessionCannotWrite(t *testing.T) {
 			return putScoped(c, scope, key, []byte("overwritten"), false)
 		})
 		stack.refusedByMinIO(t, "delete of "+what, readMode, func() error {
-			_, err := c.Delete(ctx, &storagev0.DeleteRequest{Key: key, Scope: scope})
+			_, err := c.Delete(ctx, &storagev1.DeleteRequest{Key: key, Scope: scope})
 			return err
 		})
 		stack.refusedByMinIO(t, "copy of its own content over "+what, readMode, func() error {
-			_, err := c.Copy(ctx, &storagev0.CopyRequest{SourceKey: l.second, DestKey: key, Scope: scope})
+			_, err := c.Copy(ctx, &storagev1.CopyRequest{SourceKey: l.second, DestKey: key, Scope: scope})
 			return err
 		})
 	}
 	// A batch delete answers per key; MinIO refuses each one.
-	result, err := c.DeleteMany(ctx, &storagev0.DeleteManyRequest{Keys: []string{l.own, l.inSibling}, Scope: scope})
+	result, err := c.DeleteMany(ctx, &storagev1.DeleteManyRequest{Keys: []string{l.own, l.inSibling}, Scope: scope})
 	require.NoError(t, err)
 	require.Len(t, result.GetEntries(), 2)
 	for _, entry := range result.GetEntries() {
@@ -564,26 +564,26 @@ func TestMinIOScopedIngestSessionWritesAndCannotReadOrDelete(t *testing.T) {
 	// It reads nothing, not even what it just wrote.
 	for what, key := range map[string]string{"what it just wrote": staged, "content of its own scope": l.own, "a sibling's content": l.inSibling} {
 		stack.refusedByMinIO(t, "stat of "+what, ingestMode, func() error {
-			_, err := c.Stat(ctx, &storagev0.StatRequest{Key: key, Scope: scope})
+			_, err := c.Stat(ctx, &storagev1.StatRequest{Key: key, Scope: scope})
 			return err
 		})
 		stack.refusedByMinIO(t, "get of "+what, ingestMode, func() error {
-			body, err := drain(c.Get(ctx, &storagev0.GetRequest{Key: key, Scope: scope}))
+			body, err := drain(c.Get(ctx, &storagev1.GetRequest{Key: key, Scope: scope}))
 			require.Empty(t, body)
 			return err
 		})
 		stack.refusedByMinIO(t, "delete of "+what, ingestMode, func() error {
-			_, err := c.Delete(ctx, &storagev0.DeleteRequest{Key: key, Scope: scope})
+			_, err := c.Delete(ctx, &storagev1.DeleteRequest{Key: key, Scope: scope})
 			return err
 		})
 		stack.refusedByMinIO(t, "copy from "+what, ingestMode, func() error {
-			_, err := c.Copy(ctx, &storagev0.CopyRequest{SourceKey: key, DestKey: staged + "x", Scope: scope})
+			_, err := c.Copy(ctx, &storagev1.CopyRequest{SourceKey: key, DestKey: staged + "x", Scope: scope})
 			return err
 		})
 	}
 	for what, prefix := range map[string]string{"its own scope": l.scopePrefix, "the sibling": l.siblingPrefix, "the gateway's whole prefix": ""} {
 		stack.refusedByMinIO(t, "list of "+what, ingestMode, func() error {
-			page, err := c.List(ctx, &storagev0.ListRequest{Prefix: prefix, Scope: scope})
+			page, err := c.List(ctx, &storagev1.ListRequest{Prefix: prefix, Scope: scope})
 			require.Empty(t, page.GetObjects())
 			return err
 		})
@@ -617,23 +617,23 @@ func TestMinIOScopedMaintenanceSessionCopiesAndDeletesOnlyInsideItsScope(t *test
 	scope := in(l.tenant, l.installation, maintenanceMode)
 	promoted := l.scopePrefix + "_sha256/" + strings.Repeat("c", 64)
 
-	_, err := c.Copy(ctx, &storagev0.CopyRequest{SourceKey: l.note, DestKey: promoted, Scope: scope})
+	_, err := c.Copy(ctx, &storagev1.CopyRequest{SourceKey: l.note, DestKey: promoted, Scope: scope})
 	require.NoError(t, err)
 	body, found := stack.stored(t, promoted)
 	require.True(t, found)
 	require.Equal(t, "own", body)
-	_, err = c.Copy(ctx, &storagev0.CopyRequest{SourceKey: l.note, DestKey: promoted, IfNoneMatch: "*", Scope: scope})
+	_, err = c.Copy(ctx, &storagev1.CopyRequest{SourceKey: l.note, DestKey: promoted, IfNoneMatch: "*", Scope: scope})
 	require.Equal(t, codes.AlreadyExists, status.Code(err), "copy-if-absent stats its destination under the same session")
-	_, err = c.Delete(ctx, &storagev0.DeleteRequest{Key: promoted, Scope: scope})
+	_, err = c.Delete(ctx, &storagev1.DeleteRequest{Key: promoted, Scope: scope})
 	require.NoError(t, err)
 	_, found = stack.stored(t, promoted)
 	require.False(t, found)
 	batch := []string{l.scopePrefix + "service.documents/batch-1", l.scopePrefix + "service.documents/batch-2"}
 	for _, key := range batch {
-		_, err = c.Copy(ctx, &storagev0.CopyRequest{SourceKey: l.note, DestKey: key, Scope: scope})
+		_, err = c.Copy(ctx, &storagev1.CopyRequest{SourceKey: l.note, DestKey: key, Scope: scope})
 		require.NoError(t, err)
 	}
-	result, err := c.DeleteMany(ctx, &storagev0.DeleteManyRequest{Keys: append(batch, l.inSibling), Scope: scope})
+	result, err := c.DeleteMany(ctx, &storagev1.DeleteManyRequest{Keys: append(batch, l.inSibling), Scope: scope})
 	require.NoError(t, err)
 	require.Empty(t, result.GetEntries()[0].GetError())
 	require.Empty(t, result.GetEntries()[1].GetError())
@@ -641,15 +641,15 @@ func TestMinIOScopedMaintenanceSessionCopiesAndDeletesOnlyInsideItsScope(t *test
 
 	for what, key := range l.outside() {
 		stack.refusedByMinIO(t, "copy from "+what+" into its own scope", maintenanceMode, func() error {
-			_, err := c.Copy(ctx, &storagev0.CopyRequest{SourceKey: key, DestKey: promoted, Scope: scope})
+			_, err := c.Copy(ctx, &storagev1.CopyRequest{SourceKey: key, DestKey: promoted, Scope: scope})
 			return err
 		})
 		stack.refusedByMinIO(t, "copy of its own content over "+what, maintenanceMode, func() error {
-			_, err := c.Copy(ctx, &storagev0.CopyRequest{SourceKey: l.own, DestKey: key, Scope: scope})
+			_, err := c.Copy(ctx, &storagev1.CopyRequest{SourceKey: l.own, DestKey: key, Scope: scope})
 			return err
 		})
 		stack.refusedByMinIO(t, "delete of "+what, maintenanceMode, func() error {
-			_, err := c.Delete(ctx, &storagev0.DeleteRequest{Key: key, Scope: scope})
+			_, err := c.Delete(ctx, &storagev1.DeleteRequest{Key: key, Scope: scope})
 			return err
 		})
 	}
@@ -667,8 +667,8 @@ func TestMinIOScopedSessionRefusesAnOverlargePolicy(t *testing.T) {
 	ctx := context.Background()
 	tenant, installation := strings.Repeat("t", 240), strings.Repeat("i", 240)
 	mark := stack.wire.mark()
-	for _, mode := range []storagev0.ScopeMode{readMode, maintenanceMode} {
-		_, err := stack.client.Stat(ctx, &storagev0.StatRequest{Key: "any", Scope: in(tenant, installation, mode)})
+	for _, mode := range []storagev1.ScopeMode{readMode, maintenanceMode} {
+		_, err := stack.client.Stat(ctx, &storagev1.StatRequest{Key: "any", Scope: in(tenant, installation, mode)})
 		require.Equal(t, codes.FailedPrecondition, status.Code(err), "%v", err)
 		reason, _ := reasonOf(err)
 		require.Equal(t, "SCOPE_POLICY_TOO_LARGE", reason)
@@ -677,11 +677,11 @@ func TestMinIOScopedSessionRefusesAnOverlargePolicy(t *testing.T) {
 	require.Zero(t, stack.manager.Held())
 
 	fits := newScopedStack(t, server.ScopedAllow, "", false)
-	_, err := fits.client.Stat(ctx, &storagev0.StatRequest{Key: "any", Scope: in(tenant, installation, readMode)})
+	_, err := fits.client.Stat(ctx, &storagev1.StatRequest{Key: "any", Scope: in(tenant, installation, readMode)})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "served, and MinIO answered for a key outside the scope: %v", err)
 	codec, _ := objectkey.New(scopedBase)
 	prefix, _ := codec.ScopePrefix(tenant, installation)
-	listed, err := fits.client.List(ctx, &storagev0.ListRequest{Prefix: prefix, Scope: in(tenant, installation, readMode)})
+	listed, err := fits.client.List(ctx, &storagev1.ListRequest{Prefix: prefix, Scope: in(tenant, installation, readMode)})
 	require.NoError(t, err)
 	require.Empty(t, listed.GetObjects())
 }
@@ -697,7 +697,7 @@ func TestMinIOScopedSessionIsReissuedBeforeItExpires(t *testing.T) {
 	scope := in(l.tenant, l.installation, readMode)
 	keyOf := func() string {
 		mark := stack.wire.mark()
-		_, err := stack.client.Stat(ctx, &storagev0.StatRequest{Key: l.own, Scope: scope})
+		_, err := stack.client.Stat(ctx, &storagev1.StatRequest{Key: l.own, Scope: scope})
 		require.NoError(t, err)
 		exchanges := stack.wire.since(mark)
 		require.Len(t, exchanges, 1)
@@ -715,7 +715,7 @@ func TestMinIOScopedSessionIsReissuedBeforeItExpires(t *testing.T) {
 	require.Equal(t, 1, stack.manager.Held())
 	// The new session is confined as the first was.
 	stack.refusedByMinIO(t, "stat of a sibling under the re-issued session", readMode, func() error {
-		_, err := stack.client.Stat(ctx, &storagev0.StatRequest{Key: l.inSibling, Scope: scope})
+		_, err := stack.client.Stat(ctx, &storagev1.StatRequest{Key: l.inSibling, Scope: scope})
 		return err
 	})
 
@@ -748,7 +748,7 @@ func TestMinIOScopedSessionExpiresAtMinIO(t *testing.T) {
 	require.NoError(t, err)
 	scope := in(l.tenant, l.installation, readMode)
 	mark := stack.wire.mark()
-	_, err = stack.client.Stat(ctx, &storagev0.StatRequest{Key: l.own, Scope: scope})
+	_, err = stack.client.Stat(ctx, &storagev1.StatRequest{Key: l.own, Scope: scope})
 	require.NoError(t, err)
 	first := stack.wire.since(mark)[0].accessKey
 
@@ -758,7 +758,7 @@ func TestMinIOScopedSessionExpiresAtMinIO(t *testing.T) {
 	require.Error(t, err, "MinIO still honours a session past its expiry")
 	require.Equal(t, http.StatusForbidden, miniogo.ToErrorResponse(err).StatusCode, "%v", err)
 	mark = stack.wire.mark()
-	_, err = stack.client.Stat(ctx, &storagev0.StatRequest{Key: l.own, Scope: scope})
+	_, err = stack.client.Stat(ctx, &storagev1.StatRequest{Key: l.own, Scope: scope})
 	require.NoError(t, err, "the gateway did not replace its expired session")
 	require.NotEqual(t, first, stack.wire.since(mark)[0].accessKey)
 }
@@ -770,7 +770,7 @@ func TestMinIOScopedSessionCacheNeverCrossesCallers(t *testing.T) {
 	l := writeLayout(t, stack)
 	type request struct {
 		caller string
-		scope  *storagev0.Scope
+		scope  *storagev1.Scope
 		key    string
 	}
 	requests := []request{
@@ -784,7 +784,7 @@ func TestMinIOScopedSessionCacheNeverCrossesCallers(t *testing.T) {
 	for round := 0; round < 3; round++ {
 		for index, request := range requests {
 			mark := stack.wire.mark()
-			_, err := stack.client.Stat(asCaller(request.caller), &storagev0.StatRequest{Key: request.key, Scope: request.scope})
+			_, err := stack.client.Stat(asCaller(request.caller), &storagev1.StatRequest{Key: request.key, Scope: request.scope})
 			require.NoError(t, err)
 			exchanges := stack.wire.since(mark)
 			require.Len(t, exchanges, 1)
@@ -802,7 +802,7 @@ func TestMinIOScopedSessionCacheNeverCrossesCallers(t *testing.T) {
 	// tenant it named, which MinIO holds to that tenant: beta's session for
 	// tenant A is refused alpha's object in tenant B.
 	stack.refusedByMinIO(t, "another tenant's object under beta's session", readMode, func() error {
-		_, err := stack.client.Stat(asCaller("beta"), &storagev0.StatRequest{Key: l.inOtherTenant, Scope: in(l.tenant, l.installation, readMode)})
+		_, err := stack.client.Stat(asCaller("beta"), &storagev1.StatRequest{Key: l.inOtherTenant, Scope: in(l.tenant, l.installation, readMode)})
 		return err
 	})
 }
@@ -879,15 +879,15 @@ func TestMinIOStoreWithGatewaySessionsOnAGatewayThatRequiresThem(t *testing.T) {
 	key, err := codec.Key(objectkey.Key{Partition: tenant, Scope: "installation-a", Slot: objectkey.Content(), Name: written.Ref.Name})
 	require.NoError(t, err)
 	stack.refusedByMinIO(t, "a forged key under the sibling's scope", readMode, func() error {
-		_, err := drain(stack.client.Get(ctx, &storagev0.GetRequest{Key: key, Scope: in(tenant, "installation-b", readMode)}))
+		_, err := drain(stack.client.Get(ctx, &storagev1.GetRequest{Key: key, Scope: in(tenant, "installation-b", readMode)}))
 		return err
 	})
 	// And with no scope the same client is refused before any store is asked.
-	_, err = drain(stack.client.Get(ctx, &storagev0.GetRequest{Key: key}))
+	_, err = drain(stack.client.Get(ctx, &storagev1.GetRequest{Key: key}))
 	require.Equal(t, codes.PermissionDenied, status.Code(err))
 	reason, _ := reasonOf(err)
 	require.Equal(t, "SCOPE_REQUIRED", reason)
-	_, err = stack.client.List(ctx, &storagev0.ListRequest{})
+	_, err = stack.client.List(ctx, &storagev1.ListRequest{})
 	reason, _ = reasonOf(err)
 	require.Equal(t, "SCOPE_REQUIRED", reason)
 }
@@ -932,10 +932,10 @@ func TestMinIOScopedPresignReachesOneObjectWithinItsBounds(t *testing.T) {
 	l := writeLayout(t, stack)
 	ctx := context.Background()
 	c := stack.client
-	get, put, post := storagev0.PresignMethod_PRESIGN_METHOD_GET, storagev0.PresignMethod_PRESIGN_METHOD_PUT, storagev0.PresignMethod_PRESIGN_METHOD_POST
+	get, put, post := storagev1.PresignMethod_PRESIGN_METHOD_GET, storagev1.PresignMethod_PRESIGN_METHOD_PUT, storagev1.PresignMethod_PRESIGN_METHOD_POST
 	readScope, ingestScope := in(l.tenant, l.installation, readMode), in(l.tenant, l.installation, ingestMode)
 
-	signed, err := c.Presign(ctx, &storagev0.PresignRequest{Key: l.own, Method: get, ExpirySeconds: 60, Scope: readScope})
+	signed, err := c.Presign(ctx, &storagev1.PresignRequest{Key: l.own, Method: get, ExpirySeconds: 60, Scope: readScope})
 	require.NoError(t, err)
 	require.Contains(t, signed.GetUrl(), "X-Amz-Security-Token", "the URL is signed by the session, not by the gateway's own key")
 	require.NotContains(t, signed.GetUrl(), "Credential="+stack.rootKey)
@@ -972,7 +972,7 @@ func TestMinIOScopedPresignReachesOneObjectWithinItsBounds(t *testing.T) {
 	code, _ = fetch(t, http.MethodGet, listing.String(), nil, nil)
 	require.Equal(t, http.StatusForbidden, code, "the URL with a listing query")
 	// A short time.
-	brief, err := c.Presign(ctx, &storagev0.PresignRequest{Key: l.own, Method: get, ExpirySeconds: 1, Scope: readScope})
+	brief, err := c.Presign(ctx, &storagev1.PresignRequest{Key: l.own, Method: get, ExpirySeconds: 1, Scope: readScope})
 	require.NoError(t, err)
 	time.Sleep(2500 * time.Millisecond)
 	code, _ = fetch(t, http.MethodGet, brief.GetUrl(), nil, nil)
@@ -980,7 +980,7 @@ func TestMinIOScopedPresignReachesOneObjectWithinItsBounds(t *testing.T) {
 
 	// A typed PUT writes its key with its type and nothing else.
 	upload := l.scopePrefix + "service.documents/_staging/" + strings.Repeat("a", 32)
-	typed, err := c.Presign(ctx, &storagev0.PresignRequest{Key: upload, Method: put, ExpirySeconds: 60, ContentType: "application/pdf", Scope: ingestScope})
+	typed, err := c.Presign(ctx, &storagev1.PresignRequest{Key: upload, Method: put, ExpirySeconds: 60, ContentType: "application/pdf", Scope: ingestScope})
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"Content-Type": "application/pdf"}, typed.GetHeaders())
 	code, body = fetch(t, http.MethodPut, typed.GetUrl(), map[string]string{"Content-Type": "text/html"}, strings.NewReader("<html>"))
@@ -998,7 +998,7 @@ func TestMinIOScopedPresignReachesOneObjectWithinItsBounds(t *testing.T) {
 	// A POST binds the size as well: MinIO refuses a body over the maximum,
 	// under the minimum, of another type, and any other key.
 	form := l.scopePrefix + "service.documents/_staging/" + strings.Repeat("b", 32)
-	sized, err := c.Presign(ctx, &storagev0.PresignRequest{Key: form, Method: post, ExpirySeconds: 60,
+	sized, err := c.Presign(ctx, &storagev1.PresignRequest{Key: form, Method: post, ExpirySeconds: 60,
 		ContentType: "application/pdf", ContentLengthMin: 4, ContentLengthMax: 16, Scope: ingestScope})
 	require.NoError(t, err)
 	require.Equal(t, post, sized.GetMethod())
@@ -1033,7 +1033,7 @@ func TestMinIOScopedPresignReachesOneObjectWithinItsBounds(t *testing.T) {
 	l.unchanged(t, stack)
 
 	// The gateway refuses to sign outside the bounds; nothing reaches MinIO.
-	for what, request := range map[string]*storagev0.PresignRequest{
+	for what, request := range map[string]*storagev1.PresignRequest{
 		"a sibling's key under its own scope": {Key: l.inSibling, Method: get, ExpirySeconds: 60, Scope: readScope},
 		"a legacy key":                        {Key: l.legacy, Method: get, ExpirySeconds: 60, Scope: readScope},
 		"a prefix":                            {Key: l.scopePrefix, Method: get, ExpirySeconds: 60, Scope: readScope},

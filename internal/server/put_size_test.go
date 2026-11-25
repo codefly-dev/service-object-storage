@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"github.com/codefly-dev/service-object-storage/internal/server"
@@ -50,37 +50,37 @@ func (b *exactSizeBackend) handed() []int64 {
 	return append([]int64(nil), b.sizes...)
 }
 
-func newExactSizeClient(t *testing.T) (storagev0.ObjectStorageClient, *exactSizeBackend) {
+func newExactSizeClient(t *testing.T) (storagev1.ObjectStorageClient, *exactSizeBackend) {
 	t.Helper()
 	be := &exactSizeBackend{Backend: openMemBackend(t)}
 	return newTestClientFor(t, be), be
 }
 
 // putChunks streams header then each chunk, as a client does.
-func putChunks(t *testing.T, c storagev0.ObjectStorageClient, header *storagev0.PutHeader, chunks ...[]byte) (*storagev0.PutResult, error) {
+func putChunks(t *testing.T, c storagev1.ObjectStorageClient, header *storagev1.PutHeader, chunks ...[]byte) (*storagev1.PutResult, error) {
 	t.Helper()
 	st, err := c.Put(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: header}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: header}}))
 	for _, chunk := range chunks {
-		if err := st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: chunk}}); err != nil {
+		if err := st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: chunk}}); err != nil {
 			break // the server ended the stream; CloseAndRecv carries why
 		}
 	}
 	return st.CloseAndRecv()
 }
 
-func requireStored(t *testing.T, c storagev0.ObjectStorageClient, key string, want []byte) {
+func requireStored(t *testing.T, c storagev1.ObjectStorageClient, key string, want []byte) {
 	t.Helper()
-	_, body, err := getObject(t, c, &storagev0.GetRequest{Key: key})
+	_, body, err := getObject(t, c, &storagev1.GetRequest{Key: key})
 	require.NoError(t, err)
 	require.Equal(t, len(want), len(body))
 	require.True(t, bytes.Equal(want, body), "stored body differs from the one sent")
 }
 
-func requireAbsent(t *testing.T, c storagev0.ObjectStorageClient, key string) {
+func requireAbsent(t *testing.T, c storagev1.ObjectStorageClient, key string) {
 	t.Helper()
-	_, err := c.Stat(context.Background(), &storagev0.StatRequest{Key: key})
+	_, err := c.Stat(context.Background(), &storagev1.StatRequest{Key: key})
 	require.Equal(t, codes.NotFound, status.Code(err), "a refused Put stores nothing")
 }
 
@@ -91,7 +91,7 @@ func TestPutWithoutTotalSizeStoresTheBody(t *testing.T) {
 	c, be := newExactSizeClient(t)
 	payload := bytes.Repeat([]byte("recording "), 10_000)
 
-	_, err := putChunks(t, c, &storagev0.PutHeader{Key: "calls/a.wav", ContentType: "audio/wav"},
+	_, err := putChunks(t, c, &storagev1.PutHeader{Key: "calls/a.wav", ContentType: "audio/wav"},
 		payload[:40_000], payload[40_000:])
 	require.NoError(t, err)
 	requireStored(t, c, "calls/a.wav", payload)
@@ -101,7 +101,7 @@ func TestPutWithoutTotalSizeStoresTheBody(t *testing.T) {
 
 func TestPutWithoutTotalSizeStoresAnEmptyBody(t *testing.T) {
 	c, be := newExactSizeClient(t)
-	_, err := putChunks(t, c, &storagev0.PutHeader{Key: "empty"})
+	_, err := putChunks(t, c, &storagev1.PutHeader{Key: "empty"})
 	require.NoError(t, err)
 	requireStored(t, c, "empty", []byte{})
 	require.Equal(t, []int64{0}, be.handed())
@@ -109,7 +109,7 @@ func TestPutWithoutTotalSizeStoresAnEmptyBody(t *testing.T) {
 
 func TestPutWithUnknownTotalSizeStoresTheBody(t *testing.T) {
 	c, _ := newExactSizeClient(t)
-	_, err := putChunks(t, c, &storagev0.PutHeader{Key: "k", TotalSize: -1}, []byte("stream"), []byte("ed"))
+	_, err := putChunks(t, c, &storagev1.PutHeader{Key: "k", TotalSize: -1}, []byte("stream"), []byte("ed"))
 	require.NoError(t, err)
 	requireStored(t, c, "k", []byte("streamed"))
 }
@@ -126,7 +126,7 @@ func TestPutLongerThanTheProbeStreams(t *testing.T) {
 		chunks = append(chunks, c)
 		payload = append(payload, c...)
 	}
-	_, err := putChunks(t, c, &storagev0.PutHeader{Key: "big"}, chunks...)
+	_, err := putChunks(t, c, &storagev1.PutHeader{Key: "big"}, chunks...)
 	require.NoError(t, err)
 	requireStored(t, c, "big", payload)
 	require.Equal(t, []int64{-1}, be.handed())
@@ -134,7 +134,7 @@ func TestPutLongerThanTheProbeStreams(t *testing.T) {
 
 func TestPutWithDeclaredTotalSizeStoresAnExactBody(t *testing.T) {
 	c, be := newExactSizeClient(t)
-	_, err := putChunks(t, c, &storagev0.PutHeader{Key: "k", TotalSize: 9}, []byte("hello "), []byte("you"))
+	_, err := putChunks(t, c, &storagev1.PutHeader{Key: "k", TotalSize: 9}, []byte("hello "), []byte("you"))
 	require.NoError(t, err)
 	requireStored(t, c, "k", []byte("hello you"))
 	require.Equal(t, []int64{9}, be.handed(), "a declared size reaches the store")
@@ -156,7 +156,7 @@ func TestPutRefusesABodyThatDisagreesWithItsDeclaredSize(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			c, _ := newExactSizeClient(t)
-			_, err := putChunks(t, c, &storagev0.PutHeader{Key: "k", TotalSize: tc.declared}, tc.chunks...)
+			_, err := putChunks(t, c, &storagev1.PutHeader{Key: "k", TotalSize: tc.declared}, tc.chunks...)
 			info, _ := requireReason(t, err, codes.Aborted, serr.ReasonBodySizeMismatch)
 			require.Equal(t, strconv.FormatInt(tc.declared, 10), info.GetMetadata()["declared_bytes"])
 			requireAbsent(t, c, "k")
@@ -179,12 +179,12 @@ func TestPutReturnsABackendRefusalWithoutWaitingOnTheClient(t *testing.T) {
 	defer cancel()
 	st, err := c.Put(ctx)
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: &storagev0.PutHeader{Key: "k", TotalSize: 1 << 20}}}))
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: []byte("first chunk")}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: &storagev1.PutHeader{Key: "k", TotalSize: 1 << 20}}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: []byte("first chunk")}}))
 
 	// Keep the stream open, as a slow client would, and read the answer.
 	start := time.Now()
-	var res storagev0.PutResult
+	var res storagev1.PutResult
 	err = st.RecvMsg(&res)
 	require.Less(t, time.Since(start), 5*time.Second)
 	require.Equal(t, codes.FailedPrecondition, status.Code(err), "%v", err)
@@ -196,15 +196,15 @@ func TestPutCancelledByTheClientStoresNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	st, err := c.Put(ctx)
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: &storagev0.PutHeader{Key: "k", TotalSize: 100}}}))
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: []byte("partial")}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: &storagev1.PutHeader{Key: "k", TotalSize: 100}}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: []byte("partial")}}))
 	cancel()
 	_, err = st.CloseAndRecv()
 	require.Error(t, err)
 	require.True(t, errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled, "%v", err)
 
 	require.Eventually(t, func() bool {
-		_, serr := c.Stat(context.Background(), &storagev0.StatRequest{Key: "k"})
+		_, serr := c.Stat(context.Background(), &storagev1.StatRequest{Key: "k"})
 		return status.Code(serr) == codes.NotFound
 	}, 2*time.Second, 50*time.Millisecond)
 }

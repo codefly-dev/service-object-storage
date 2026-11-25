@@ -43,7 +43,7 @@ func TestContractAPIMatchesCoreReadingThePublishedFile(t *testing.T) {
 		require.Equal(t, rpc.GetName(), api.GetRpcs()[i].GetName())
 		require.Equal(t, rpc.GetServiceName(), api.GetRpcs()[i].GetServiceName())
 	}
-	require.Equal(t, "codefly.storage.v0", api.GetPackage())
+	require.Equal(t, "codefly.storage.v1", api.GetPackage())
 	names := map[string]bool{}
 	for _, rpc := range api.GetRpcs() {
 		names[rpc.GetName()] = true
@@ -117,7 +117,7 @@ func TestLoadAdvertisesTheStorageAPIBeforeAnySync(t *testing.T) {
 	grpc := resp.GetEndpoints()[0].GetApiDetails().GetGrpc()
 	require.NotNil(t, grpc)
 	require.Equal(t, storageContract, grpc.GetProto())
-	require.Equal(t, "codefly.storage.v0", grpc.GetPackage())
+	require.Equal(t, "codefly.storage.v1", grpc.GetPackage())
 	require.NotEmpty(t, grpc.GetRpcs())
 }
 

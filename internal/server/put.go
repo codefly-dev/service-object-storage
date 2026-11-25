@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
@@ -37,7 +37,7 @@ var errPutFinished = errors.New("put: backend finished reading the body")
 // many bytes never commits a body that turns out to be longer. Anything else
 // is unknown: the gateway buffers up to PutSizeProbeBytes to learn the size,
 // and streams only a body longer than that.
-func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
+func (s *Server) Put(stream storagev1.ObjectStorage_PutServer) error {
 	first, err := stream.Recv()
 	if err != nil {
 		return toStatus(serrInvalid("put: empty stream"))
@@ -89,7 +89,7 @@ func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
 		return toStatus(c.err(err))
 	}
 	s.hub.Publish(events.Event{Key: header.GetKey(), Op: events.OpPut, ETag: res.ETag, VersionID: res.VersionID})
-	return stream.SendAndClose(&storagev0.PutResult{
+	return stream.SendAndClose(&storagev1.PutResult{
 		Etag:       res.ETag,
 		VersionId:  res.VersionID,
 		Generation: res.Generation,
@@ -98,7 +98,7 @@ func (s *Server) Put(stream storagev0.ObjectStorage_PutServer) error {
 
 // putBody returns the reader the backend consumes, the size to hand it, and
 // a function reporting the body's refusal, if any.
-func (s *Server) putBody(cancel context.CancelCauseFunc, stream storagev0.ObjectStorage_PutServer, declared int64) (io.Reader, int64, func() error, error) {
+func (s *Server) putBody(cancel context.CancelCauseFunc, stream storagev1.ObjectStorage_PutServer, declared int64) (io.Reader, int64, func() error, error) {
 	if declared > 0 {
 		pr, pw := io.Pipe()
 		r := &putReceiver{stream: stream, pw: pw, cancel: cancel, declared: declared}
@@ -127,7 +127,7 @@ func (s *Server) putBody(cancel context.CancelCauseFunc, stream storagev0.Object
 // putReceiver moves the rest of a Put's stream into the backend's pipe,
 // enforcing a declared length.
 type putReceiver struct {
-	stream   storagev0.ObjectStorage_PutServer
+	stream   storagev1.ObjectStorage_PutServer
 	pw       *io.PipeWriter
 	cancel   context.CancelCauseFunc
 	declared int64 // > 0: enforced; otherwise unknown

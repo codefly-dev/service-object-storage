@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/egress"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
@@ -38,7 +38,7 @@ var (
 
 // boundCall returns the context a bound RPC runs under from its first step:
 // within budget. An unbound RPC's context is ctx.
-func boundCall(ctx context.Context, b *storagev0.Binding, budget time.Duration) (context.Context, context.CancelFunc) {
+func boundCall(ctx context.Context, b *storagev1.Binding, budget time.Duration) (context.Context, context.CancelFunc) {
 	if b == nil {
 		return ctx, func() {}
 	}
@@ -83,7 +83,7 @@ type call struct {
 // bucket, the other somebody else's. Where scoped sessions are required, a
 // call that names neither is refused instead of running with the gateway's
 // own credential.
-func (s *Server) backendFor(ctx context.Context, b *storagev0.Binding, scope *storagev0.Scope) (*call, error) {
+func (s *Server) backendFor(ctx context.Context, b *storagev1.Binding, scope *storagev1.Scope) (*call, error) {
 	if scope != nil {
 		if b != nil {
 			return nil, scopeInvalid("a call names a binding or a scope, never both")
@@ -164,7 +164,7 @@ func (c *call) err(err error) error {
 // carry: the secret half of an access key, an access token, and a
 // service-account key with its private key. The access key id and the account
 // name are identifiers, not secrets.
-func bindingSecrets(b *storagev0.Binding) []string {
+func bindingSecrets(b *storagev1.Binding) []string {
 	secrets := []string{}
 	cred := b.GetCredential()
 	for _, value := range []string{cred.GetAccessKey().GetSecret(), cred.GetAccessKey().GetSessionToken(), cred.GetAccessToken(), string(cred.GetServiceAccountKey())} {
@@ -185,7 +185,7 @@ func bindingSecrets(b *storagev0.Binding) []string {
 // the guard its client dials through. The endpoint is qualified before
 // anything dials it, against the public-only rule or, for one of the
 // gateway's composed endpoints, by exact admission.
-func boundConfig(ctx context.Context, b *storagev0.Binding, composed egress.Composed) (backend.Config, *egress.Guard, error) {
+func boundConfig(ctx context.Context, b *storagev1.Binding, composed egress.Composed) (backend.Config, *egress.Guard, error) {
 	const op = "binding"
 	if !bindableKinds[b.GetKind()] {
 		return backend.Config{}, nil, bindingInvalid(op,

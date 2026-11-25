@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -31,7 +31,7 @@ func serveGateway(t *testing.T, be backend.Backend) string {
 	require.NoError(t, err)
 
 	srv := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev1.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
 
@@ -75,13 +75,13 @@ func TestWaitForReadyRejectsUnreachableBackend(t *testing.T) {
 	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
-	client := storagev0.NewObjectStorageClient(conn)
+	client := storagev1.NewObjectStorageClient(conn)
 
-	caps, err := client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	caps, err := client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err, "Capabilities is static introspection and still answers")
 	require.Equal(t, "minio", caps.GetBackend())
 
-	ready, err := client.Ready(ctx, &storagev0.ReadyRequest{})
+	ready, err := client.Ready(ctx, &storagev1.ReadyRequest{})
 	require.NoError(t, err)
 	require.False(t, ready.GetReady())
 	require.Equal(t, "Unavailable", ready.GetCode())

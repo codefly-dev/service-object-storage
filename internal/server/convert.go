@@ -3,7 +3,7 @@ package server
 import (
 	"time"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/events"
 )
@@ -22,11 +22,11 @@ func fromUnixMS(ms int64) time.Time {
 	return time.UnixMilli(ms)
 }
 
-func toProtoInfo(in *backend.ObjectInfo) *storagev0.ObjectInfo {
+func toProtoInfo(in *backend.ObjectInfo) *storagev1.ObjectInfo {
 	if in == nil {
 		return nil
 	}
-	return &storagev0.ObjectInfo{
+	return &storagev1.ObjectInfo{
 		Key:                in.Key,
 		Etag:               in.ETag,
 		WeakEtag:           in.WeakETag,
@@ -42,8 +42,8 @@ func toProtoInfo(in *backend.ObjectInfo) *storagev0.ObjectInfo {
 	}
 }
 
-func toProtoCapabilities(c backend.Capabilities) *storagev0.BackendCapabilities {
-	return &storagev0.BackendCapabilities{
+func toProtoCapabilities(c backend.Capabilities) *storagev1.BackendCapabilities {
+	return &storagev1.BackendCapabilities{
 		Backend:                 c.Backend,
 		ConditionalPut:          c.ConditionalPut,
 		ConditionalCopy:         c.ConditionalCopy,
@@ -58,7 +58,7 @@ func toProtoCapabilities(c backend.Capabilities) *storagev0.BackendCapabilities 
 	}
 }
 
-func toBackendGetOptions(req *storagev0.GetRequest) backend.GetOptions {
+func toBackendGetOptions(req *storagev1.GetRequest) backend.GetOptions {
 	opts := backend.GetOptions{
 		IfNoneMatch:     req.GetIfNoneMatch(),
 		IfMatch:         req.GetIfMatch(),
@@ -71,8 +71,8 @@ func toBackendGetOptions(req *storagev0.GetRequest) backend.GetOptions {
 	return opts
 }
 
-func toProtoEvent(e events.Event) *storagev0.WriteEvent {
-	return &storagev0.WriteEvent{
+func toProtoEvent(e events.Event) *storagev1.WriteEvent {
+	return &storagev1.WriteEvent{
 		Key:        e.Key,
 		Op:         writeOpToProto(e.Op),
 		Etag:       e.ETag,
@@ -81,33 +81,33 @@ func toProtoEvent(e events.Event) *storagev0.WriteEvent {
 	}
 }
 
-func writeOpToProto(op events.Op) storagev0.WriteOp {
+func writeOpToProto(op events.Op) storagev1.WriteOp {
 	switch op {
 	case events.OpPut:
-		return storagev0.WriteOp_WRITE_OP_PUT
+		return storagev1.WriteOp_WRITE_OP_PUT
 	case events.OpDelete:
-		return storagev0.WriteOp_WRITE_OP_DELETE
+		return storagev1.WriteOp_WRITE_OP_DELETE
 	default:
-		return storagev0.WriteOp_WRITE_OP_UNSPECIFIED
+		return storagev1.WriteOp_WRITE_OP_UNSPECIFIED
 	}
 }
 
-func presignMethodFromProto(m storagev0.PresignMethod) backend.PresignMethod {
+func presignMethodFromProto(m storagev1.PresignMethod) backend.PresignMethod {
 	switch m {
-	case storagev0.PresignMethod_PRESIGN_METHOD_PUT:
+	case storagev1.PresignMethod_PRESIGN_METHOD_PUT:
 		return backend.PresignPut
-	case storagev0.PresignMethod_PRESIGN_METHOD_POST:
+	case storagev1.PresignMethod_PRESIGN_METHOD_POST:
 		return backend.PresignPost
 	}
 	return backend.PresignGet
 }
 
-func presignMethodToProto(m backend.PresignMethod) storagev0.PresignMethod {
+func presignMethodToProto(m backend.PresignMethod) storagev1.PresignMethod {
 	switch m {
 	case backend.PresignPut:
-		return storagev0.PresignMethod_PRESIGN_METHOD_PUT
+		return storagev1.PresignMethod_PRESIGN_METHOD_PUT
 	case backend.PresignPost:
-		return storagev0.PresignMethod_PRESIGN_METHOD_POST
+		return storagev1.PresignMethod_PRESIGN_METHOD_POST
 	}
-	return storagev0.PresignMethod_PRESIGN_METHOD_GET
+	return storagev1.PresignMethod_PRESIGN_METHOD_GET
 }

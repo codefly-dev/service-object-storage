@@ -15,7 +15,7 @@ import (
 	miniogo "github.com/minio/minio-go/v7"
 	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
 	"github.com/codefly-dev/service-object-storage/libs/go/internal/gatewaytest"
 	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
@@ -218,7 +218,7 @@ func TestMinIOWithoutTheStoreNothingIsConfined(t *testing.T) {
 	put(t, store, bound(strict("human:bob", "inst")), objectstorage.Own("secret.txt"), "bob's")
 
 	const key = "files/org/inst/human.bob/secret.txt"
-	stream, err := client.Get(context.Background(), &storagev0.GetRequest{Key: key})
+	stream, err := client.Get(context.Background(), &storagev1.GetRequest{Key: key})
 	if err != nil {
 		t.Fatal(err)
 	}

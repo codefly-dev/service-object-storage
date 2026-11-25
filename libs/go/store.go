@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
 )
 
@@ -60,7 +60,7 @@ func WithPresignLimit(limit time.Duration) Option {
 // ReaderSessionIssuer supplies a short-lived, backend-confined credential
 // for one scope of the binding the Store verified.
 type ReaderSessionIssuer interface {
-	Issue(context.Context, string, Binding, string) (*storagev0.Binding, error)
+	Issue(context.Context, string, Binding, string) (*storagev1.Binding, error)
 }
 
 // WithReaderSessions requires a confined session on Get, Head and listings.
@@ -107,7 +107,7 @@ func WithGatewaySessions() Option {
 // Store is the request-time boundary of one confined object store. It owns
 // the gateway client and exposes it to nobody.
 type Store struct {
-	client storagev0.ObjectStorageClient
+	client storagev1.ObjectStorageClient
 	keys   layout
 	base   string
 	binder Binder
@@ -119,7 +119,7 @@ type Store struct {
 // was given: one segment of lowercase letters, digits and hyphens. A Store
 // never addresses anything outside it, and two stores with different bases
 // never address the same object.
-func NewStore(client storagev0.ObjectStorageClient, base string, binder Binder, options ...Option) (*Store, error) {
+func NewStore(client storagev1.ObjectStorageClient, base string, binder Binder, options ...Option) (*Store, error) {
 	if isNil(client) {
 		return nil, errors.New("object storage client is required")
 	}
@@ -160,17 +160,17 @@ func isNil(value any) bool {
 
 // in is the scope a call names to the gateway, or nil when the Store was not
 // built with gateway sessions.
-func (s *Store) in(binding Binding, scope string, mode storagev0.ScopeMode) *storagev0.Scope {
+func (s *Store) in(binding Binding, scope string, mode storagev1.ScopeMode) *storagev1.Scope {
 	if !s.config.gatewaySessions {
 		return nil
 	}
-	return &storagev0.Scope{Base: s.base, Partition: binding.Partition, Scope: scope, Mode: mode}
+	return &storagev1.Scope{Base: s.base, Partition: binding.Partition, Scope: scope, Mode: mode}
 }
 
 const (
-	readSession        = storagev0.ScopeMode_SCOPE_MODE_READ
-	ingestSession      = storagev0.ScopeMode_SCOPE_MODE_INGEST
-	maintenanceSession = storagev0.ScopeMode_SCOPE_MODE_MAINTENANCE
+	readSession        = storagev1.ScopeMode_SCOPE_MODE_READ
+	ingestSession      = storagev1.ScopeMode_SCOPE_MODE_INGEST
+	maintenanceSession = storagev1.ScopeMode_SCOPE_MODE_MAINTENANCE
 )
 
 // Base is the base this Store is confined to.
@@ -232,7 +232,7 @@ func refOf(key objectkey.Key) Ref {
 	}
 }
 
-func infoOf(key objectkey.Key, object *storagev0.ObjectInfo) Info {
+func infoOf(key objectkey.Key, object *storagev1.ObjectInfo) Info {
 	info := Info{Ref: refOf(key)}
 	if object == nil {
 		return info
@@ -290,7 +290,7 @@ func (s *Store) Put(ctx context.Context, ref Ref, body io.Reader, options PutOpt
 }
 
 // send streams a body to one key, hashing it on the way when asked.
-func (s *Store) send(ctx context.Context, scope *storagev0.Scope, key string, body io.Reader, options PutOptions, hash bool) (int64, string, *storagev0.PutResult, error) {
+func (s *Store) send(ctx context.Context, scope *storagev1.Scope, key string, body io.Reader, options PutOptions, hash bool) (int64, string, *storagev1.PutResult, error) {
 	if body == nil {
 		return 0, "", nil, errors.New("object store: a write needs a body")
 	}
@@ -300,14 +300,14 @@ func (s *Store) send(ctx context.Context, scope *storagev0.Scope, key string, bo
 	if err != nil {
 		return 0, "", nil, err
 	}
-	header := &storagev0.PutHeader{Key: key, ContentType: options.ContentType, UserMetadata: options.Metadata, TotalSize: -1, Scope: scope}
+	header := &storagev1.PutHeader{Key: key, ContentType: options.ContentType, UserMetadata: options.Metadata, TotalSize: -1, Scope: scope}
 	if options.Size > 0 {
 		header.TotalSize = options.Size
 	}
 	if options.IfAbsent {
 		header.IfNoneMatch = "*"
 	}
-	if err := stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: header}}); err != nil {
+	if err := stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: header}}); err != nil {
 		return 0, "", nil, translate(streamError(stream, err))
 	}
 	hasher := sha256.New()
@@ -320,7 +320,7 @@ func (s *Store) send(ctx context.Context, scope *storagev0.Scope, key string, bo
 				hasher.Write(buffer[:read])
 			}
 			size += int64(read)
-			if err := stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: buffer[:read]}}); err != nil {
+			if err := stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: buffer[:read]}}); err != nil {
 				return 0, "", nil, translate(streamError(stream, err))
 			}
 		}
@@ -339,7 +339,7 @@ func (s *Store) send(ctx context.Context, scope *storagev0.Scope, key string, bo
 }
 
 // streamError recovers the status a failed Send hides behind io.EOF.
-func streamError(stream storagev0.ObjectStorage_PutClient, err error) error {
+func streamError(stream storagev1.ObjectStorage_PutClient, err error) error {
 	if !errors.Is(err, io.EOF) {
 		return err
 	}
@@ -390,7 +390,7 @@ func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, op
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), stagingCleanup)
 		defer cancel()
-		_, _ = s.client.Delete(cleanup, &storagev0.DeleteRequest{Key: staging, Scope: s.in(binding, place, maintenanceSession)})
+		_, _ = s.client.Delete(cleanup, &storagev1.DeleteRequest{Key: staging, Scope: s.in(binding, place, maintenanceSession)})
 	}()
 	size, digest, _, err := s.send(ctx, s.in(binding, place, ingestSession), staging, body, PutOptions{ContentType: options.ContentType, Metadata: options.Metadata, Size: options.Size}, true)
 	if err != nil {
@@ -404,7 +404,7 @@ func (s *Store) PutContent(ctx context.Context, scope string, body io.Reader, op
 	info := Info{Ref: refOf(content), Size: size, ContentType: options.ContentType}
 	// Promotion is maintenance: it reads what ingest wrote, which an ingest
 	// session may not.
-	copied, err := s.client.Copy(ctx, &storagev0.CopyRequest{SourceKey: staging, DestKey: key, Scope: s.in(binding, place, maintenanceSession)})
+	copied, err := s.client.Copy(ctx, &storagev1.CopyRequest{SourceKey: staging, DestKey: key, Scope: s.in(binding, place, maintenanceSession)})
 	if err != nil {
 		return Info{}, translate(err)
 	}
@@ -485,13 +485,13 @@ func (s *Store) DeleteStaged(ctx context.Context, scope, id string) error {
 	if binding.Access != ReadWrite {
 		return ErrReadOnly
 	}
-	if _, err := s.client.Delete(ctx, &storagev0.DeleteRequest{Key: key, Scope: s.in(binding, place, maintenanceSession)}); err != nil && status.Code(err) != codes.NotFound {
+	if _, err := s.client.Delete(ctx, &storagev1.DeleteRequest{Key: key, Scope: s.in(binding, place, maintenanceSession)}); err != nil && status.Code(err) != codes.NotFound {
 		return err
 	}
 	return nil
 }
 
-func (s *Store) readerSession(ctx context.Context, binding Binding, scope string) (*storagev0.Binding, error) {
+func (s *Store) readerSession(ctx context.Context, binding Binding, scope string) (*storagev1.Binding, error) {
 	if s.config.readerIssuer == nil {
 		return nil, nil
 	}
@@ -519,9 +519,9 @@ func (s *Store) Get(ctx context.Context, ref Ref) (io.ReadCloser, Info, error) {
 	return open(ctx, s.client, session, s.in(binding, at.scope, readSession), at.key, objectkey.Key{Scope: at.scope, Slot: at.slot, Name: ref.Name})
 }
 
-func open(ctx context.Context, client storagev0.ObjectStorageClient, session *storagev0.Binding, scope *storagev0.Scope, physical string, key objectkey.Key) (io.ReadCloser, Info, error) {
+func open(ctx context.Context, client storagev1.ObjectStorageClient, session *storagev1.Binding, scope *storagev1.Scope, physical string, key objectkey.Key) (io.ReadCloser, Info, error) {
 	streaming, cancel := context.WithCancel(ctx)
-	stream, err := client.Get(streaming, &storagev0.GetRequest{Key: physical, Binding: session, Scope: scope})
+	stream, err := client.Get(streaming, &storagev1.GetRequest{Key: physical, Binding: session, Scope: scope})
 	if err != nil {
 		cancel()
 		return nil, Info{}, translate(err)
@@ -536,7 +536,7 @@ func open(ctx context.Context, client storagev0.ObjectStorageClient, session *st
 }
 
 type reader struct {
-	stream  storagev0.ObjectStorage_GetClient
+	stream  storagev1.ObjectStorage_GetClient
 	cancel  context.CancelFunc
 	pending []byte
 	err     error
@@ -581,7 +581,7 @@ func (s *Store) Head(ctx context.Context, ref Ref) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	header, err := s.client.Stat(ctx, &storagev0.StatRequest{Key: at.key, Binding: session, Scope: s.in(binding, at.scope, readSession)})
+	header, err := s.client.Stat(ctx, &storagev1.StatRequest{Key: at.key, Binding: session, Scope: s.in(binding, at.scope, readSession)})
 	if err != nil {
 		return Info{}, translate(err)
 	}
@@ -599,7 +599,7 @@ func (s *Store) Delete(ctx context.Context, ref Ref) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.client.Delete(ctx, &storagev0.DeleteRequest{Key: at.key, Scope: s.in(binding, at.scope, maintenanceSession)}); err != nil && status.Code(err) != codes.NotFound {
+	if _, err := s.client.Delete(ctx, &storagev1.DeleteRequest{Key: at.key, Scope: s.in(binding, at.scope, maintenanceSession)}); err != nil && status.Code(err) != codes.NotFound {
 		return err
 	}
 	return nil
@@ -631,7 +631,7 @@ func (s *Store) Copy(ctx context.Context, from, to Ref, options CopyOptions) (In
 	if s.config.gatewaySessions && source.scope != destination.scope {
 		return Info{}, fmt.Errorf("%w: a copy under gateway sessions stays inside one scope", ErrOutsideReach)
 	}
-	request := &storagev0.CopyRequest{SourceKey: source.key, DestKey: destination.key, Scope: s.in(binding, destination.scope, maintenanceSession)}
+	request := &storagev1.CopyRequest{SourceKey: source.key, DestKey: destination.key, Scope: s.in(binding, destination.scope, maintenanceSession)}
 	if options.IfAbsent {
 		request.IfNoneMatch = "*"
 	}
@@ -715,7 +715,7 @@ func (s *Store) list(ctx context.Context, binding Binding, scope, prefix string,
 	if err != nil {
 		return Page{}, err
 	}
-	listed, err := s.client.List(ctx, &storagev0.ListRequest{Binding: session, Scope: s.in(binding, scope, readSession), Prefix: prefix, PageToken: options.Token, Limit: int32(max(options.Limit, 0))})
+	listed, err := s.client.List(ctx, &storagev1.ListRequest{Binding: session, Scope: s.in(binding, scope, readSession), Prefix: prefix, PageToken: options.Token, Limit: int32(max(options.Limit, 0))})
 	if err != nil {
 		return Page{}, translate(err)
 	}
@@ -760,7 +760,7 @@ type UploadBounds struct {
 
 // PresignGet signs a URL that reads one object the binding may read.
 func (s *Store) PresignGet(ctx context.Context, ref Ref, lifetime time.Duration) (Presigned, error) {
-	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_GET, UploadBounds{})
+	return s.presign(ctx, ref, lifetime, storagev1.PresignMethod_PRESIGN_METHOD_GET, UploadBounds{})
 }
 
 // PresignPut signs a URL that writes one object the binding may write. The
@@ -768,7 +768,7 @@ func (s *Store) PresignGet(ctx context.Context, ref Ref, lifetime time.Duration)
 // a content type is bound to the URL. PresignPutTyped binds the type and
 // PresignPost the size.
 func (s *Store) PresignPut(ctx context.Context, ref Ref, lifetime time.Duration) (Presigned, error) {
-	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_PUT, UploadBounds{})
+	return s.presign(ctx, ref, lifetime, storagev1.PresignMethod_PRESIGN_METHOD_PUT, UploadBounds{})
 }
 
 // PresignPutTyped signs a URL that writes one object the binding may write,
@@ -778,7 +778,7 @@ func (s *Store) PresignPutTyped(ctx context.Context, ref Ref, lifetime time.Dura
 	if contentType == "" {
 		return Presigned{}, errors.New("object store: a typed upload names its content type")
 	}
-	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_PUT, UploadBounds{ContentType: contentType})
+	return s.presign(ctx, ref, lifetime, storagev1.PresignMethod_PRESIGN_METHOD_PUT, UploadBounds{ContentType: contentType})
 }
 
 // PresignPost signs a form upload of one object the binding may write, whose
@@ -789,19 +789,19 @@ func (s *Store) PresignPost(ctx context.Context, ref Ref, lifetime time.Duration
 	if bounds.MaxBytes <= 0 || bounds.MinBytes < 0 || bounds.MinBytes > bounds.MaxBytes {
 		return Presigned{}, errors.New("object store: a form upload states the most bytes it may carry")
 	}
-	return s.presign(ctx, ref, lifetime, storagev0.PresignMethod_PRESIGN_METHOD_POST, bounds)
+	return s.presign(ctx, ref, lifetime, storagev1.PresignMethod_PRESIGN_METHOD_POST, bounds)
 }
 
-func (s *Store) presign(ctx context.Context, ref Ref, lifetime time.Duration, method storagev0.PresignMethod, bounds UploadBounds) (Presigned, error) {
+func (s *Store) presign(ctx context.Context, ref Ref, lifetime time.Duration, method storagev1.PresignMethod, bounds UploadBounds) (Presigned, error) {
 	binding, err := s.bind(ctx)
 	if err != nil {
 		return Presigned{}, err
 	}
 	may, verb, mode := binding.mayRead, "GET", readSession
 	switch method {
-	case storagev0.PresignMethod_PRESIGN_METHOD_PUT:
+	case storagev1.PresignMethod_PRESIGN_METHOD_PUT:
 		may, verb, mode = binding.mayWrite, "PUT", ingestSession
-	case storagev0.PresignMethod_PRESIGN_METHOD_POST:
+	case storagev1.PresignMethod_PRESIGN_METHOD_POST:
 		may, verb, mode = binding.mayWrite, "POST", ingestSession
 	}
 	at, err := s.resolve(binding, ref, may)
@@ -812,7 +812,7 @@ func (s *Store) presign(ctx context.Context, ref Ref, lifetime time.Duration, me
 	if lifetime < time.Second || lifetime > s.config.presignLimit {
 		return Presigned{}, fmt.Errorf("%w: asked for %s, the limit is %s", ErrPresignExpiry, lifetime, s.config.presignLimit)
 	}
-	signed, err := s.client.Presign(ctx, &storagev0.PresignRequest{
+	signed, err := s.client.Presign(ctx, &storagev1.PresignRequest{
 		Key: at.key, Method: method, ExpirySeconds: int64(lifetime / time.Second), Scope: s.in(binding, at.scope, mode),
 		ContentType: bounds.ContentType, ContentLengthMax: bounds.MaxBytes, ContentLengthMin: bounds.MinBytes,
 	})

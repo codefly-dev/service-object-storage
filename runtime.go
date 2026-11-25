@@ -29,7 +29,7 @@ import (
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/wool"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 )
 
 // gatewayContainerPort is the port the gateway listens on inside its container
@@ -696,7 +696,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 		return s.Wool.Wrapf(err, "cannot create gateway client for %s", address)
 	}
 	defer func() { _ = conn.Close() }()
-	client := storagev0.NewObjectStorageClient(conn)
+	client := storagev1.NewObjectStorageClient(conn)
 
 	start := time.Now()
 	budget, cancel := context.WithTimeout(ctx, readinessBudget)
@@ -715,7 +715,7 @@ poll:
 		}
 
 		attempt, attemptCancel := context.WithTimeout(budget, readinessProbeTimeout)
-		res, callErr := client.Ready(attempt, &storagev0.ReadyRequest{})
+		res, callErr := client.Ready(attempt, &storagev1.ReadyRequest{})
 		attemptCancel()
 
 		switch {

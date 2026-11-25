@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/egress"
@@ -24,11 +24,11 @@ import (
 
 // manyItem is one item as a GetMany stream delivered it.
 type manyItem struct {
-	header *storagev0.GetManyHeader
+	header *storagev1.GetManyHeader
 	body   []byte
 }
 
-func getMany(t *testing.T, c storagev0.ObjectStorageClient, req *storagev0.GetManyRequest) ([]manyItem, error) {
+func getMany(t *testing.T, c storagev1.ObjectStorageClient, req *storagev1.GetManyRequest) ([]manyItem, error) {
 	t.Helper()
 	st, err := c.GetMany(context.Background(), req)
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestGetManyDeliversEachItemInOrderAtItsListedETag(t *testing.T) {
 	bigPut, err := putObject(t, c, "docs/big.bin", big, nil)
 	require.NoError(t, err)
 
-	items, err := getMany(t, c, &storagev0.GetManyRequest{Items: []*storagev0.GetManyItem{
+	items, err := getMany(t, c, &storagev1.GetManyRequest{Items: []*storagev1.GetManyItem{
 		{Key: "docs/big.bin", IfMatch: bigPut.GetEtag()},
 		{Key: "docs/b.md", IfMatch: "stale-etag"},
 		{Key: "docs/gone.md"},
@@ -71,9 +71,9 @@ func TestGetManyDeliversEachItemInOrderAtItsListedETag(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.Len(t, items, 4)
-	ok, changed, missing := storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
-		storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED, storagev0.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND
-	for i, want := range []storagev0.GetManyOutcome{ok, changed, missing, ok} {
+	ok, changed, missing := storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK,
+		storagev1.GetManyOutcome_GET_MANY_OUTCOME_CHANGED, storagev1.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND
+	for i, want := range []storagev1.GetManyOutcome{ok, changed, missing, ok} {
 		require.EqualValues(t, i, items[i].header.GetIndex())
 		require.Equal(t, want, items[i].header.GetOutcome(), "item %d", i)
 	}
@@ -87,15 +87,15 @@ func TestGetManyDeliversEachItemInOrderAtItsListedETag(t *testing.T) {
 
 func TestGetManyRefusesMoreItemsThanCapabilitiesAllows(t *testing.T) {
 	c := newTestClient(t)
-	caps, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{})
+	caps, err := c.Capabilities(context.Background(), &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err)
 	require.EqualValues(t, 1000, caps.GetMaxGetManyItems())
 
-	items := make([]*storagev0.GetManyItem, caps.GetMaxGetManyItems()+1)
+	items := make([]*storagev1.GetManyItem, caps.GetMaxGetManyItems()+1)
 	for i := range items {
-		items[i] = &storagev0.GetManyItem{Key: fmt.Sprintf("k%d", i)}
+		items[i] = &storagev1.GetManyItem{Key: fmt.Sprintf("k%d", i)}
 	}
-	_, err = getMany(t, c, &storagev0.GetManyRequest{Items: items})
+	_, err = getMany(t, c, &storagev1.GetManyRequest{Items: items})
 	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
 	info, _ := requireReason(t, err, codes.InvalidArgument, "TOO_MANY_ITEMS")
 	require.Equal(t, "1000", info.GetMetadata()["max_items"])
@@ -137,7 +137,7 @@ func TestBoundGetManyMapsStoreAnswersToOutcomes(t *testing.T) {
 	require.NoError(t, err)
 	c := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
 
-	items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{
+	items, err := getMany(t, c, &storagev1.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev1.GetManyItem{
 		{Key: "a.md", IfMatch: `"etag-1"`},
 		{Key: "a.md", IfMatch: `"etag-0"`},
 		{Key: "gone.md"},
@@ -145,15 +145,15 @@ func TestBoundGetManyMapsStoreAnswersToOutcomes(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	require.Len(t, items, 4)
-	require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK, items[0].header.GetOutcome())
+	require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK, items[0].header.GetOutcome())
 	require.Equal(t, "alpha", string(items[0].body))
-	require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED, items[1].header.GetOutcome())
-	require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND, items[2].header.GetOutcome())
-	require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE, items[3].header.GetOutcome())
+	require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_CHANGED, items[1].header.GetOutcome())
+	require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND, items[2].header.GetOutcome())
+	require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_TOO_LARGE, items[3].header.GetOutcome())
 	require.Empty(t, items[3].body)
 
 	// The guard still decides the endpoint: the same request without the
 	// composed admission ends the stream before any item.
-	_, err = getMany(t, newTestClient(t), &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a.md"}}})
+	_, err = getMany(t, newTestClient(t), &storagev1.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev1.GetManyItem{{Key: "a.md"}}})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 }

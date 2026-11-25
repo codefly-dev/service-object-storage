@@ -48,7 +48,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 )
 
 // TestRuntimeEndToEndPutGet scaffolds a service through the Builder, drives the
@@ -134,27 +134,27 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 		callertoken.DialOption(token))
 	require.NoError(t, err)
 	defer conn.Close()
-	client := storagev0.NewObjectStorageClient(conn)
+	client := storagev1.NewObjectStorageClient(conn)
 
 	key := "e2e/hello.txt"
 	payload := []byte("real bytes through the agent runtime")
 
 	st, err := client.Put(ctx)
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: &storagev0.PutHeader{
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: &storagev1.PutHeader{
 		Key:         key,
 		TotalSize:   int64(len(payload)),
 		ContentType: "text/plain",
 	}}}))
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: payload}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: payload}}))
 	pr, err := st.CloseAndRecv()
 	require.NoError(t, err)
 	require.NotEmpty(t, pr.GetEtag())
 
-	gs, err := client.Get(ctx, &storagev0.GetRequest{Key: key})
+	gs, err := client.Get(ctx, &storagev1.GetRequest{Key: key})
 	require.NoError(t, err)
 	var body []byte
-	var hdr *storagev0.GetHeader
+	var hdr *storagev1.GetHeader
 	for {
 		msg, rerr := gs.Recv()
 		if rerr == io.EOF {
@@ -241,48 +241,48 @@ func requireUnauthenticatedPeerIsRefused(t *testing.T, endpoint string) {
 		conn, err := grpc.NewClient(endpoint,
 			append(extra, grpc.WithTransportCredentials(insecure.NewCredentials()))...)
 		require.NoError(t, err)
-		client := storagev0.NewObjectStorageClient(conn)
+		client := storagev1.NewObjectStorageClient(conn)
 
-		for rpcName, call := range map[string]func(context.Context, storagev0.ObjectStorageClient) error{
-			"Capabilities": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+		for rpcName, call := range map[string]func(context.Context, storagev1.ObjectStorageClient) error{
+			"Capabilities": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 				return err
 			},
-			"Stat": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Stat(ctx, &storagev0.StatRequest{Key: "e2e/hello.txt"})
+			"Stat": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Stat(ctx, &storagev1.StatRequest{Key: "e2e/hello.txt"})
 				return err
 			},
-			"Delete": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Delete(ctx, &storagev0.DeleteRequest{Key: "e2e/hello.txt"})
+			"Delete": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Delete(ctx, &storagev1.DeleteRequest{Key: "e2e/hello.txt"})
 				return err
 			},
-			"Presign": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Presign(ctx, &storagev0.PresignRequest{Key: "e2e/hello.txt", ExpirySeconds: 60})
+			"Presign": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Presign(ctx, &storagev1.PresignRequest{Key: "e2e/hello.txt", ExpirySeconds: 60})
 				return err
 			},
-			"Put": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+			"Put": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
 				st, sErr := c.Put(ctx)
 				if sErr != nil {
 					return sErr
 				}
-				if sErr = st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{
-					Header: &storagev0.PutHeader{Key: "e2e/intruder.txt", TotalSize: 4},
+				if sErr = st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{
+					Header: &storagev1.PutHeader{Key: "e2e/intruder.txt", TotalSize: 4},
 				}}); sErr != nil && sErr != io.EOF {
 					return sErr
 				}
 				_, sErr = st.CloseAndRecv()
 				return sErr
 			},
-			"Get": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				st, sErr := c.Get(ctx, &storagev0.GetRequest{Key: "e2e/hello.txt"})
+			"Get": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				st, sErr := c.Get(ctx, &storagev1.GetRequest{Key: "e2e/hello.txt"})
 				if sErr != nil {
 					return sErr
 				}
 				_, sErr = st.Recv()
 				return sErr
 			},
-			"Watch": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				st, sErr := c.Watch(ctx, &storagev0.WatchRequest{})
+			"Watch": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				st, sErr := c.Watch(ctx, &storagev1.WatchRequest{})
 				if sErr != nil {
 					return sErr
 				}

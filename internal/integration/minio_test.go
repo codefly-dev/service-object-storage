@@ -37,7 +37,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/egress"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -69,7 +69,7 @@ func ensureBucket(t *testing.T, endpoint, ak, sk, bucket string) {
 	}
 }
 
-func newStack(t *testing.T) storagev0.ObjectStorageClient {
+func newStack(t *testing.T) storagev1.ObjectStorageClient {
 	t.Helper()
 	endpoint := mustEnv(t, "MINIO_ENDPOINT")
 	ak := mustEnv(t, "MINIO_ACCESS_KEY")
@@ -95,7 +95,7 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)).AdmitComposed(composed))
+	storagev1.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)).AdmitComposed(composed))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
@@ -104,27 +104,27 @@ func newStack(t *testing.T) storagev0.ObjectStorageClient {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close(); _ = be.Close() })
-	return storagev0.NewObjectStorageClient(conn)
+	return storagev1.NewObjectStorageClient(conn)
 }
 
-func put(t *testing.T, c storagev0.ObjectStorageClient, key string, data []byte, h *storagev0.PutHeader) (*storagev0.PutResult, error) {
+func put(t *testing.T, c storagev1.ObjectStorageClient, key string, data []byte, h *storagev1.PutHeader) (*storagev1.PutResult, error) {
 	if h == nil {
-		h = &storagev0.PutHeader{}
+		h = &storagev1.PutHeader{}
 	}
 	h.Key = key
 	h.TotalSize = int64(len(data))
 	st, err := c.Put(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: h}}))
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: data}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: h}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: data}}))
 	return st.CloseAndRecv()
 }
 
-func get(t *testing.T, c storagev0.ObjectStorageClient, key string) ([]byte, *storagev0.GetHeader) {
-	st, err := c.Get(context.Background(), &storagev0.GetRequest{Key: key})
+func get(t *testing.T, c storagev1.ObjectStorageClient, key string) ([]byte, *storagev1.GetHeader) {
+	st, err := c.Get(context.Background(), &storagev1.GetRequest{Key: key})
 	require.NoError(t, err)
 	var body []byte
-	var hdr *storagev0.GetHeader
+	var hdr *storagev1.GetHeader
 	for {
 		msg, rerr := st.Recv()
 		if rerr == io.EOF {
@@ -144,7 +144,7 @@ func TestMinIOFullStack(t *testing.T) {
 	key := "integration/hello.txt"
 	payload := []byte("real minio, real bytes")
 
-	pr, err := put(t, c, key, payload, &storagev0.PutHeader{ContentType: "text/plain"})
+	pr, err := put(t, c, key, payload, &storagev1.PutHeader{ContentType: "text/plain"})
 	require.NoError(t, err)
 	require.NotEmpty(t, pr.GetEtag())
 
@@ -158,21 +158,21 @@ func TestMinIOFullStack(t *testing.T) {
 	require.Equal(t, payload, body2)
 
 	// Presign returns a usable URL.
-	ps, err := c.Presign(context.Background(), &storagev0.PresignRequest{
-		Key: key, Method: storagev0.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 600,
+	ps, err := c.Presign(context.Background(), &storagev1.PresignRequest{
+		Key: key, Method: storagev1.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 600,
 	})
 	require.NoError(t, err)
 	require.Contains(t, ps.GetUrl(), key)
 
 	// Copy then list under the prefix.
-	_, err = c.Copy(context.Background(), &storagev0.CopyRequest{SourceKey: key, DestKey: "integration/copy.txt"})
+	_, err = c.Copy(context.Background(), &storagev1.CopyRequest{SourceKey: key, DestKey: "integration/copy.txt"})
 	require.NoError(t, err)
-	lr, err := c.List(context.Background(), &storagev0.ListRequest{Prefix: "integration/"})
+	lr, err := c.List(context.Background(), &storagev1.ListRequest{Prefix: "integration/"})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(lr.GetObjects()), 2)
 
 	// Cleanup.
-	_, err = c.DeleteMany(context.Background(), &storagev0.DeleteManyRequest{
+	_, err = c.DeleteMany(context.Background(), &storagev1.DeleteManyRequest{
 		Keys: []string{key, "integration/copy.txt"},
 	})
 	require.NoError(t, err)
@@ -180,12 +180,12 @@ func TestMinIOFullStack(t *testing.T) {
 
 // putUnsized streams a body without declaring total_size, as a client that
 // leaves the proto3 field unset does.
-func putUnsized(t *testing.T, c storagev0.ObjectStorageClient, h *storagev0.PutHeader, chunks ...[]byte) (*storagev0.PutResult, error) {
+func putUnsized(t *testing.T, c storagev1.ObjectStorageClient, h *storagev1.PutHeader, chunks ...[]byte) (*storagev1.PutResult, error) {
 	st, err := c.Put(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: h}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: h}}))
 	for _, chunk := range chunks {
-		require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: chunk}}))
+		require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: chunk}}))
 	}
 	return st.CloseAndRecv()
 }
@@ -197,12 +197,12 @@ func TestMinIOPutWithoutTotalSize(t *testing.T) {
 	c := newStack(t)
 	key := "integration/unsized.bin"
 	payload := bytes.Repeat([]byte("unsized body "), 20_000)
-	_, err := putUnsized(t, c, &storagev0.PutHeader{Key: key}, payload[:100_000], payload[100_000:])
+	_, err := putUnsized(t, c, &storagev1.PutHeader{Key: key}, payload[:100_000], payload[100_000:])
 	require.NoError(t, err)
 	body, hdr := get(t, c, key)
 	require.Equal(t, int64(len(payload)), hdr.GetInfo().GetSize())
 	require.True(t, bytes.Equal(payload, body))
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: key})
 	require.NoError(t, err)
 }
 
@@ -212,13 +212,13 @@ func TestMinIOPutWithoutTotalSize(t *testing.T) {
 func TestMinIOCreateIfAbsentWithoutTotalSize(t *testing.T) {
 	c := newStack(t)
 	key := "integration/create-once.txt"
-	_, err := putUnsized(t, c, &storagev0.PutHeader{Key: key, IfNoneMatch: "*"}, []byte("first"))
+	_, err := putUnsized(t, c, &storagev1.PutHeader{Key: key, IfNoneMatch: "*"}, []byte("first"))
 	require.NoError(t, err)
-	_, err = putUnsized(t, c, &storagev0.PutHeader{Key: key, IfNoneMatch: "*"}, []byte("second"))
+	_, err = putUnsized(t, c, &storagev1.PutHeader{Key: key, IfNoneMatch: "*"}, []byte("second"))
 	require.Error(t, err, "create-if-absent must refuse an existing key")
 	body, _ := get(t, c, key)
 	require.Equal(t, []byte("first"), body)
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: key})
 	require.NoError(t, err)
 }
 
@@ -235,21 +235,21 @@ func TestMinIOConditionalDelete(t *testing.T) {
 	require.NotEmpty(t, etag)
 
 	// A compare-and-delete against a missing object fails its precondition.
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "integration/never-existed", IfMatch: etag})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: "integration/never-existed", IfMatch: etag})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 
 	// A stale precondition must fail and leave the object intact.
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key, IfMatch: `"00000000000000000000000000000000"`})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: key, IfMatch: `"00000000000000000000000000000000"`})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 
 	_, hdr := get(t, c, key)
 	require.Equal(t, etag, hdr.GetInfo().GetEtag(), "object must survive a failed conditional delete")
 
 	// The matching precondition deletes.
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: key, IfMatch: etag})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: key, IfMatch: etag})
 	require.NoError(t, err)
 
-	st, err := c.Get(context.Background(), &storagev0.GetRequest{Key: key})
+	st, err := c.Get(context.Background(), &storagev1.GetRequest{Key: key})
 	require.NoError(t, err)
 	_, rerr := st.Recv()
 	require.Equal(t, codes.NotFound, status.Code(rerr), "object must be gone after a matching conditional delete")
@@ -266,12 +266,12 @@ func TestMinIOBoundGetMany(t *testing.T) {
 		_, err := put(t, c, prefix+key, []byte("# "+key), nil)
 		require.NoError(t, err)
 	}
-	binding := &storagev0.Binding{Kind: "minio", Endpoint: "http://" + byName(mustEnv(t, "MINIO_ENDPOINT")),
+	binding := &storagev1.Binding{Kind: "minio", Endpoint: "http://" + byName(mustEnv(t, "MINIO_ENDPOINT")),
 		Bucket: mustEnv(t, "MINIO_BUCKET"), Prefix: prefix,
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{
+		Credential: &storagev1.Credential{Kind: &storagev1.Credential_AccessKey{AccessKey: &storagev1.AccessKey{
 			Id: mustEnv(t, "MINIO_ACCESS_KEY"), Secret: mustEnv(t, "MINIO_SECRET_KEY")}}}}
 
-	lr, err := c.List(ctx, &storagev0.ListRequest{Binding: binding})
+	lr, err := c.List(ctx, &storagev1.ListRequest{Binding: binding})
 	require.NoError(t, err)
 	etags := map[string]string{}
 	for _, o := range lr.GetObjects() {
@@ -279,13 +279,13 @@ func TestMinIOBoundGetMany(t *testing.T) {
 	}
 	require.Len(t, etags, 2)
 
-	ms, err := c.GetMany(ctx, &storagev0.GetManyRequest{Binding: binding, Items: []*storagev0.GetManyItem{
+	ms, err := c.GetMany(ctx, &storagev1.GetManyRequest{Binding: binding, Items: []*storagev1.GetManyItem{
 		{Key: "b.md", IfMatch: etags["b.md"]},
 		{Key: "a.md", IfMatch: "stale"},
 		{Key: "a.md", IfMatch: etags["a.md"]},
 	}})
 	require.NoError(t, err)
-	var outcomes []storagev0.GetManyOutcome
+	var outcomes []storagev1.GetManyOutcome
 	var payloads []string
 	for {
 		msg, rerr := ms.Recv()
@@ -299,10 +299,10 @@ func TestMinIOBoundGetMany(t *testing.T) {
 		}
 		payloads[len(payloads)-1] += string(msg.GetData())
 	}
-	require.Equal(t, []storagev0.GetManyOutcome{
-		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
-		storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED,
-		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
+	require.Equal(t, []storagev1.GetManyOutcome{
+		storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK,
+		storagev1.GetManyOutcome_GET_MANY_OUTCOME_CHANGED,
+		storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK,
 	}, outcomes)
 	require.Equal(t, []string{"# b.md", "", "# a.md"}, payloads)
 }
@@ -340,7 +340,7 @@ func TestMinIOIssuedSessionConfinesGatewayReads(t *testing.T) {
 		require.NoError(t, err)
 		_, err = put(t, c, prefix+key, []byte("stored"), nil)
 		require.NoError(t, err)
-		_, err = c.Stat(ctx, &storagev0.StatRequest{Binding: bound, Key: key})
+		_, err = c.Stat(ctx, &storagev1.StatRequest{Binding: bound, Key: key})
 		if row.allowed {
 			require.NoError(t, err)
 		} else {
@@ -364,8 +364,8 @@ func TestMinIOIssuedSessionConfinesGatewayReads(t *testing.T) {
 
 // boundGet reads key through the gateway's bound Get with the caller's
 // credential, and answers what the store answered.
-func boundGet(ctx context.Context, c storagev0.ObjectStorageClient, bound *storagev0.Binding, key string) ([]byte, error) {
-	stream, err := c.Get(ctx, &storagev0.GetRequest{Binding: bound, Key: key})
+func boundGet(ctx context.Context, c storagev1.ObjectStorageClient, bound *storagev1.Binding, key string) ([]byte, error) {
+	stream, err := c.Get(ctx, &storagev1.GetRequest{Binding: bound, Key: key})
 	if err != nil {
 		return nil, err
 	}
@@ -473,14 +473,14 @@ func TestMinIOIssuedSessionCannotLeaveADocumentsContentScope(t *testing.T) {
 
 	// Inside the scope, through the gateway's bound reads.
 	for _, key := range []string{first, second} {
-		info, err := c.Stat(ctx, &storagev0.StatRequest{Binding: bound, Key: key})
+		info, err := c.Stat(ctx, &storagev1.StatRequest{Binding: bound, Key: key})
 		require.NoError(t, err, "stat %s", key)
 		require.Equal(t, int64(len(stored[key])), info.GetInfo().GetSize())
 		body, err := boundGet(ctx, c, bound, key)
 		require.NoError(t, err, "get %s", key)
 		require.Equal(t, stored[key], string(body))
 	}
-	listed, err := c.List(ctx, &storagev0.ListRequest{Binding: bound, Prefix: own})
+	listed, err := c.List(ctx, &storagev1.ListRequest{Binding: bound, Prefix: own})
 	require.NoError(t, err)
 	var names []string
 	for _, object := range listed.GetObjects() {
@@ -505,7 +505,7 @@ func TestMinIOIssuedSessionCannotLeaveADocumentsContentScope(t *testing.T) {
 		"a key of the sibling's own slot":                  slot(tenant, sibling, objectkey.Principal(principal)) + "note.txt",
 		"its own digest under the sibling's scope by name": scopeOf(tenant, sibling) + "_sha256/" + second[strings.LastIndex(second, "/")+1:],
 	} {
-		_, err := c.Stat(ctx, &storagev0.StatRequest{Binding: bound, Key: key})
+		_, err := c.Stat(ctx, &storagev1.StatRequest{Binding: bound, Key: key})
 		denied("stat "+what, err)
 		body, err := boundGet(ctx, c, bound, key)
 		denied("get "+what, err)
@@ -529,7 +529,7 @@ func TestMinIOIssuedSessionCannotLeaveADocumentsContentScope(t *testing.T) {
 		"the scope its installation's name begins": strings.TrimSuffix(scopeOf(tenant, installation), "/"),
 	} {
 		for _, delimiter := range []string{"", "/"} {
-			page, err := c.List(ctx, &storagev0.ListRequest{Binding: bound, Prefix: prefix, Delimiter: delimiter})
+			page, err := c.List(ctx, &storagev1.ListRequest{Binding: bound, Prefix: prefix, Delimiter: delimiter})
 			denied("list "+what, err)
 			require.Empty(t, page.GetObjects(), "list %s enumerated objects", what)
 			require.Empty(t, page.GetCommonPrefixes(), "list %s enumerated prefixes", what)
@@ -611,7 +611,7 @@ func TestMinIOIssuedSessionCannotLeaveADocumentsContentScope(t *testing.T) {
 		require.Equal(t, body, string(got), "%s changed", key)
 	}
 	for _, added := range []string{fresh, scopeOf(tenant, sibling) + "_sha256/" + strings.Repeat("0", 64)} {
-		_, err := c.Stat(ctx, &storagev0.StatRequest{Key: added})
+		_, err := c.Stat(ctx, &storagev1.StatRequest{Key: added})
 		require.Equal(t, codes.NotFound, status.Code(err), "%s was written", added)
 	}
 }

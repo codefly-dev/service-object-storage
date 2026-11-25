@@ -27,7 +27,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -231,7 +231,7 @@ func startAuthenticatedGateway(t *testing.T, token string) string {
 		grpc.ChainUnaryInterceptor(callertoken.UnaryServerInterceptor(token)),
 		grpc.ChainStreamInterceptor(callertoken.StreamServerInterceptor(token)),
 	)
-	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev1.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(func() { srv.Stop(); hub.Close(); _ = be.Close() })
 	return lis.Addr().String()
@@ -451,9 +451,9 @@ func requireProbeSemantics(t *testing.T, body string) {
 	if !ok {
 		t.Fatalf("startupProbe is not a grpc probe: %v", c.StartupProbe)
 	}
-	if startup["service"] != storagev0.ObjectStorage_ServiceDesc.ServiceName {
+	if startup["service"] != storagev1.ObjectStorage_ServiceDesc.ServiceName {
 		t.Errorf("startupProbe must check %q, got %v",
-			storagev0.ObjectStorage_ServiceDesc.ServiceName, startup["service"])
+			storagev1.ObjectStorage_ServiceDesc.ServiceName, startup["service"])
 	}
 
 	// Naming the backend-gated service here would drain every replica at once on

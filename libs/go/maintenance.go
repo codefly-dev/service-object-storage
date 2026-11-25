@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
 )
 
@@ -30,12 +30,12 @@ const (
 // it holds the same client, and a second gateway placement on its own
 // credential is what would separate the two there.
 type Maintenance struct {
-	client storagev0.ObjectStorageClient
+	client storagev1.ObjectStorageClient
 	codec  objectkey.Codec
 }
 
 // NewMaintenance builds the maintenance capability of a base.
-func NewMaintenance(client storagev0.ObjectStorageClient, base string) (*Maintenance, error) {
+func NewMaintenance(client storagev1.ObjectStorageClient, base string) (*Maintenance, error) {
 	if isNil(client) {
 		return nil, errors.New("object storage client is required")
 	}
@@ -61,7 +61,7 @@ type Entry struct {
 func (m *Maintenance) walk(ctx context.Context, prefix string, visit func(Entry) error) error {
 	token := ""
 	for {
-		listed, err := m.client.List(ctx, &storagev0.ListRequest{Prefix: prefix, PageToken: token})
+		listed, err := m.client.List(ctx, &storagev1.ListRequest{Prefix: prefix, PageToken: token})
 		if err != nil {
 			return translate(err)
 		}
@@ -93,7 +93,7 @@ func (m *Maintenance) children(ctx context.Context, prefix string) ([]string, er
 	var found []string
 	token := ""
 	for {
-		listed, err := m.client.List(ctx, &storagev0.ListRequest{Prefix: prefix, Delimiter: "/", PageToken: token})
+		listed, err := m.client.List(ctx, &storagev1.ListRequest{Prefix: prefix, Delimiter: "/", PageToken: token})
 		if err != nil {
 			return nil, translate(err)
 		}
@@ -195,7 +195,7 @@ func (erasure *Erasure) add(other Erasure) {
 // sits under a principal's prefix is that principal's whatever it is called.
 func (m *Maintenance) erase(ctx context.Context, prefix string, keep func(Entry) bool) (Erasure, error) {
 	var erasure Erasure
-	capabilities, err := m.client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	capabilities, err := m.client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	if err != nil {
 		return erasure, translate(err)
 	}
@@ -206,7 +206,7 @@ func (m *Maintenance) erase(ctx context.Context, prefix string, keep func(Entry)
 		if len(batch) == 0 {
 			return nil
 		}
-		result, err := m.client.DeleteMany(ctx, &storagev0.DeleteManyRequest{Keys: batch})
+		result, err := m.client.DeleteMany(ctx, &storagev1.DeleteManyRequest{Keys: batch})
 		if err != nil {
 			return translate(err)
 		}
@@ -403,7 +403,7 @@ func (m *Maintenance) SweepContentWith(ctx context.Context, partition, scope str
 	if err != nil {
 		return erasure, err
 	}
-	capabilities, err := m.client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	capabilities, err := m.client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	if err != nil {
 		return erasure, translate(err)
 	}
@@ -425,7 +425,7 @@ func (m *Maintenance) SweepContentWith(ctx context.Context, partition, scope str
 			if !deciding {
 				return errors.New("object store: a sweep's remove is used inside its decision, and this one is over")
 			}
-			current, err := m.client.Stat(ctx, &storagev0.StatRequest{Key: entry.Physical})
+			current, err := m.client.Stat(ctx, &storagev1.StatRequest{Key: entry.Physical})
 			if status.Code(err) == codes.NotFound {
 				return nil
 			}
@@ -435,7 +435,7 @@ func (m *Maintenance) SweepContentWith(ctx context.Context, partition, scope str
 			if modified := current.GetInfo().GetLastModifiedUnixMs(); modified <= 0 || time.UnixMilli(modified).After(cutoff) {
 				return ErrContentInUse
 			}
-			if _, err := m.client.Delete(ctx, &storagev0.DeleteRequest{Key: entry.Physical}); err != nil && status.Code(err) != codes.NotFound {
+			if _, err := m.client.Delete(ctx, &storagev1.DeleteRequest{Key: entry.Physical}); err != nil && status.Code(err) != codes.NotFound {
 				if erasure.Failed == nil {
 					erasure.Failed = map[string]string{}
 				}
@@ -497,7 +497,7 @@ func (m *Maintenance) Audit(ctx context.Context, known Known) ([]Finding, error)
 // objects, and top-level prefixes that are no base's. It is how a layout that
 // predates the convention is found, and how two stores are shown not to
 // share a prefix.
-func Strays(ctx context.Context, client storagev0.ObjectStorageClient, bases ...string) ([]Finding, error) {
+func Strays(ctx context.Context, client storagev1.ObjectStorageClient, bases ...string) ([]Finding, error) {
 	if isNil(client) {
 		return nil, errors.New("object storage client is required")
 	}
@@ -512,7 +512,7 @@ func Strays(ctx context.Context, client storagev0.ObjectStorageClient, bases ...
 	var findings []Finding
 	token := ""
 	for {
-		listed, err := client.List(ctx, &storagev0.ListRequest{Delimiter: "/", PageToken: token})
+		listed, err := client.List(ctx, &storagev1.ListRequest{Delimiter: "/", PageToken: token})
 		if err != nil {
 			return nil, translate(err)
 		}

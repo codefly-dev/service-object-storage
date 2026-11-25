@@ -17,7 +17,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/codefly-dev/core/callertoken"
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -31,44 +31,44 @@ const serverToken = "89d0d1f6d0e2f5a4c3b2a1908f7e6d5c"
 // rpcs is the whole surface an unauthenticated peer could try: unary calls, the
 // client-streaming write, and both server streams. Each returns the RPC's
 // error, so a caller can assert on its status code either way.
-var rpcs = map[string]func(context.Context, storagev0.ObjectStorageClient) error{
-	"Capabilities": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		_, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+var rpcs = map[string]func(context.Context, storagev1.ObjectStorageClient) error{
+	"Capabilities": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		_, err := c.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 		return err
 	},
-	"Stat": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		_, err := c.Stat(ctx, &storagev0.StatRequest{Key: "probe"})
+	"Stat": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		_, err := c.Stat(ctx, &storagev1.StatRequest{Key: "probe"})
 		return err
 	},
-	"List": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		_, err := c.List(ctx, &storagev0.ListRequest{})
+	"List": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		_, err := c.List(ctx, &storagev1.ListRequest{})
 		return err
 	},
-	"Delete": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		_, err := c.Delete(ctx, &storagev0.DeleteRequest{Key: "probe"})
+	"Delete": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		_, err := c.Delete(ctx, &storagev1.DeleteRequest{Key: "probe"})
 		return err
 	},
-	"Presign": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		_, err := c.Presign(ctx, &storagev0.PresignRequest{Key: "probe", ExpirySeconds: 60})
+	"Presign": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		_, err := c.Presign(ctx, &storagev1.PresignRequest{Key: "probe", ExpirySeconds: 60})
 		return err
 	},
-	"Native": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		_, err := c.Native(ctx, &storagev0.NativeRequest{Verb: "probe"})
+	"Native": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		_, err := c.Native(ctx, &storagev1.NativeRequest{Verb: "probe"})
 		return err
 	},
-	"Put": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+	"Put": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
 		st, err := c.Put(ctx)
 		if err != nil {
 			return err
 		}
 		// A refused stream makes Send fail with io.EOF; CloseAndRecv then
 		// carries the real status.
-		if err := st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{
-			Header: &storagev0.PutHeader{Key: "probe", TotalSize: 5},
+		if err := st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{
+			Header: &storagev1.PutHeader{Key: "probe", TotalSize: 5},
 		}}); err != nil && err != io.EOF {
 			return err
 		}
-		if err := st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{
+		if err := st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{
 			Data: []byte("bytes"),
 		}}); err != nil && err != io.EOF {
 			return err
@@ -76,16 +76,16 @@ var rpcs = map[string]func(context.Context, storagev0.ObjectStorageClient) error
 		_, err = st.CloseAndRecv()
 		return err
 	},
-	"Get": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		st, err := c.Get(ctx, &storagev0.GetRequest{Key: "probe"})
+	"Get": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		st, err := c.Get(ctx, &storagev1.GetRequest{Key: "probe"})
 		if err != nil {
 			return err
 		}
 		_, err = st.Recv()
 		return err
 	},
-	"Watch": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-		st, err := c.Watch(ctx, &storagev0.WatchRequest{})
+	"Watch": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+		st, err := c.Watch(ctx, &storagev1.WatchRequest{})
 		if err != nil {
 			return err
 		}
@@ -109,19 +109,19 @@ func startGateway(t *testing.T) string {
 		grpc.ChainUnaryInterceptor(callertoken.UnaryServerInterceptor(serverToken)),
 		grpc.ChainStreamInterceptor(callertoken.StreamServerInterceptor(serverToken)),
 	)
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev1.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	healthv1.RegisterHealthServer(s, grpchealth.NewServer())
 	go func() { _ = s.Serve(lis) }()
 	t.Cleanup(func() { s.Stop(); hub.Close(); _ = be.Close() })
 	return lis.Addr().String()
 }
 
-func dial(t *testing.T, address string, opts ...grpc.DialOption) storagev0.ObjectStorageClient {
+func dial(t *testing.T, address string, opts ...grpc.DialOption) storagev1.ObjectStorageClient {
 	t.Helper()
 	conn, err := grpc.NewClient(address, append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	return storagev0.NewObjectStorageClient(conn)
+	return storagev1.NewObjectStorageClient(conn)
 }
 
 // TestUnauthenticatedPeerIsRefused is the core guarantee: a peer that reaches
@@ -130,7 +130,7 @@ func dial(t *testing.T, address string, opts ...grpc.DialOption) storagev0.Objec
 func TestUnauthenticatedPeerIsRefused(t *testing.T) {
 	address := startGateway(t)
 
-	peers := map[string]storagev0.ObjectStorageClient{
+	peers := map[string]storagev1.ObjectStorageClient{
 		"no credentials":  dial(t, address),
 		"wrong token":     dial(t, address, callertoken.DialOption("00000000000000000000000000000000")),
 		"prefix of token": dial(t, address, callertoken.DialOption(serverToken[:len(serverToken)-1])),
@@ -177,7 +177,7 @@ func TestTokenTravelsUnderTheEcosystemKey(t *testing.T) {
 	client := dial(t, startGateway(t), grpc.WithUnaryInterceptor(withMetadata(callertoken.MetadataKey, serverToken)))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	_, err := client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err)
 }
 
@@ -188,7 +188,7 @@ func TestTokenUnderAnotherHeaderIsRefused(t *testing.T) {
 	client := dial(t, startGateway(t), grpc.WithUnaryInterceptor(withMetadata("authorization", "Bearer "+serverToken)))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	_, err := client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	require.Equal(t, codes.Unauthenticated, status.Code(err), "got %v", err)
 }
 

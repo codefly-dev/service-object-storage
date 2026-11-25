@@ -43,7 +43,7 @@ func UnreachableMinIO(t *testing.T, name string) backend.Backend {
 // landed, so a test reading its verdict is not racing startup.
 func Monitor(t *testing.T, be backend.Backend) *health.Monitor {
 	t.Helper()
-	m := health.New(be, grpchealth.NewServer(), "codefly.storage.v0.ObjectStorage",
+	m := health.New(be, grpchealth.NewServer(), "codefly.storage.v1.ObjectStorage",
 		50*time.Millisecond, 2*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -59,7 +59,7 @@ type notClosing struct{ backend.Backend }
 func (notClosing) Close() error { return nil }
 
 type scopedGateway struct {
-	client  storagev0.ObjectStorageClient
+	client  storagev1.ObjectStorageClient
 	own     backend.Backend // what the gateway's own credential reaches
 	session backend.Backend // what any session reaches
 	issuer  *stubIssuer
@@ -92,35 +92,35 @@ func newScopedGateway(t *testing.T, mode server.ScopedMode, presign bool) scoped
 	return scopedGateway{client: newTestClientForServer(t, srv), own: own, session: session, issuer: issuer}
 }
 
-func scope(mode storagev0.ScopeMode) *storagev0.Scope {
-	return &storagev0.Scope{Base: grantedBase, Partition: "tenant-a", Scope: "installation-a", Mode: mode}
+func scope(mode storagev1.ScopeMode) *storagev1.Scope {
+	return &storagev1.Scope{Base: grantedBase, Partition: "tenant-a", Scope: "installation-a", Mode: mode}
 }
 
 const (
-	read        = storagev0.ScopeMode_SCOPE_MODE_READ
-	ingest      = storagev0.ScopeMode_SCOPE_MODE_INGEST
-	maintenance = storagev0.ScopeMode_SCOPE_MODE_MAINTENANCE
+	read        = storagev1.ScopeMode_SCOPE_MODE_READ
+	ingest      = storagev1.ScopeMode_SCOPE_MODE_INGEST
+	maintenance = storagev1.ScopeMode_SCOPE_MODE_MAINTENANCE
 )
 
 var contentKey = "files/tenant-a/installation-a/_sha256/" + strings.Repeat("a", 64)
 
 // everyCall makes each data RPC once with the given scope and returns its
 // error by name.
-func everyCall(t *testing.T, c storagev0.ObjectStorageClient, with *storagev0.Scope) map[string]error {
+func everyCall(t *testing.T, c storagev1.ObjectStorageClient, with *storagev1.Scope) map[string]error {
 	t.Helper()
 	ctx := context.Background()
 	out := map[string]error{}
-	_, out["Stat"] = c.Stat(ctx, &storagev0.StatRequest{Key: contentKey, Scope: with})
-	_, _, out["Get"] = getObject(t, c, &storagev0.GetRequest{Key: contentKey, Scope: with})
-	many, err := c.GetMany(ctx, &storagev0.GetManyRequest{Items: []*storagev0.GetManyItem{{Key: contentKey}}, Scope: with})
+	_, out["Stat"] = c.Stat(ctx, &storagev1.StatRequest{Key: contentKey, Scope: with})
+	_, _, out["Get"] = getObject(t, c, &storagev1.GetRequest{Key: contentKey, Scope: with})
+	many, err := c.GetMany(ctx, &storagev1.GetManyRequest{Items: []*storagev1.GetManyItem{{Key: contentKey}}, Scope: with})
 	require.NoError(t, err)
 	_, out["GetMany"] = many.Recv()
-	_, out["Put"] = putObject(t, c, contentKey, []byte("body"), &storagev0.PutHeader{Scope: with})
-	_, out["Delete"] = c.Delete(ctx, &storagev0.DeleteRequest{Key: contentKey, Scope: with})
-	_, out["DeleteMany"] = c.DeleteMany(ctx, &storagev0.DeleteManyRequest{Keys: []string{contentKey}, Scope: with})
-	_, out["List"] = c.List(ctx, &storagev0.ListRequest{Prefix: "files/", Scope: with})
-	_, out["Copy"] = c.Copy(ctx, &storagev0.CopyRequest{SourceKey: contentKey, DestKey: contentKey + "x", Scope: with})
-	_, out["Presign"] = c.Presign(ctx, &storagev0.PresignRequest{Key: contentKey, Method: storagev0.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 60, Scope: with})
+	_, out["Put"] = putObject(t, c, contentKey, []byte("body"), &storagev1.PutHeader{Scope: with})
+	_, out["Delete"] = c.Delete(ctx, &storagev1.DeleteRequest{Key: contentKey, Scope: with})
+	_, out["DeleteMany"] = c.DeleteMany(ctx, &storagev1.DeleteManyRequest{Keys: []string{contentKey}, Scope: with})
+	_, out["List"] = c.List(ctx, &storagev1.ListRequest{Prefix: "files/", Scope: with})
+	_, out["Copy"] = c.Copy(ctx, &storagev1.CopyRequest{SourceKey: contentKey, DestKey: contentKey + "x", Scope: with})
+	_, out["Presign"] = c.Presign(ctx, &storagev1.PresignRequest{Key: contentKey, Method: storagev1.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 60, Scope: with})
 	return out
 }
 
@@ -139,7 +139,7 @@ func TestAScopedCallIsRefusedWhereScopedSessionsAreOff(t *testing.T) {
 	plain := newTestClientFor(t, own)
 	off := newScopedGateway(t, server.ScopedOff, true)
 	for name, gateway := range map[string]struct {
-		client storagev0.ObjectStorageClient
+		client storagev1.ObjectStorageClient
 		own    backend.Backend
 	}{"never configured": {plain, own}, "configured off": {off.client, off.own}} {
 		for rpc, err := range everyCall(t, gateway.client, scope(maintenance)) {
@@ -150,7 +150,7 @@ func TestAScopedCallIsRefusedWhereScopedSessionsAreOff(t *testing.T) {
 		// And a call without a scope is what it always was.
 		_, err := putObject(t, gateway.client, "plain.txt", []byte("x"), nil)
 		require.NoError(t, err, name)
-		caps, err := gateway.client.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{})
+		caps, err := gateway.client.Capabilities(context.Background(), &storagev1.CapabilitiesRequest{})
 		require.NoError(t, err)
 		require.Equal(t, "off", caps.GetScopedSessions())
 		require.Empty(t, caps.GetScopedSessionIssuer())
@@ -163,27 +163,27 @@ func TestAScopedCallIsRefusedWhereScopedSessionsAreOff(t *testing.T) {
 func TestAScopedCallRunsOnItsSessionNeverOnTheGatewaysCredential(t *testing.T) {
 	gateway := newScopedGateway(t, server.ScopedAllow, false)
 	ctx := context.Background()
-	_, err := putObject(t, gateway.client, contentKey, []byte("scoped"), &storagev0.PutHeader{Scope: scope(ingest)})
+	_, err := putObject(t, gateway.client, contentKey, []byte("scoped"), &storagev1.PutHeader{Scope: scope(ingest)})
 	require.NoError(t, err)
 	requireEmpty(t, gateway.own)
 	_, err = gateway.session.Stat(ctx, contentKey, "")
 	require.NoError(t, err)
 
-	header, body, err := getObject(t, gateway.client, &storagev0.GetRequest{Key: contentKey, Scope: scope(read)})
+	header, body, err := getObject(t, gateway.client, &storagev1.GetRequest{Key: contentKey, Scope: scope(read)})
 	require.NoError(t, err)
 	require.Equal(t, "scoped", string(body))
 	require.Equal(t, contentKey, header.GetInfo().GetKey())
-	_, err = gateway.client.Stat(ctx, &storagev0.StatRequest{Key: contentKey})
+	_, err = gateway.client.Stat(ctx, &storagev1.StatRequest{Key: contentKey})
 	require.Equal(t, codes.NotFound, status.Code(err), "the gateway's own credential reads its own store, where nothing was written")
 
-	_, err = gateway.client.Copy(ctx, &storagev0.CopyRequest{SourceKey: contentKey, DestKey: contentKey[:len(contentKey)-1] + "b", Scope: scope(maintenance)})
+	_, err = gateway.client.Copy(ctx, &storagev1.CopyRequest{SourceKey: contentKey, DestKey: contentKey[:len(contentKey)-1] + "b", Scope: scope(maintenance)})
 	require.NoError(t, err)
-	listed, err := gateway.client.List(ctx, &storagev0.ListRequest{Prefix: "files/tenant-a/installation-a/", Scope: scope(read)})
+	listed, err := gateway.client.List(ctx, &storagev1.ListRequest{Prefix: "files/tenant-a/installation-a/", Scope: scope(read)})
 	require.NoError(t, err)
 	require.Len(t, listed.GetObjects(), 2)
-	_, err = gateway.client.DeleteMany(ctx, &storagev0.DeleteManyRequest{Keys: []string{contentKey}, Scope: scope(maintenance)})
+	_, err = gateway.client.DeleteMany(ctx, &storagev1.DeleteManyRequest{Keys: []string{contentKey}, Scope: scope(maintenance)})
 	require.NoError(t, err)
-	_, err = gateway.client.Delete(ctx, &storagev0.DeleteRequest{Key: contentKey[:len(contentKey)-1] + "b", Scope: scope(maintenance)})
+	_, err = gateway.client.Delete(ctx, &storagev1.DeleteRequest{Key: contentKey[:len(contentKey)-1] + "b", Scope: scope(maintenance)})
 	require.NoError(t, err)
 	requireEmpty(t, gateway.session)
 	requireEmpty(t, gateway.own)
@@ -196,7 +196,7 @@ func TestAScopedCallRunsOnItsSessionNeverOnTheGatewaysCredential(t *testing.T) {
 	}
 	require.Equal(t, map[sessions.Mode]int{sessions.Read: 1, sessions.Ingest: 1, sessions.Maintenance: 1}, modes)
 
-	caps, err := gateway.client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	caps, err := gateway.client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "allow", caps.GetScopedSessions())
 	require.Equal(t, "qualified", caps.GetScopedSessionIssuer())
@@ -212,9 +212,9 @@ func TestRequireRefusesEveryCallThatNamesNoScope(t *testing.T) {
 		info, _ := requireReason(t, err, codes.PermissionDenied, "SCOPE_REQUIRED")
 		require.NotNil(t, info, rpc)
 	}
-	_, err := gateway.client.Native(ctx, &storagev0.NativeRequest{Verb: "anything"})
+	_, err := gateway.client.Native(ctx, &storagev1.NativeRequest{Verb: "anything"})
 	requireReason(t, err, codes.PermissionDenied, "SCOPE_REQUIRED")
-	watch, err := gateway.client.Watch(ctx, &storagev0.WatchRequest{})
+	watch, err := gateway.client.Watch(ctx, &storagev1.WatchRequest{})
 	require.NoError(t, err)
 	_, err = watch.Recv()
 	requireReason(t, err, codes.PermissionDenied, "SCOPE_REQUIRED")
@@ -222,14 +222,14 @@ func TestRequireRefusesEveryCallThatNamesNoScope(t *testing.T) {
 	requireEmpty(t, gateway.session)
 	require.Empty(t, gateway.issuer.issued)
 
-	caps, err := gateway.client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	caps, err := gateway.client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "require", caps.GetScopedSessions())
-	_, err = gateway.client.Ready(ctx, &storagev0.ReadyRequest{})
+	_, err = gateway.client.Ready(ctx, &storagev1.ReadyRequest{})
 	require.NoError(t, err)
 
 	// With a scope the same calls are served.
-	_, err = putObject(t, gateway.client, contentKey, []byte("scoped"), &storagev0.PutHeader{Scope: scope(ingest)})
+	_, err = putObject(t, gateway.client, contentKey, []byte("scoped"), &storagev1.PutHeader{Scope: scope(ingest)})
 	require.NoError(t, err)
 }
 
@@ -238,28 +238,28 @@ func TestRequireRefusesEveryCallThatNamesNoScope(t *testing.T) {
 func TestAScopeThatCannotHaveItsSessionIsRefused(t *testing.T) {
 	gateway := newScopedGateway(t, server.ScopedAllow, true)
 	ctx := context.Background()
-	stat := func(with *storagev0.Scope) error {
-		_, err := gateway.client.Stat(ctx, &storagev0.StatRequest{Key: contentKey, Scope: with})
+	stat := func(with *storagev1.Scope) error {
+		_, err := gateway.client.Stat(ctx, &storagev1.StatRequest{Key: contentKey, Scope: with})
 		return err
 	}
-	put := func(with *storagev0.Scope) error {
-		_, err := putObject(t, gateway.client, contentKey, []byte("never written"), &storagev0.PutHeader{Scope: with})
+	put := func(with *storagev1.Scope) error {
+		_, err := putObject(t, gateway.client, contentKey, []byte("never written"), &storagev1.PutHeader{Scope: with})
 		return err
 	}
 	for name, refusal := range map[string]struct {
-		with   *storagev0.Scope
+		with   *storagev1.Scope
 		code   codes.Code
 		reason string
 	}{
-		"a base the caller was not granted":       {&storagev0.Scope{Base: "elsewhere", Partition: "t", Scope: "i", Mode: read}, codes.PermissionDenied, "SCOPE_NOT_GRANTED"},
-		"a mode the caller was not granted":       {&storagev0.Scope{Base: "readonly", Partition: "t", Scope: "i", Mode: ingest}, codes.PermissionDenied, "SCOPE_NOT_GRANTED"},
-		"no mode":                                 {&storagev0.Scope{Base: "files", Partition: "t", Scope: "i"}, codes.InvalidArgument, "SCOPE_INVALID"},
-		"a mode this gateway does not know":       {&storagev0.Scope{Base: "files", Partition: "t", Scope: "i", Mode: 99}, codes.InvalidArgument, "SCOPE_INVALID"},
-		"no partition":                            {&storagev0.Scope{Base: "files", Scope: "i", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
-		"no scope":                                {&storagev0.Scope{Base: "files", Partition: "t", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
-		"a base that is a path":                   {&storagev0.Scope{Base: "files/tenant-a", Partition: "t", Scope: "i", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
-		"an empty scope message":                  {&storagev0.Scope{}, codes.InvalidArgument, "SCOPE_INVALID"},
-		"an identifier over the convention's cap": {&storagev0.Scope{Base: "files", Partition: strings.Repeat("a", 241), Scope: "i", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
+		"a base the caller was not granted":       {&storagev1.Scope{Base: "elsewhere", Partition: "t", Scope: "i", Mode: read}, codes.PermissionDenied, "SCOPE_NOT_GRANTED"},
+		"a mode the caller was not granted":       {&storagev1.Scope{Base: "readonly", Partition: "t", Scope: "i", Mode: ingest}, codes.PermissionDenied, "SCOPE_NOT_GRANTED"},
+		"no mode":                                 {&storagev1.Scope{Base: "files", Partition: "t", Scope: "i"}, codes.InvalidArgument, "SCOPE_INVALID"},
+		"a mode this gateway does not know":       {&storagev1.Scope{Base: "files", Partition: "t", Scope: "i", Mode: 99}, codes.InvalidArgument, "SCOPE_INVALID"},
+		"no partition":                            {&storagev1.Scope{Base: "files", Scope: "i", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
+		"no scope":                                {&storagev1.Scope{Base: "files", Partition: "t", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
+		"a base that is a path":                   {&storagev1.Scope{Base: "files/tenant-a", Partition: "t", Scope: "i", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
+		"an empty scope message":                  {&storagev1.Scope{}, codes.InvalidArgument, "SCOPE_INVALID"},
+		"an identifier over the convention's cap": {&storagev1.Scope{Base: "files", Partition: strings.Repeat("a", 241), Scope: "i", Mode: read}, codes.InvalidArgument, "SCOPE_INVALID"},
 	} {
 		requireReason(t, stat(refusal.with), refusal.code, refusal.reason)
 		requireReason(t, put(refusal.with), refusal.code, refusal.reason)
@@ -268,12 +268,12 @@ func TestAScopeThatCannotHaveItsSessionIsRefused(t *testing.T) {
 	require.Empty(t, gateway.issuer.issued)
 
 	// A scope and a binding name two different stores.
-	_, err := gateway.client.Stat(ctx, &storagev0.StatRequest{Key: contentKey, Scope: scope(read), Binding: s3Binding("")})
+	_, err := gateway.client.Stat(ctx, &storagev1.StatRequest{Key: contentKey, Scope: scope(read), Binding: s3Binding("")})
 	requireReason(t, err, codes.InvalidArgument, "SCOPE_INVALID")
 
 	// A policy the store's limit does not hold is refused, never shortened.
 	gateway.issuer.prefix = strings.Repeat("p", 600) + "/"
-	long := &storagev0.Scope{Base: "files", Partition: strings.Repeat("a", 240), Scope: strings.Repeat("b", 240), Mode: read}
+	long := &storagev1.Scope{Base: "files", Partition: strings.Repeat("a", 240), Scope: strings.Repeat("b", 240), Mode: read}
 	requireReason(t, stat(long), codes.FailedPrecondition, "SCOPE_POLICY_TOO_LARGE")
 	long.Mode = ingest
 	gateway.issuer.prefix = strings.Repeat("p", 1700) + "/"
@@ -296,20 +296,20 @@ func TestAScopeThatCannotHaveItsSessionIsRefused(t *testing.T) {
 // mode, one exact object of the scope, an explicit short lifetime.
 func TestAScopedPresignIsOptInAndBounded(t *testing.T) {
 	ctx := context.Background()
-	get, put, post := storagev0.PresignMethod_PRESIGN_METHOD_GET, storagev0.PresignMethod_PRESIGN_METHOD_PUT, storagev0.PresignMethod_PRESIGN_METHOD_POST
+	get, put, post := storagev1.PresignMethod_PRESIGN_METHOD_GET, storagev1.PresignMethod_PRESIGN_METHOD_PUT, storagev1.PresignMethod_PRESIGN_METHOD_POST
 	closed := newScopedGateway(t, server.ScopedAllow, false)
-	_, err := closed.client.Presign(ctx, &storagev0.PresignRequest{Key: contentKey, Method: get, ExpirySeconds: 60, Scope: scope(read)})
+	_, err := closed.client.Presign(ctx, &storagev1.PresignRequest{Key: contentKey, Method: get, ExpirySeconds: 60, Scope: scope(read)})
 	requireReason(t, err, codes.FailedPrecondition, "SCOPED_SESSIONS_UNAVAILABLE")
 	require.Empty(t, closed.issuer.issued)
 
 	gateway := newScopedGateway(t, server.ScopedAllow, true)
-	signed, err := gateway.client.Presign(ctx, &storagev0.PresignRequest{Key: contentKey, Method: get, ExpirySeconds: 60, Scope: scope(read)})
+	signed, err := gateway.client.Presign(ctx, &storagev1.PresignRequest{Key: contentKey, Method: get, ExpirySeconds: 60, Scope: scope(read)})
 	require.NoError(t, err)
 	require.Contains(t, signed.GetUrl(), contentKey)
 	require.LessOrEqual(t, signed.GetExpiresAtUnixMs(), time.Now().Add(61*time.Second).UnixMilli())
 
-	other := &storagev0.Scope{Base: "files", Partition: "tenant-a", Scope: "installation-b", Mode: read}
-	for name, request := range map[string]*storagev0.PresignRequest{
+	other := &storagev1.Scope{Base: "files", Partition: "tenant-a", Scope: "installation-b", Mode: read}
+	for name, request := range map[string]*storagev1.PresignRequest{
 		"a GET signed by the ingest session":      {Key: contentKey, Method: get, ExpirySeconds: 60, Scope: scope(ingest)},
 		"a GET signed by the maintenance session": {Key: contentKey, Method: get, ExpirySeconds: 60, Scope: scope(maintenance)},
 		"a PUT signed by the read session":        {Key: contentKey, Method: put, ExpirySeconds: 60, Scope: scope(read)},
@@ -330,7 +330,7 @@ func TestAScopedPresignIsOptInAndBounded(t *testing.T) {
 	}
 
 	// Bounds are bound or refused. This store binds none, so it signs none.
-	for name, request := range map[string]*storagev0.PresignRequest{
+	for name, request := range map[string]*storagev1.PresignRequest{
 		"a typed PUT":           {Key: contentKey, Method: put, ExpirySeconds: 60, ContentType: "application/pdf", Scope: scope(ingest)},
 		"a sized POST":          {Key: contentKey, Method: post, ExpirySeconds: 60, ContentLengthMax: 10, Scope: scope(ingest)},
 		"a sized POST, unbound": {Key: contentKey, Method: post, ExpirySeconds: 60, ContentLengthMax: 10},
@@ -338,7 +338,7 @@ func TestAScopedPresignIsOptInAndBounded(t *testing.T) {
 		_, err := gateway.client.Presign(ctx, request)
 		require.Equal(t, codes.Unimplemented, status.Code(err), "%s: %v", name, err)
 	}
-	for name, request := range map[string]*storagev0.PresignRequest{
+	for name, request := range map[string]*storagev1.PresignRequest{
 		"a sized PUT":                 {Key: contentKey, Method: put, ExpirySeconds: 60, ContentLengthMax: 10, Scope: scope(ingest)},
 		"a POST with no size":         {Key: contentKey, Method: post, ExpirySeconds: 60, Scope: scope(ingest)},
 		"a POST with min over max":    {Key: contentKey, Method: post, ExpirySeconds: 60, ContentLengthMin: 11, ContentLengthMax: 10, Scope: scope(ingest)},
@@ -350,6 +350,6 @@ func TestAScopedPresignIsOptInAndBounded(t *testing.T) {
 		require.NotNil(t, info, name)
 	}
 	// An unscoped, unbounded presign is what it was.
-	_, err = gateway.client.Presign(ctx, &storagev0.PresignRequest{Key: "any/key", Method: put, ExpirySeconds: 60})
+	_, err = gateway.client.Presign(ctx, &storagev1.PresignRequest{Key: "any/key", Method: put, ExpirySeconds: 60})
 	require.NoError(t, err)
 }

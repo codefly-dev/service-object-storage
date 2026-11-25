@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
 	"github.com/codefly-dev/service-object-storage/libs/go/internal/gatewaytest"
 	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
@@ -68,7 +68,7 @@ func (d copyUnchecked) Copy(ctx context.Context, from, to objectstorage.Ref, _ o
 		physical, _ := codec.Key(objectkey.Key{Partition: binding.Partition, Scope: scope, Slot: slot, Name: ref.Name})
 		return physical
 	}
-	_, err := d.Store.Client().Copy(ctx, &storagev0.CopyRequest{SourceKey: key(from), DestKey: key(to)})
+	_, err := d.Store.Client().Copy(ctx, &storagev1.CopyRequest{SourceKey: key(from), DestKey: key(to)})
 	if status.Code(err) == codes.NotFound {
 		err = errors.Join(objectstorage.ErrNotFound, err)
 	}
@@ -90,7 +90,7 @@ func (d listRawPrefix) List(ctx context.Context, in objectstorage.Ref, options o
 	codec, _ := objectkey.New(d.Store.Base())
 	scope, slot := place(binding, in)
 	prefix, _ := codec.SlotPrefix(binding.Partition, scope, slot)
-	listed, err := d.Store.Client().List(ctx, &storagev0.ListRequest{Prefix: strings.TrimSuffix(prefix, "/"), PageToken: options.Token, Limit: int32(options.Limit)})
+	listed, err := d.Store.Client().List(ctx, &storagev1.ListRequest{Prefix: strings.TrimSuffix(prefix, "/"), PageToken: options.Token, Limit: int32(options.Limit)})
 	if err != nil {
 		return objectstorage.Page{}, err
 	}
@@ -367,7 +367,7 @@ func TestEveryRefusalIsTypedAndDecidedBeforeTheGateway(t *testing.T) {
 
 // untouchable is a gateway client no call may reach.
 type untouchable struct {
-	storagev0.ObjectStorageClient
+	storagev1.ObjectStorageClient
 	t *testing.T
 }
 
@@ -395,7 +395,7 @@ func TestAStoreNeedsItsPartsAndABase(t *testing.T) {
 // No method of a Store, and nothing reachable from a Binding, yields the
 // gateway client or the maintenance capability.
 func TestAStoreHandsOutNeitherItsClientNorMaintenance(t *testing.T) {
-	client := reflect.TypeOf((*storagev0.ObjectStorageClient)(nil)).Elem()
+	client := reflect.TypeOf((*storagev1.ObjectStorageClient)(nil)).Elem()
 	maintenance := reflect.TypeOf(&objectstorage.Maintenance{})
 	for _, holder := range []reflect.Type{reflect.TypeOf(&objectstorage.Store{}), reflect.TypeOf(objectstorage.Binding{}), reflect.TypeOf(objectstorage.Ref{})} {
 		for index := range holder.NumMethod() {
@@ -532,14 +532,14 @@ func TestAHandlerAJobAndADeparture(t *testing.T) {
 	}
 }
 
-func rawPut(t *testing.T, client storagev0.ObjectStorageClient, key string) {
+func rawPut(t *testing.T, client storagev1.ObjectStorageClient, key string) {
 	t.Helper()
 	stream, err := client.Put(context.Background())
 	if err == nil {
-		err = stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: &storagev0.PutHeader{Key: key, TotalSize: 1}}})
+		err = stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: &storagev1.PutHeader{Key: key, TotalSize: 1}}})
 	}
 	if err == nil {
-		err = stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: []byte("x")}})
+		err = stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: []byte("x")}})
 	}
 	if err == nil {
 		_, err = stream.CloseAndRecv()
@@ -593,7 +593,7 @@ func TestRequireLayout(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rawPut(t, client, damage.key)
 			defer func() {
-				if _, err := client.Delete(context.Background(), &storagev0.DeleteRequest{Key: damage.key}); err != nil {
+				if _, err := client.Delete(context.Background(), &storagev1.DeleteRequest{Key: damage.key}); err != nil {
 					t.Fatal(err)
 				}
 			}()
@@ -676,11 +676,11 @@ func TestSessionPolicy(t *testing.T) {
 }
 
 type uploadContextClient struct {
-	storagev0.ObjectStorageClient
+	storagev1.ObjectStorageClient
 	upload context.Context
 }
 
-func (c *uploadContextClient) Put(ctx context.Context, opts ...grpc.CallOption) (storagev0.ObjectStorage_PutClient, error) {
+func (c *uploadContextClient) Put(ctx context.Context, opts ...grpc.CallOption) (storagev1.ObjectStorage_PutClient, error) {
 	c.upload = ctx
 	return c.ObjectStorageClient.Put(ctx, opts...)
 }

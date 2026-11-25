@@ -1,6 +1,6 @@
 // Command object-storage is the codefly service agent that runs the
 // object-storage gateway as a real service: a container speaking the
-// codefly/storage/v0 gRPC contract, backed by MinIO locally and a cloud object
+// codefly/storage/v1 gRPC contract, backed by MinIO locally and a cloud object
 // store (S3/GCS/Azure) when deployed. Consumers depend on it as a gRPC service
 // and never link a cloud SDK — the gateway absorbs every backend difference.
 //

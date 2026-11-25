@@ -34,7 +34,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/egress"
@@ -68,7 +68,7 @@ func gcsEmulator(t *testing.T) (*gcs.Client, string) {
 	return client, bucket
 }
 
-func newGCSStack(t *testing.T, bucket, prefix string) storagev0.ObjectStorageClient {
+func newGCSStack(t *testing.T, bucket, prefix string) storagev1.ObjectStorageClient {
 	t.Helper()
 	// No GCSCredentialsFile: the keyless path a Workload Identity deployment
 	// takes (the emulator stands in for the credential exchange).
@@ -78,7 +78,7 @@ func newGCSStack(t *testing.T, bucket, prefix string) storagev0.ObjectStorageCli
 
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev1.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
@@ -87,7 +87,7 @@ func newGCSStack(t *testing.T, bucket, prefix string) storagev0.ObjectStorageCli
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close(); _ = be.Close() })
-	return storagev0.NewObjectStorageClient(conn)
+	return storagev1.NewObjectStorageClient(conn)
 }
 
 func TestGCSFullStack(t *testing.T) {
@@ -97,7 +97,7 @@ func TestGCSFullStack(t *testing.T) {
 	key := "integration/gcs-hello.txt"
 	payload := []byte("fake gcs, real client")
 
-	pr, err := put(t, c, key, payload, &storagev0.PutHeader{ContentType: "text/plain"})
+	pr, err := put(t, c, key, payload, &storagev1.PutHeader{ContentType: "text/plain"})
 	require.NoError(t, err)
 	require.NotEmpty(t, pr.GetEtag())
 
@@ -108,18 +108,18 @@ func TestGCSFullStack(t *testing.T) {
 
 	// Create-if-absent is atomic on GCS (generation-match 0); the contract
 	// reports the conflict as AlreadyExists on every backend.
-	_, err = put(t, c, key, []byte("again"), &storagev0.PutHeader{IfNoneMatch: "*"})
+	_, err = put(t, c, key, []byte("again"), &storagev1.PutHeader{IfNoneMatch: "*"})
 	require.Equal(t, codes.AlreadyExists, status.Code(err), "got %v", err)
 
-	_, err = c.Copy(ctx, &storagev0.CopyRequest{SourceKey: key, DestKey: "integration/gcs-copy.txt"})
+	_, err = c.Copy(ctx, &storagev1.CopyRequest{SourceKey: key, DestKey: "integration/gcs-copy.txt"})
 	require.NoError(t, err)
-	lr, err := c.List(ctx, &storagev0.ListRequest{Prefix: "integration/gcs-"})
+	lr, err := c.List(ctx, &storagev1.ListRequest{Prefix: "integration/gcs-"})
 	require.NoError(t, err)
 	require.Len(t, lr.GetObjects(), 2)
 
-	_, err = c.DeleteMany(ctx, &storagev0.DeleteManyRequest{Keys: []string{key, "integration/gcs-copy.txt"}})
+	_, err = c.DeleteMany(ctx, &storagev1.DeleteManyRequest{Keys: []string{key, "integration/gcs-copy.txt"}})
 	require.NoError(t, err)
-	st, err := c.Get(ctx, &storagev0.GetRequest{Key: key})
+	st, err := c.Get(ctx, &storagev1.GetRequest{Key: key})
 	require.NoError(t, err)
 	_, rerr := st.Recv()
 	require.Equal(t, codes.NotFound, status.Code(rerr))
@@ -144,14 +144,14 @@ func TestGCSPrefixConfinesKeys(t *testing.T) {
 	_, err = raw.Bucket(bucket).Object("docs/a.txt").Attrs(ctx)
 	require.ErrorIs(t, err, gcs.ErrObjectNotExist, "nothing may land outside the prefix")
 
-	lr, err := c.List(ctx, &storagev0.ListRequest{})
+	lr, err := c.List(ctx, &storagev1.ListRequest{})
 	require.NoError(t, err)
 	require.Len(t, lr.GetObjects(), 1)
 	require.Equal(t, "docs/a.txt", lr.GetObjects()[0].GetKey())
 
 	// A gateway on another prefix of the same bucket sees none of it.
 	other := newGCSStack(t, bucket, prefix+"-other")
-	lr, err = other.List(ctx, &storagev0.ListRequest{})
+	lr, err = other.List(ctx, &storagev1.ListRequest{})
 	require.NoError(t, err)
 	require.Empty(t, lr.GetObjects())
 }
@@ -211,19 +211,19 @@ func TestGCSBoundAccessToken(t *testing.T) {
 	hub := events.NewHub()
 	lis := bufconn.Listen(1 << 20)
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)).AdmitComposed(composed))
+	storagev1.RegisterObjectStorageServer(s, server.New(be, hub, probetest.Monitor(t, be)).AdmitComposed(composed))
 	go func() { _ = s.Serve(lis) }()
 	conn, err := grpc.NewClient("passthrough:///bufnet",
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close(); s.Stop(); hub.Close() })
-	c := storagev0.NewObjectStorageClient(conn)
+	c := storagev1.NewObjectStorageClient(conn)
 
-	binding := &storagev0.Binding{Kind: "gcs", Endpoint: "http://" + host, Bucket: bucket, Prefix: prefix,
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessToken{AccessToken: "ya29.impersonated"}}}
+	binding := &storagev1.Binding{Kind: "gcs", Endpoint: "http://" + host, Bucket: bucket, Prefix: prefix,
+		Credential: &storagev1.Credential{Kind: &storagev1.Credential_AccessToken{AccessToken: "ya29.impersonated"}}}
 
-	lr, err := c.List(ctx, &storagev0.ListRequest{Binding: binding})
+	lr, err := c.List(ctx, &storagev1.ListRequest{Binding: binding})
 	require.NoError(t, err)
 	var keys []string
 	for _, o := range lr.GetObjects() {
@@ -231,11 +231,11 @@ func TestGCSBoundAccessToken(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{"a.md", "sub/b.md"}, keys)
 
-	hdr, err := c.Stat(ctx, &storagev0.StatRequest{Key: "sub/b.md", Binding: binding})
+	hdr, err := c.Stat(ctx, &storagev1.StatRequest{Key: "sub/b.md", Binding: binding})
 	require.NoError(t, err)
 	require.EqualValues(t, len("# sub/b.md"), hdr.GetInfo().GetSize())
 
-	st, err := c.Get(ctx, &storagev0.GetRequest{Key: "a.md", Binding: binding})
+	st, err := c.Get(ctx, &storagev1.GetRequest{Key: "a.md", Binding: binding})
 	require.NoError(t, err)
 	var body []byte
 	for {
@@ -254,13 +254,13 @@ func TestGCSBoundAccessToken(t *testing.T) {
 	for _, o := range lr.GetObjects() {
 		etags[o.GetKey()] = o.GetEtag()
 	}
-	ms, err := c.GetMany(ctx, &storagev0.GetManyRequest{Binding: binding, Items: []*storagev0.GetManyItem{
+	ms, err := c.GetMany(ctx, &storagev1.GetManyRequest{Binding: binding, Items: []*storagev1.GetManyItem{
 		{Key: "sub/b.md", IfMatch: etags["sub/b.md"]},
 		{Key: "a.md", IfMatch: "stale"},
 		{Key: "a.md", IfMatch: etags["a.md"]},
 	}})
 	require.NoError(t, err)
-	var outcomes []storagev0.GetManyOutcome
+	var outcomes []storagev1.GetManyOutcome
 	var payloads []string
 	for {
 		msg, rerr := ms.Recv()
@@ -274,10 +274,10 @@ func TestGCSBoundAccessToken(t *testing.T) {
 		}
 		payloads[len(payloads)-1] += string(msg.GetData())
 	}
-	require.Equal(t, []storagev0.GetManyOutcome{
-		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
-		storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED,
-		storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK,
+	require.Equal(t, []storagev1.GetManyOutcome{
+		storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK,
+		storagev1.GetManyOutcome_GET_MANY_OUTCOME_CHANGED,
+		storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK,
 	}, outcomes)
 	require.Equal(t, []string{"# sub/b.md", "", "# a.md"}, payloads)
 }
