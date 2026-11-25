@@ -307,7 +307,7 @@ func TestMinIOBootstrapResumesAfterInterruption(t *testing.T) {
 	rt, _, _ := loadedRuntime(t, ctx)
 	defer func() { require.NoError(t, rt.teardown(context.Background())) }()
 	require.NoError(t, rt.LoadConfiguration(ctx, nil))
-	// Exact persisted state when freeHostPort, callertoken.Generate, image fetch or
+	// Exact persisted state when the port claim, callertoken.Generate, image fetch or
 	// ContainerStart fails after successful custody preflight.
 	_, release, err := rt.prepareMinIOData(ctx)
 	require.NoError(t, err)

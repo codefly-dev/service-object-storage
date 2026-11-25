@@ -106,6 +106,12 @@ type Runtime struct {
 	// client. Tests substitute a fake.
 	networkClient func() (dockerNetworks, error)
 
+	// ports holds the host ports Init's containers publish until each starts.
+	ports hostPorts
+	// starting, when set, is told which container is about to start. Tests use
+	// it to see what the agent holds at that moment.
+	starting func(container string)
+
 	// minioPassword is the MinIO root password generated for this run.
 	minioPassword    string
 	minioNewStore    bool
@@ -177,6 +183,18 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.GrpcEndpoint, s.Runtime.NetworkAccess())
 	if err != nil {
 		return s.Runtime.InitError(err)
+	}
+
+	// Before anything else that takes time or a port: the run let go of this
+	// service's ports to call Init, and the gateway that binds its own starts
+	// last. See hostPorts.
+	s.ports.claim(uint16(instance.Port))
+	defer s.ports.releaseAll()
+	if s.TenantStoreEndpoint != nil {
+		// The run released this one with it; minioPort reports a missing mapping.
+		if store, storeErr := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TenantStoreEndpoint, resources.NewNativeNetworkAccess()); storeErr == nil {
+			s.ports.claim(uint16(store.GetPort()))
+		}
 	}
 
 	if err = s.LoadConfiguration(ctx, configuration); err != nil {
@@ -274,6 +292,8 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 		return nil, s.Wool.Wrapf(err, "cannot allocate minio port")
 	}
 	s.minioHostPort = port
+	// A failure before the container starts leaves the port to nobody.
+	defer s.ports.handOver(port)
 
 	password, err := callertoken.Generate()
 	if err != nil {
@@ -316,7 +336,7 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 	runner.WithUser(s.minioContainerUser)
 	runner.WithMount(data, "/data")
 	runner.WithCommand("server", "/data")
-	if err = runner.Init(ctx); err != nil {
+	if err = s.startContainer(ctx, "minio", runner, s.minioHostPort); err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot start minio")
 	}
 	minioID, err := runner.ContainerID()
@@ -352,16 +372,35 @@ func (s *Runtime) startLocalMinIOWithRelease(ctx context.Context) (unlock func()
 
 // minioPort is MinIO's host port: the one codefly allocated to the declared
 // tenant-store endpoint, so a dependent's mapping names the store itself, or
-// otherwise a free loopback port for the agent alone.
+// otherwise a free loopback port for the agent alone. Either way the agent
+// holds it from here until MinIO starts.
+//
+// The agent picks the second kind itself because the run allocates a port per
+// declared endpoint and an agent has no way to ask it for one more. The port
+// is held from the moment the kernel names it — never probed, closed and
+// hoped for — so it cannot be the gateway's, which Init already holds.
 func (s *Runtime) minioPort(ctx context.Context) (uint16, error) {
 	if s.TenantStoreEndpoint == nil {
-		return freeHostPort()
+		return s.ports.claimFree()
 	}
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TenantStoreEndpoint, resources.NewNativeNetworkAccess())
 	if err != nil {
 		return 0, err
 	}
-	return uint16(instance.GetPort()), nil
+	port := uint16(instance.GetPort())
+	s.ports.claim(port)
+	return port, nil
+}
+
+// startContainer gives a container the host port the agent held for it and
+// starts it. The release sits here, against the start, because every step
+// between the two is time the port belongs to nobody.
+func (s *Runtime) startContainer(ctx context.Context, name string, env containerEnvironment, port uint16) error {
+	s.ports.handOver(port)
+	if s.starting != nil {
+		s.starting(name)
+	}
+	return env.Init(ctx)
 }
 
 // ensureBucket creates the configured bucket if it does not yet exist, retrying
@@ -588,7 +627,7 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 	}
 	envs = append(envs, scoped...)
 	runner.WithEnvironmentVariables(ctx, envs...)
-	if err = runner.Init(ctx); err != nil {
+	if err = s.startContainer(ctx, "gateway", runner, hostPort); err != nil {
 		return s.Wool.Wrapf(err, "cannot start gateway")
 	}
 	// A local MinIO is reached only on the service network. The gateway joins it
@@ -787,14 +826,4 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 		Message: "this agent ships no tests of its own: zero run, zero failed",
 	}
 	return response, nil
-}
-
-// freeHostPort asks the kernel for an unused TCP port and returns it.
-func freeHostPort() (uint16, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	return uint16(l.Addr().(*net.TCPAddr).Port), nil
 }
