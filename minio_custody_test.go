@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/gofrs/flock"
@@ -188,7 +188,7 @@ func TestMinIORejectsUnownedMount(t *testing.T) {
 func TestStructuredMinIOIdentity(t *testing.T) {
 	t.Setenv("CODEFLY_HOME", t.TempDir())
 	first, second := NewRuntime(), NewRuntime()
-	first.Environment, second.Environment = &basev0.Environment{}, &basev0.Environment{}
+	first.Environment, second.Environment = &basev1.Environment{}, &basev1.Environment{}
 	first.Identity = &resources.ServiceIdentity{Workspace: "wiki", Module: "documents-archive", Name: "object-storage"}
 	second.Identity = &resources.ServiceIdentity{Workspace: "wiki", Module: "documents", Name: "archive-object-storage"}
 	require.Equal(t, dockerrun.ContainerName(first.UniqueWithWorkspace()), dockerrun.ContainerName(second.UniqueWithWorkspace()))
@@ -382,7 +382,7 @@ func TestMinIORejectsUserMappingBeforeCustodyMutation(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "unix://"+listener.Addr().String())
 	rt := NewRuntime()
 	rt.Identity = &resources.ServiceIdentity{Workspace: "test", Module: "test", Name: "store"}
-	rt.Environment = &basev0.Environment{}
+	rt.Environment = &basev1.Environment{}
 	_, _, err = rt.prepareMinIOData(context.Background())
 	require.ErrorContains(t, err, "offers none")
 	require.ErrorContains(t, err, "container ID map: 0 165536 65536")

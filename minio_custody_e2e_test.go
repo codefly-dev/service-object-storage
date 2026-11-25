@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/callertoken"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/shared"
 	miniogo "github.com/minio/minio-go/v7"
@@ -39,16 +39,16 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	// Cleanup is restricted to environments created by this test. Data is in its
 	// temporary CODEFLY_HOME; no shared stack or retained volume is selected.
 	defer func() {
-		_, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+		_, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 		require.NoError(t, err)
 	}()
 	init := func() {
-		response, err := rt.Init(ctx, &runtimev0.InitRequest{RuntimeContext: runtimeContext, ProposedNetworkMappings: mappings})
+		response, err := rt.Init(ctx, &runtimev1.InitRequest{RuntimeContext: runtimeContext, ProposedNetworkMappings: mappings})
 		require.NoError(t, err)
-		require.NotEqual(t, runtimev0.InitStatus_ERROR, response.GetStatus().GetState(), response.GetStatus().GetMessage())
-		started, err := rt.Start(ctx, &runtimev0.StartRequest{})
+		require.NotEqual(t, runtimev1.InitStatus_ERROR, response.GetStatus().GetState(), response.GetStatus().GetMessage())
+		started, err := rt.Start(ctx, &runtimev1.StartRequest{})
 		require.NoError(t, err)
-		require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+		require.Equal(t, runtimev1.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
 	}
 	connect := func(token string) storagev1.ObjectStorageClient {
 		endpoint, err := rt.gatewayEnv.ContainerID()
@@ -111,18 +111,18 @@ func TestMinIOPersistentCustody(t *testing.T) {
 			require.Equal(t, payloads[i], body)
 		}
 	}
-	stopped, err := rt.Stop(ctx, &runtimev0.StopRequest{})
+	stopped, err := rt.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StopStatus_SUCCESS, stopped.GetStatus().GetState(), stopped.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StopStatus_SUCCESS, stopped.GetStatus().GetState(), stopped.GetStatus().GetMessage())
 	// Stop is all an ordered run sends: both containers stop, and both are kept.
 	for _, id := range []string{firstGatewayID, firstID} {
 		running, inspectErr := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", id).Output()
 		require.NoError(t, inspectErr, "Stop removed container %s", id)
 		require.Equal(t, "false", strings.TrimSpace(string(running)), "container %s still runs after Stop", id)
 	}
-	started, err := rt.Start(ctx, &runtimev0.StartRequest{})
+	started, err := rt.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
 	verify()
 	// Also exercise a real Docker Stop/Start on only this test's MinIO.
 	require.NoError(t, exec.Command("docker", "stop", firstID).Run())
@@ -139,7 +139,7 @@ func TestMinIOPersistentCustody(t *testing.T) {
 	// Register before Load so even an assertion failure cleans up this test.
 	defer func() { require.NoError(t, previous.teardown(context.Background())) }()
 	rt = NewRuntime()
-	_, err = rt.Load(ctx, &runtimev0.LoadRequest{Identity: shared.Must(previous.Identity.Proto()), Environment: previous.Environment, DisableCatch: true})
+	_, err = rt.Load(ctx, &runtimev1.LoadRequest{Identity: shared.Must(previous.Identity.Proto()), Environment: previous.Environment, DisableCatch: true})
 	require.NoError(t, err)
 	init()
 	secondID, err := rt.minioEnv.ContainerID()
@@ -175,9 +175,9 @@ func TestMinIOPersistentCustody(t *testing.T) {
 				require.NoError(t, os.Rename(record, record+".retained"))
 			}
 			// A rejected Init on the same runtime must not roll back its live containers.
-			response, prepErr := rt.Init(ctx, &runtimev0.InitRequest{RuntimeContext: runtimeContext, ProposedNetworkMappings: mappings})
+			response, prepErr := rt.Init(ctx, &runtimev1.InitRequest{RuntimeContext: runtimeContext, ProposedNetworkMappings: mappings})
 			require.NoError(t, prepErr)
-			require.Equal(t, runtimev0.InitStatus_ERROR, response.GetStatus().GetState())
+			require.Equal(t, runtimev1.InitStatus_ERROR, response.GetStatus().GetState())
 			require.Contains(t, response.GetStatus().GetMessage(), "MinIO custody")
 			require.NoError(t, exec.Command("docker", "inspect", secondID).Run())
 			if fault == "missing record" {
@@ -351,7 +351,7 @@ func TestMinIORejectsCollidingContainerIdentity(t *testing.T) {
 	second := NewRuntime()
 	identity := *first.Identity
 	identity.Module, identity.Name = "documents", "archive-object-storage"
-	_, err = second.Load(ctx, &runtimev0.LoadRequest{Identity: shared.Must(identity.Proto()), Environment: first.Environment, DisableCatch: true})
+	_, err = second.Load(ctx, &runtimev1.LoadRequest{Identity: shared.Must(identity.Proto()), Environment: first.Environment, DisableCatch: true})
 	require.NoError(t, err)
 	require.NoError(t, second.LoadConfiguration(ctx, nil))
 	require.Equal(t, dockerrun.ContainerName(first.UniqueWithWorkspace()), dockerrun.ContainerName(second.UniqueWithWorkspace()))

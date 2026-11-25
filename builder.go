@@ -8,8 +8,8 @@ import (
 
 	"github.com/codefly-dev/core/agents/communicate"
 	"github.com/codefly-dev/core/agents/services"
-	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
@@ -63,8 +63,8 @@ var supportedDeployBackends = map[string]bool{
 // Without this answer core refuses the whole render of any environment that
 // mirrors a registry, because such an environment builds on a dedicated
 // builder and core verifies every agent before dispatching to it.
-func (s *Builder) BuildCapabilities(context.Context, *builderv0.BuildCapabilitiesRequest) (*builderv0.BuildCapabilitiesResponse, error) {
-	return &builderv0.BuildCapabilitiesResponse{BuildxSelection: true}, nil
+func (s *Builder) BuildCapabilities(context.Context, *builderv1.BuildCapabilitiesRequest) (*builderv1.BuildCapabilitiesResponse, error) {
+	return &builderv1.BuildCapabilitiesResponse{BuildxSelection: true}, nil
 }
 
 func NewBuilder() *Builder {
@@ -75,7 +75,7 @@ func NewBuilder() *Builder {
 	}
 }
 
-func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
+func (s *Builder) Load(ctx context.Context, req *builderv1.LoadRequest) (*builderv1.LoadResponse, error) {
 	defer s.Wool.Catch()
 	return s.Builder.LoadService(ctx, req, services.BuilderLoad{
 		Settings:         s.Settings,
@@ -99,7 +99,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	})
 }
 
-func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*builderv0.AuditResponse, error) {
+func (s *Builder) Audit(ctx context.Context, req *builderv1.AuditRequest) (*builderv1.AuditResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	return s.Builder.AuditContainer(ctx, req, gatewayImage.FullName())
@@ -110,10 +110,10 @@ func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*buil
 // and platform of every image the service ships. A caller that resolved the
 // images itself passes them as subjects; an empty subject list asks the agent to
 // enumerate its own.
-func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builderv0.SBOMResponse, error) {
+func (s *Builder) SBOM(ctx context.Context, req *builderv1.SBOMRequest) (*builderv1.SBOMResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	if req.GetScope() != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if req.GetScope() != builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		return s.Builder.SBOMContainer(ctx, gatewayImage.FullName())
 	}
 	if subjects := req.GetSubjects(); len(subjects) > 0 {
@@ -134,12 +134,12 @@ func (s *Builder) SBOM(ctx context.Context, req *builderv0.SBOMRequest) (*builde
 // The subjects themselves come from imageevidence, which the release command
 // reads too, so the evidence a release publishes describes the same images the
 // agent reports.
-func (s *Builder) imageSubjects(ctx context.Context) ([]*builderv0.ImageSubject, error) {
+func (s *Builder) imageSubjects(ctx context.Context) ([]*builderv1.ImageSubject, error) {
 	image, overridden := effectiveGatewayImage()
 	return imageevidence.Subjects(ctx, s.Base.Unique(), image.FullName(), overridden)
 }
 
-func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
+func (s *Builder) Deploy(ctx context.Context, req *builderv1.DeploymentRequest) (*builderv1.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	s.Base.SetDockerImage(gatewayImage)
@@ -298,7 +298,7 @@ func workloadPodOverlay() *services.PodTemplateOverlay {
 	return &services.PodTemplateOverlay{ServiceAccount: &services.WorkloadServiceAccount{}}
 }
 
-func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
+func (s *Builder) Create(ctx context.Context, req *builderv1.CreateRequest) (*builderv1.CreateResponse, error) {
 	defer s.Wool.Catch()
 	if err := s.Templates(ctx, s.Information, services.WithFactory(factoryFS)); err != nil {
 		return s.Builder.CreateError(err)
@@ -334,7 +334,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 // created before the contract was published, or by an older agent version,
 // holds the current API. A dry run writes nothing and reports the contract
 // as changed when the service's copy differs.
-func (s *Builder) Sync(_ context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
+func (s *Builder) Sync(_ context.Context, req *builderv1.SyncRequest) (*builderv1.SyncResponse, error) {
 	defer s.Wool.Catch()
 	if req.GetDryRun() {
 		current, err := contractCurrent(s.Location)
@@ -342,7 +342,7 @@ func (s *Builder) Sync(_ context.Context, req *builderv0.SyncRequest) (*builderv
 			return s.Builder.SyncError(err)
 		}
 		resp, err := s.Builder.SyncResponse()
-		if err != nil || current || resp.GetState().GetState() != builderv0.SyncStatus_SUCCESS {
+		if err != nil || current || resp.GetState().GetState() != builderv1.SyncStatus_SUCCESS {
 			return resp, err
 		}
 		resp.ChangedFiles = []string{path.Join(s.Identity.RelativeToWorkspace, standards.DependencyProtoPath)}
@@ -354,7 +354,7 @@ func (s *Builder) Sync(_ context.Context, req *builderv0.SyncRequest) (*builderv
 	return s.Builder.SyncResponse()
 }
 
-func (s *Builder) Communicate(stream builderv0.Builder_CommunicateServer) error {
+func (s *Builder) Communicate(stream builderv1.Builder_CommunicateServer) error {
 	asker := communicate.NewQuestionAsker(stream)
 	_, err := asker.RunSequence(nil)
 	return err

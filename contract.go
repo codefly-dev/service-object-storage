@@ -10,7 +10,7 @@ import (
 	"github.com/yoheimuta/go-protoparser/v4"
 	"github.com/yoheimuta/go-protoparser/v4/parser"
 
-	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 )

@@ -35,9 +35,9 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/callertoken"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
@@ -71,11 +71,11 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	destroyed := false
 	defer func() {
 		if !destroyed {
-			_, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+			_, _ = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 		}
 	}()
 
-	init, err := rt.Init(ctx, &runtimev0.InitRequest{
+	init, err := rt.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
 	})
@@ -86,11 +86,11 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	// fault. Asserting only NoError walks on with a nil gatewayEnv and dies in a
 	// nil dereference below that says nothing about the actual cause (an image
 	// that cannot be pulled, say); this surfaces the message instead.
-	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 
-	start, err := rt.Start(ctx, &runtimev0.StartRequest{})
+	start, err := rt.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, start.GetStatus().GetState(), start.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, start.GetStatus().GetState(), start.GetStatus().GetMessage())
 
 	// A consumer running in its own container reaches the gateway through
 	// host.docker.internal, which resolves to the bridge gateway on Linux — a
@@ -180,7 +180,7 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 
 	// Teardown owns exactly what it started: both containers — including the
 	// only place the session token lives — and the network they shared.
-	_, err = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	_, err = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
 	destroyed = true
 	requireContainerRemoved(t, gatewayID)
@@ -212,7 +212,7 @@ func requireContainerRemoved(t *testing.T, containerID string) {
 
 // requireTokenIsSecret asserts the gateway credential is carried as a
 // secret-marked configuration value, so nothing downstream logs or renders it.
-func requireTokenIsSecret(t *testing.T, conf *basev0.Configuration, token string) {
+func requireTokenIsSecret(t *testing.T, conf *basev1.Configuration, token string) {
 	t.Helper()
 	for _, info := range conf.GetInfos() {
 		for _, value := range info.GetConfigurationValues() {
@@ -309,7 +309,7 @@ func requireUnauthenticatedPeerIsRefused(t *testing.T, endpoint string) {
 // Runtime's readiness probe and the test reach the gateway at localhost:<hostPort>;
 // the gateway container still resolves MinIO through the host.docker.internal
 // bridge address dockerrun injects.
-func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.NetworkMapping, *basev0.RuntimeContext) {
+func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev1.NetworkMapping, *basev1.RuntimeContext) {
 	t.Helper()
 
 	// Keep all persistent test data outside the developer's real Codefly home.
@@ -322,7 +322,7 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 	service := resources.Service{Name: serviceName, Version: "test-me"}
 	require.NoError(t, service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name)))
 
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Name:                service.Name,
 		Version:             service.Version,
 		Module:              "mod",
@@ -332,13 +332,13 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 	}
 
 	builder := NewBuilder()
-	_, err = builder.Load(ctx, &builderv0.LoadRequest{
+	_, err = builder.Load(ctx, &builderv1.LoadRequest{
 		DisableCatch: true,
 		Identity:     identity,
-		CreationMode: &builderv0.CreationMode{Communicate: false},
+		CreationMode: &builderv1.CreationMode{Communicate: false},
 	})
 	require.NoError(t, err)
-	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
+	_, err = builder.Create(ctx, &builderv1.CreateRequest{})
 	require.NoError(t, err)
 
 	rt := NewRuntime()
@@ -349,7 +349,7 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 
 	env := resources.LocalEnvironment()
 
-	_, err = rt.Load(ctx, &runtimev0.LoadRequest{
+	_, err = rt.Load(ctx, &runtimev1.LoadRequest{
 		Identity:     identity,
 		Environment:  shared.Must(env.Proto()),
 		DisableCatch: true,
@@ -422,21 +422,21 @@ func TestGCSCredentialProjection(t *testing.T) {
 	digest := fmt.Sprintf("%x", sha256.Sum256(key))
 
 	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
-	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
+	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{}) }()
 
-	init, err := rt.Init(ctx, &runtimev0.InitRequest{
+	init, err := rt.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
-		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+		Configuration: &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 			Name: "object-storage",
-			ConfigurationValues: []*basev0.ConfigurationValue{
+			ConfigurationValues: []*basev1.ConfigurationValue{
 				{Key: "SOS_BACKEND", Value: "gcs"},
 				{Key: "SOS_GCS_CREDENTIALS_FILE", Value: keyFile},
 			},
 		}}},
 	})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 	require.Nil(t, rt.minioEnv, "a gcs run must not stand up the local MinIO fixture")
 
 	projected := rt.gcsCredentialsHostFile
@@ -479,7 +479,7 @@ func TestGCSCredentialProjection(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, key, onHost, "the operator's key must be untouched")
 
-	_, err = rt.Destroy(ctx, &runtimev0.DestroyRequest{})
+	_, err = rt.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
 	_, err = os.Stat(projected)
 	require.True(t, os.IsNotExist(err), "Destroy must remove the projected key from the host")

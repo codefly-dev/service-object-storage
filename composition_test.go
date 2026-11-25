@@ -16,9 +16,9 @@ import (
 	"github.com/codefly-dev/core/agents/services"
 	agenttesting "github.com/codefly-dev/core/agents/testing"
 	"github.com/codefly-dev/core/callertoken"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/standards"
@@ -63,9 +63,9 @@ func TestLoadConfigurationDefaults(t *testing.T) {
 
 func TestLoadConfigurationRuntimeOverrides(t *testing.T) {
 	svc := NewService()
-	conf := &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+	conf := &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 		Name: "object-storage",
-		ConfigurationValues: []*basev0.ConfigurationValue{
+		ConfigurationValues: []*basev1.ConfigurationValue{
 			{Key: "SOS_BACKEND", Value: "s3"},
 			{Key: "SOS_BUCKET", Value: "prod-docs"},
 			{Key: "SOS_REGION", Value: "eu-west-1"},
@@ -89,9 +89,9 @@ func TestLoadConfigurationRuntimeOverrides(t *testing.T) {
 // handed to consumers in one form and enforced by the gateway in another.
 func TestLoadConfigurationNormalizesAuthToken(t *testing.T) {
 	svc := NewService()
-	conf := &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+	conf := &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 		Name: "object-storage",
-		ConfigurationValues: []*basev0.ConfigurationValue{
+		ConfigurationValues: []*basev1.ConfigurationValue{
 			{Key: "SOS_AUTH_TOKEN", Value: "pinned-secret\n"},
 		},
 	}}}
@@ -120,9 +120,9 @@ func TestLoadConfigurationNormalizesGCSCredentialsFile(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := NewService()
-			conf := &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+			conf := &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 				Name: "object-storage",
-				ConfigurationValues: []*basev0.ConfigurationValue{
+				ConfigurationValues: []*basev1.ConfigurationValue{
 					{Key: "SOS_GCS_CREDENTIALS_FILE", Value: tc.value},
 				},
 			}}}
@@ -242,18 +242,18 @@ func startAuthenticatedGateway(t *testing.T, token string) string {
 func newProbeRuntime(t *testing.T, address string) *Runtime {
 	t.Helper()
 	rt := NewRuntime()
-	endpoint := &basev0.Endpoint{Name: "grpc", Api: "grpc"}
+	endpoint := &basev1.Endpoint{Name: "grpc", Api: "grpc"}
 	rt.GrpcEndpoint = endpoint
 	rt.Runtime.WithContext(resources.NewRuntimeContextNative())
-	rt.NetworkMappings = []*basev0.NetworkMapping{{
+	rt.NetworkMappings = []*basev1.NetworkMapping{{
 		Endpoint:  endpoint,
-		Instances: []*basev0.NetworkInstance{{Address: address, Access: resources.NewNativeNetworkAccess()}},
+		Instances: []*basev1.NetworkInstance{{Address: address, Access: resources.NewNativeNetworkAccess()}},
 	}}
 	return rt
 }
 
 func TestResolveServingGRPCEndpoint(t *testing.T) {
-	endpoints := []*basev0.Endpoint{{Name: "grpc", Api: "grpc"}}
+	endpoints := []*basev1.Endpoint{{Name: "grpc", Api: "grpc"}}
 	endpoint, err := resolveServingGRPCEndpoint(context.Background(), endpoints)
 	if err != nil {
 		t.Fatalf("resolveServingGRPCEndpoint: %v", err)
@@ -279,19 +279,19 @@ func TestConnectionString(t *testing.T) {
 func TestConnectionConfigurationCarriesTokenAsSecret(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService()
-	identity := &basev0.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
+	identity := &basev1.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
 	if err := svc.Base.HeadlessLoad(ctx, identity); err != nil {
 		t.Fatalf("HeadlessLoad: %v", err)
 	}
 	const token = "b6f1a0c9d8e7f6a5b4c3d2e1f0a9b8c7"
 	svc.gatewayToken = token
 
-	conf, err := svc.CreateConnectionConfiguration(ctx, nil, &basev0.NetworkInstance{Address: "localhost:9464", Access: resources.NewNativeNetworkAccess()})
+	conf, err := svc.CreateConnectionConfiguration(ctx, nil, &basev1.NetworkInstance{Address: "localhost:9464", Access: resources.NewNativeNetworkAccess()})
 	if err != nil {
 		t.Fatalf("CreateConnectionConfiguration: %v", err)
 	}
 
-	values := map[string]*basev0.ConfigurationValue{}
+	values := map[string]*basev1.ConfigurationValue{}
 	for _, info := range conf.Infos {
 		for _, value := range info.ConfigurationValues {
 			values[value.Key] = value
@@ -320,12 +320,12 @@ func TestConnectionConfigurationCarriesTokenAsSecret(t *testing.T) {
 func TestConnectionConfigurationWithoutTokenOmitsIt(t *testing.T) {
 	ctx := context.Background()
 	svc := NewService()
-	identity := &basev0.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
+	identity := &basev1.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
 	if err := svc.Base.HeadlessLoad(ctx, identity); err != nil {
 		t.Fatalf("HeadlessLoad: %v", err)
 	}
 
-	conf, err := svc.CreateConnectionConfiguration(ctx, nil, &basev0.NetworkInstance{Address: "localhost:9464", Access: resources.NewNativeNetworkAccess()})
+	conf, err := svc.CreateConnectionConfiguration(ctx, nil, &basev1.NetworkInstance{Address: "localhost:9464", Access: resources.NewNativeNetworkAccess()})
 	if err != nil {
 		t.Fatalf("CreateConnectionConfiguration: %v", err)
 	}
@@ -477,7 +477,7 @@ func requireProbeSemantics(t *testing.T, body string) {
 func newDeployBuilder(t *testing.T, ctx context.Context) *Builder {
 	t.Helper()
 	builder := NewBuilder()
-	identity := &basev0.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
+	identity := &basev1.ServiceIdentity{Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3", WorkspacePath: t.TempDir(), RelativeToWorkspace: "."}
 	if err := builder.Base.HeadlessLoad(ctx, identity); err != nil {
 		t.Fatalf("HeadlessLoad: %v", err)
 	}
@@ -489,21 +489,21 @@ func newDeployBuilder(t *testing.T, ctx context.Context) *Builder {
 
 // deployRequest builds a Kubernetes DeploymentRequest carrying the given
 // object-storage configuration values, rendering into destination.
-func deployRequest(destination string, values map[string]string) *builderv0.DeploymentRequest {
-	var cfgValues []*basev0.ConfigurationValue
+func deployRequest(destination string, values map[string]string) *builderv1.DeploymentRequest {
+	var cfgValues []*basev1.ConfigurationValue
 	for k, v := range values {
-		cfgValues = append(cfgValues, &basev0.ConfigurationValue{Key: k, Value: v})
+		cfgValues = append(cfgValues, &basev1.ConfigurationValue{Key: k, Value: v})
 	}
-	return &builderv0.DeploymentRequest{
-		Environment: &basev0.Environment{Name: "test", Fixture: "dev-admin"},
-		Deployment: &builderv0.Deployment{Kind: &builderv0.Deployment_Kubernetes{
-			Kubernetes: &builderv0.KubernetesDeployment{
+	return &builderv1.DeploymentRequest{
+		Environment: &basev1.Environment{Name: "test", Fixture: "dev-admin"},
+		Deployment: &builderv1.Deployment{Kind: &builderv1.Deployment_Kubernetes{
+			Kubernetes: &builderv1.KubernetesDeployment{
 				Namespace:   "codefly",
 				Destination: destination,
-				Profile:     builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1,
+				Profile:     builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1,
 			},
 		}},
-		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+		Configuration: &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 			Name:                "object-storage",
 			ConfigurationValues: cfgValues,
 		}}},
@@ -587,7 +587,7 @@ func TestDeployResolvesBackendFromConfiguration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Deploy: %v", err)
 			}
-			if got := resp.GetState().GetState(); got != builderv0.DeploymentStatus_SUCCESS {
+			if got := resp.GetState().GetState(); got != builderv1.DeploymentStatus_SUCCESS {
 				t.Fatalf("deploy state = %v (%s), want SUCCESS", got, resp.GetState().GetMessage())
 			}
 
@@ -680,7 +680,7 @@ func TestDeployRejectsBrokenBackendConfiguration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Deploy returned transport error: %v", err)
 			}
-			if got := resp.GetState().GetState(); got != builderv0.DeploymentStatus_ERROR {
+			if got := resp.GetState().GetState(); got != builderv1.DeploymentStatus_ERROR {
 				t.Fatalf("deploy state = %v, want ERROR", got)
 			}
 			if msg := resp.GetState().GetMessage(); !strings.Contains(msg, tc.wantMsg) {
@@ -744,7 +744,7 @@ func newProjectionRuntime(t *testing.T, serviceDir, credentialsFile string) *Run
 	t.Helper()
 	t.Setenv(resources.CodeflyHomeEnv, t.TempDir())
 	rt := NewRuntime()
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3",
 		WorkspacePath: serviceDir, RelativeToWorkspace: ".",
 	}
@@ -966,9 +966,9 @@ func TestDestroyReportsTeardownFailure(t *testing.T) {
 	projected := rt.gcsCredentialsHostFile
 	rt.gatewayEnv = &stubEnvironment{err: errors.New("daemon unreachable")}
 
-	resp, err := rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	resp, err := rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 	require.NoError(t, err, "Destroy reports failure in its response, not as a transport error")
-	require.Equal(t, runtimev0.DestroyStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.DestroyStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "daemon unreachable")
 
 	_, statErr := os.Stat(projected)
@@ -993,10 +993,10 @@ func TestRollbackInitReleasesWhatInitOwns(t *testing.T) {
 
 // restrictedDeployRequest is deployRequest for the restricted (GitOps) output
 // profile a hosted cell renders with.
-func restrictedDeployRequest(destination, namespace string, values map[string]string) *builderv0.DeploymentRequest {
+func restrictedDeployRequest(destination, namespace string, values map[string]string) *builderv1.DeploymentRequest {
 	req := deployRequest(destination, values)
 	k := req.GetDeployment().GetKubernetes()
-	k.Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1
+	k.Profile = builderv1.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_RESTRICTED_PORTABLE_V1
 	k.Namespace = namespace
 	return req
 }
@@ -1019,7 +1019,7 @@ func TestDeployRestrictedKeylessGCS(t *testing.T) {
 		"SOS_PREFIX":  "documents",
 	}))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 
 	files := map[string]string{}
 	require.NoError(t, filepath.WalkDir(destination, func(path string, d os.DirEntry, err error) error {
@@ -1121,7 +1121,7 @@ func TestDeployRendersSpecDefaultMinIOForBinding(t *testing.T) {
 	destination := t.TempDir()
 	resp, err := builder.Deploy(ctx, restrictedDeployRequest(destination, "documents", map[string]string{}))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 	env := containerEnv(t, destination)
 	require.Equal(t, "object-storage", env["CODEFLY__SERVICE"])
 	require.Equal(t, "minio", env["SOS_BACKEND"])
@@ -1163,22 +1163,22 @@ func containerEnv(t *testing.T, destination string) map[string]string {
 func TestDeployServicePublishesAllocatedPort(t *testing.T) {
 	ctx := context.Background()
 	builder := newDeployBuilder(t, ctx)
-	builder.GrpcEndpoint = &basev0.Endpoint{Name: "grpc", Module: "module", Service: "object-storage", Api: standards.GRPC}
+	builder.GrpcEndpoint = &basev1.Endpoint{Name: "grpc", Module: "module", Service: "object-storage", Api: standards.GRPC}
 	destination := t.TempDir()
 	req := restrictedDeployRequest(destination, "documents", map[string]string{"SOS_BACKEND": "gcs", "SOS_BUCKET": "b"})
 	instance := resources.NewNetworkInstance("object-storage.documents.svc.cluster.local", 9090)
 	instance.Access = resources.NewContainerNetworkAccess()
-	req.NetworkMappings = []*basev0.NetworkMapping{
-		{Endpoint: builder.GrpcEndpoint, Instances: []*basev0.NetworkInstance{instance}},
+	req.NetworkMappings = []*basev1.NetworkMapping{
+		{Endpoint: builder.GrpcEndpoint, Instances: []*basev1.NetworkInstance{instance}},
 		// Another service's endpoint is never published by this Service.
 		{
-			Endpoint:  &basev0.Endpoint{Name: "grpc", Module: "module", Service: "other", Api: standards.GRPC},
-			Instances: []*basev0.NetworkInstance{instance},
+			Endpoint:  &basev1.Endpoint{Name: "grpc", Module: "module", Service: "other", Api: standards.GRPC},
+			Instances: []*basev1.NetworkInstance{instance},
 		},
 	}
 	resp, err := builder.Deploy(ctx, req)
 	require.NoError(t, err)
-	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 	service, err := os.ReadFile(filepath.Join(destination, "base", "service.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(service), "    - name: grpc\n      port: 9090\n      targetPort: 9464\n")
@@ -1192,7 +1192,7 @@ func TestDeployServiceFallsBackToContainerPort(t *testing.T) {
 	destination := t.TempDir()
 	resp, err := builder.Deploy(ctx, deployRequest(destination, map[string]string{"SOS_BACKEND": "s3"}))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 	service, err := os.ReadFile(filepath.Join(destination, "base", "service.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(service), "    - name: grpc\n      port: 9464\n      targetPort: 9464\n")
@@ -1210,7 +1210,7 @@ func TestDeployMinIOWithEndpointRendersIt(t *testing.T) {
 		"SOS_ENDPOINT": "http://minio.storage.svc:9000",
 	}))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
+	require.Equal(t, builderv1.DeploymentStatus_SUCCESS, resp.GetState().GetState(), resp.GetState().GetMessage())
 	body, err := os.ReadFile(filepath.Join(destination, "base", "deployment.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(body), "name: SOS_ENDPOINT")
@@ -1225,6 +1225,6 @@ func TestDeployRejectsUnusablePrefix(t *testing.T) {
 		"SOS_BACKEND": "gcs", "SOS_BUCKET": "b", "SOS_PREFIX": "a/../b",
 	}))
 	require.NoError(t, err)
-	require.Equal(t, builderv0.DeploymentStatus_ERROR, resp.GetState().GetState())
+	require.Equal(t, builderv1.DeploymentStatus_ERROR, resp.GetState().GetState())
 	require.Contains(t, resp.GetState().GetMessage(), "SOS_PREFIX")
 }

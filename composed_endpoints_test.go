@@ -6,13 +6,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 )
 
 // instance builds a mapping instance the way core does, where Host already
 // carries the port — the shape a live run hands the Runtime.
-func instance(access *basev0.NetworkAccess, hostname string, port uint16) *basev0.NetworkInstance {
+func instance(access *basev1.NetworkAccess, hostname string, port uint16) *basev1.NetworkInstance {
 	inst := resources.NewNetworkInstance(hostname, port)
 	inst.Access = access
 	return inst
@@ -22,10 +22,10 @@ func instance(access *basev0.NetworkAccess, hostname string, port uint16) *basev
 // container — and a service with no dependency admits nothing.
 func TestComposedEndpointsAreTheDependenciesContainerView(t *testing.T) {
 	ctx := context.Background()
-	mappings := []*basev0.NetworkMapping{{Instances: []*basev0.NetworkInstance{
+	mappings := []*basev1.NetworkMapping{{Instances: []*basev1.NetworkInstance{
 		instance(resources.NewNativeNetworkAccess(), "localhost", 56826),
 		instance(resources.NewContainerNetworkAccess(), "host.docker.internal", 56826),
-	}}, {Instances: []*basev0.NetworkInstance{
+	}}, {Instances: []*basev1.NetworkInstance{
 		instance(resources.NewNativeNetworkAccess(), "localhost", 5432),
 	}}}
 	require.Equal(t, []string{"host.docker.internal:56826"}, composedEndpoints(ctx, mappings))

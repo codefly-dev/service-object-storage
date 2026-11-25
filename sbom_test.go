@@ -12,9 +12,9 @@ import (
 	"testing"
 
 	"github.com/codefly-dev/core/agents/services/sbom"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 	"gopkg.in/yaml.v3"
 
 	"github.com/codefly-dev/service-object-storage/internal/imageevidence"
@@ -28,7 +28,7 @@ const testService = "module/object-storage"
 func newSBOMBuilder(t *testing.T) *Builder {
 	t.Helper()
 	builder := NewBuilder()
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Workspace: "workspace", Module: "module", Name: "object-storage", Version: "1.2.3",
 		WorkspacePath: t.TempDir(), RelativeToWorkspace: ".",
 	}
@@ -128,15 +128,15 @@ func TestImageScopeReportsFailureRatherThanCoverage(t *testing.T) {
 	t.Setenv(gatewayImageOverrideEnv, "not a valid image reference")
 	builder := newSBOMBuilder(t)
 
-	resp, err := builder.SBOM(context.Background(), &builderv0.SBOMRequest{Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE})
+	resp, err := builder.SBOM(context.Background(), &builderv1.SBOMRequest{Scope: builderv1.SBOMScope_SBOM_SCOPE_IMAGE})
 	if err != nil {
 		t.Fatalf("SBOM: %v", err)
 	}
 
-	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_ERROR {
+	if state := resp.GetState().GetState(); state != builderv1.SBOMStatus_ERROR {
 		t.Errorf("state = %v, want ERROR for an unresolvable image", state)
 	}
-	if scope := resp.GetScope(); scope != builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if scope := resp.GetScope(); scope != builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Errorf("scope = %v, want the failure attributed to the image request", scope)
 	}
 	if len(resp.GetImages()) != 0 {
@@ -162,12 +162,12 @@ func TestSourceScopeKeepsTheExistingInventory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	resp, err := builder.SBOM(ctx, &builderv0.SBOMRequest{})
+	resp, err := builder.SBOM(ctx, &builderv1.SBOMRequest{})
 	if err != nil {
 		t.Fatalf("SBOM: %v", err)
 	}
 
-	if scope := resp.GetScope(); scope == builderv0.SBOMScope_SBOM_SCOPE_IMAGE {
+	if scope := resp.GetScope(); scope == builderv1.SBOMScope_SBOM_SCOPE_IMAGE {
 		t.Error("an unspecified scope must not be answered with image evidence")
 	}
 	if err := sbom.ValidateCoverage(testService, subjects, resp); err == nil {
@@ -208,12 +208,12 @@ func TestReleaseEvidenceComesFromTheSharedCommand(t *testing.T) {
 
 // expectedFromReleasePipeline builds the coverage expectation from the release
 // workflow, independently of the code that produces the evidence.
-func expectedFromReleasePipeline(t *testing.T, reference string) []*builderv0.ImageSubject {
+func expectedFromReleasePipeline(t *testing.T, reference string) []*builderv1.ImageSubject {
 	t.Helper()
 	platforms := publishedPlatforms(t)
-	expected := make([]*builderv0.ImageSubject, 0, len(platforms))
+	expected := make([]*builderv1.ImageSubject, 0, len(platforms))
 	for _, platform := range platforms {
-		expected = append(expected, &builderv0.ImageSubject{
+		expected = append(expected, &builderv1.ImageSubject{
 			Reference: reference,
 			Platform:  platform,
 			Role:      imageevidence.Role,
@@ -596,24 +596,24 @@ func TestATagPublishesThroughOneOrderedWorkflow(t *testing.T) {
 
 // imageResponse wraps evidence in the complete image-scope response an agent
 // returns.
-func imageResponse(images []*builderv0.ImageSBOM) *builderv0.SBOMResponse {
-	return &builderv0.SBOMResponse{
-		State:  &builderv0.SBOMStatus{State: builderv0.SBOMStatus_COMPLETE},
-		Scope:  builderv0.SBOMScope_SBOM_SCOPE_IMAGE,
+func imageResponse(images []*builderv1.ImageSBOM) *builderv1.SBOMResponse {
+	return &builderv1.SBOMResponse{
+		State:  &builderv1.SBOMStatus{State: builderv1.SBOMStatus_COMPLETE},
+		Scope:  builderv1.SBOMScope_SBOM_SCOPE_IMAGE,
 		Images: images,
 	}
 }
 
 // evidenceFor builds one digest-bound inventory per subject, each with a
 // distinct digest so coverage is matched per platform.
-func evidenceFor(subjects []*builderv0.ImageSubject) []*builderv0.ImageSBOM {
-	images := make([]*builderv0.ImageSBOM, 0, len(subjects))
+func evidenceFor(subjects []*builderv1.ImageSubject) []*builderv1.ImageSBOM {
+	images := make([]*builderv1.ImageSBOM, 0, len(subjects))
 	for i, subject := range subjects {
-		images = append(images, &builderv0.ImageSBOM{
+		images = append(images, &builderv1.ImageSBOM{
 			Digest:   fmt.Sprintf("sha256:%064d", i),
 			Platform: subject.GetPlatform(),
-			Subjects: []*builderv0.ImageSubject{subject},
-			Bom:      &agentv0.Bom{Components: []*agentv0.Component{{Name: "libc", Version: "2.36"}}},
+			Subjects: []*builderv1.ImageSubject{subject},
+			Bom:      &agentv1.Bom{Components: []*agentv1.Component{{Name: "libc", Version: "2.36"}}},
 			Tool:     "syft",
 			Sha256:   fmt.Sprintf("%064d", i),
 		})

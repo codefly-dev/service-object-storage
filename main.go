@@ -26,8 +26,8 @@ import (
 	"github.com/codefly-dev/core/agents/contract"
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/builders"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	agentv1 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v1"
 	"github.com/codefly-dev/core/resources"
 	runnersbase "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/shared"
@@ -173,9 +173,9 @@ type Service struct {
 	// resolved from the incoming configuration on every call.
 	gatewayToken string
 
-	GrpcEndpoint *basev0.Endpoint
+	GrpcEndpoint *basev1.Endpoint
 	// TenantStoreEndpoint is the declared tenant-store endpoint, nil when not declared.
-	TenantStoreEndpoint *basev0.Endpoint
+	TenantStoreEndpoint *basev1.Endpoint
 	// tenantStore is what a dependent needs to bind the local MinIO, set once
 	// the Runtime has started it behind TenantStoreEndpoint.
 	tenantStore *tenantStore
@@ -186,7 +186,7 @@ type Service struct {
 // Dependents already hold the gateway token, which grants bucket-wide
 // read/write/delete on the same store, so the key grants nothing new.
 type tenantStore struct {
-	mapping           *basev0.NetworkMapping
+	mapping           *basev1.NetworkMapping
 	accessKey, secret string
 }
 
@@ -197,7 +197,7 @@ func NewService() *Service {
 	}
 }
 
-func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
+func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv1.AgentInformationRequest) (*agentv1.AgentInformation, error) {
 	readme, err := templates.ApplyTemplateFrom(ctx, shared.Embed(readmeFS), "templates/agent/README.md", s.Information)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -205,10 +205,10 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 	advertisement := services.Advertisement{
 		Backends: runnersbase.BackendSupport{Docker: true},
 		ReadMe:   readme,
-		Config: []*agentv0.ConfigurationValueDetail{
+		Config: []*agentv1.ConfigurationValueDetail{
 			{
 				Name: "object-storage", Description: "object-storage gateway endpoint",
-				Fields: []*agentv0.ConfigurationValueInformation{
+				Fields: []*agentv1.ConfigurationValueInformation{
 					{Name: "connection", Description: "grpc connection string"},
 					{Name: "endpoint", Description: "host:port of the gRPC endpoint"},
 					{Name: "token", Description: "bearer sent as the x-codefly-token grpc metadata header"},
@@ -229,7 +229,7 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 
 // resolveServingGRPCEndpoint selects the single gRPC endpoint the agent binds
 // its runtime and deployment to.
-func resolveServingGRPCEndpoint(ctx context.Context, endpoints []*basev0.Endpoint) (*basev0.Endpoint, error) {
+func resolveServingGRPCEndpoint(ctx context.Context, endpoints []*basev1.Endpoint) (*basev1.Endpoint, error) {
 	grpc := resources.FindEndpointsByAPI(ctx, standards.GRPC, endpoints)
 	if len(grpc) == 0 {
 		return nil, fmt.Errorf("no grpc endpoint found")
@@ -244,7 +244,7 @@ func resolveServingGRPCEndpoint(ctx context.Context, endpoints []*basev0.Endpoin
 const tenantStoreEndpointName = "minio"
 
 // resolveTenantStoreEndpoint returns the declared tenant-store endpoint, or nil.
-func resolveTenantStoreEndpoint(ctx context.Context, endpoints []*basev0.Endpoint) *basev0.Endpoint {
+func resolveTenantStoreEndpoint(ctx context.Context, endpoints []*basev1.Endpoint) *basev1.Endpoint {
 	for _, endpoint := range resources.FindEndpointsByAPI(ctx, standards.TCP, endpoints) {
 		if endpoint.GetName() == tenantStoreEndpointName {
 			return endpoint
@@ -256,7 +256,7 @@ func resolveTenantStoreEndpoint(ctx context.Context, endpoints []*basev0.Endpoin
 // LoadConfiguration resolves the effective backend configuration. Settings are
 // the local defaults; runtime configuration (deployed credentials and endpoint)
 // takes precedence.
-func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configuration) error {
+func (s *Service) LoadConfiguration(ctx context.Context, conf *basev1.Configuration) error {
 	r := resolved{
 		backend: s.Backend,
 		bucket:  s.Bucket,
@@ -308,14 +308,14 @@ func (s *Service) createConnectionString(address string) string {
 	return fmt.Sprintf("grpc://%s", address)
 }
 
-func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev0.Configuration, instance *basev0.NetworkInstance) (*basev0.Configuration, error) {
+func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev1.Configuration, instance *basev1.NetworkInstance) (*basev1.Configuration, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
 	if err := s.LoadConfiguration(ctx, conf); err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot load configuration")
 	}
-	values := []*basev0.ConfigurationValue{
+	values := []*basev1.ConfigurationValue{
 		{Key: "connection", Value: s.createConnectionString(instance.Address)},
 		{Key: "endpoint", Value: instance.Address},
 	}
@@ -323,7 +323,7 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	// string would leak it into every log line and manifest that carries an
 	// endpoint.
 	if s.gatewayToken != "" {
-		values = append(values, &basev0.ConfigurationValue{Key: "token", Value: s.gatewayToken, Secret: true})
+		values = append(values, &basev1.ConfigurationValue{Key: "token", Value: s.gatewayToken, Secret: true})
 	}
 	if s.tenantStore != nil {
 		store := resources.FilterNetworkInstance(ctx, s.tenantStore.mapping.GetInstances(), instance.GetAccess())
@@ -331,15 +331,15 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 			return nil, s.Wool.NewError("tenant store endpoint has no instance for access %s", instance.GetAccess().GetKind())
 		}
 		values = append(values,
-			&basev0.ConfigurationValue{Key: "minio_endpoint", Value: "http://" + store.GetAddress()},
-			&basev0.ConfigurationValue{Key: "minio_access_key", Value: s.tenantStore.accessKey},
-			&basev0.ConfigurationValue{Key: "minio_secret_key", Value: s.tenantStore.secret, Secret: true},
+			&basev1.ConfigurationValue{Key: "minio_endpoint", Value: "http://" + store.GetAddress()},
+			&basev1.ConfigurationValue{Key: "minio_access_key", Value: s.tenantStore.accessKey},
+			&basev1.ConfigurationValue{Key: "minio_secret_key", Value: s.tenantStore.secret, Secret: true},
 		)
 	}
-	return &basev0.Configuration{
+	return &basev1.Configuration{
 		Origin:         s.Base.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
-		Infos: []*basev0.ConfigurationInformation{
+		Infos: []*basev1.ConfigurationInformation{
 			{Name: "object-storage", ConfigurationValues: values},
 		},
 	}, nil
