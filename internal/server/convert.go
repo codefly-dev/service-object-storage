@@ -93,15 +93,21 @@ func writeOpToProto(op events.Op) storagev0.WriteOp {
 }
 
 func presignMethodFromProto(m storagev0.PresignMethod) backend.PresignMethod {
-	if m == storagev0.PresignMethod_PRESIGN_METHOD_PUT {
+	switch m {
+	case storagev0.PresignMethod_PRESIGN_METHOD_PUT:
 		return backend.PresignPut
+	case storagev0.PresignMethod_PRESIGN_METHOD_POST:
+		return backend.PresignPost
 	}
 	return backend.PresignGet
 }
 
 func presignMethodToProto(m backend.PresignMethod) storagev0.PresignMethod {
-	if m == backend.PresignPut {
+	switch m {
+	case backend.PresignPut:
 		return storagev0.PresignMethod_PRESIGN_METHOD_PUT
+	case backend.PresignPost:
+		return storagev0.PresignMethod_PRESIGN_METHOD_POST
 	}
 	return storagev0.PresignMethod_PRESIGN_METHOD_GET
 }

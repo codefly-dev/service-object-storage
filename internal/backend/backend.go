@@ -30,8 +30,9 @@ type Config struct {
 	// UsePathStyle forces path-style addressing (required by MinIO).
 	UsePathStyle bool
 
-	AccessKey string
-	SecretKey string
+	AccessKey    string
+	SecretKey    string
+	SessionToken string
 
 	// GCSCredentialsFile is a service-account JSON path (empty = ADC).
 	GCSCredentialsFile string
@@ -185,6 +186,9 @@ type PresignMethod int
 const (
 	PresignGet PresignMethod = iota
 	PresignPut
+	// PresignPost is a form upload under a policy the store checks. Only a
+	// BoundedPresigner signs one.
+	PresignPost
 )
 
 // PresignResult is a time-limited URL the client uses directly over plain HTTP.
@@ -193,6 +197,29 @@ type PresignResult struct {
 	URL       string
 	Headers   map[string]string
 	ExpiresAt time.Time
+	// FormFields are the fields a PresignPost form must carry before its file.
+	FormFields map[string]string
+}
+
+// PresignBounds are what a bounded presigned URL binds beyond its key, its
+// method and its lifetime.
+type PresignBounds struct {
+	Method PresignMethod
+	Expiry time.Duration
+	// ContentType, on PresignPut and PresignPost, is the exact type the
+	// upload must carry.
+	ContentType string
+	// ContentLengthMin and ContentLengthMax, on PresignPost, bound the body.
+	ContentLengthMin int64
+	ContentLengthMax int64
+}
+
+// BoundedPresigner is a backend that can bind an upload's type or size into
+// what it signs, so the store refuses an upload outside them. A backend that
+// does not implement it cannot, and a caller asking for a bound is answered
+// Unsupported rather than handed an unbounded URL.
+type BoundedPresigner interface {
+	PresignBounded(ctx context.Context, key string, bounds PresignBounds) (*PresignResult, error)
 }
 
 // Capabilities is the machine-readable feature set a client introspects before

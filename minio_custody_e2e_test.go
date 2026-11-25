@@ -111,8 +111,15 @@ func TestMinIOPersistentCustody(t *testing.T) {
 			require.Equal(t, payloads[i], body)
 		}
 	}
-	_, err = rt.Stop(ctx, &runtimev0.StopRequest{})
+	stopped, err := rt.Stop(ctx, &runtimev0.StopRequest{})
 	require.NoError(t, err)
+	require.Equal(t, runtimev0.StopStatus_SUCCESS, stopped.GetStatus().GetState(), stopped.GetStatus().GetMessage())
+	// Stop is all an ordered run sends: both containers stop, and both are kept.
+	for _, id := range []string{firstGatewayID, firstID} {
+		running, inspectErr := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", id).Output()
+		require.NoError(t, inspectErr, "Stop removed container %s", id)
+		require.Equal(t, "false", strings.TrimSpace(string(running)), "container %s still runs after Stop", id)
+	}
 	started, err := rt.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
 	require.Equal(t, runtimev0.StartStatus_STARTED, started.GetStatus().GetState(), started.GetStatus().GetMessage())
@@ -300,7 +307,7 @@ func TestMinIOBootstrapResumesAfterInterruption(t *testing.T) {
 	rt, _, _ := loadedRuntime(t, ctx)
 	defer func() { require.NoError(t, rt.teardown(context.Background())) }()
 	require.NoError(t, rt.LoadConfiguration(ctx, nil))
-	// Exact persisted state when freeHostPort, callertoken.Generate, image fetch or
+	// Exact persisted state when the port claim, callertoken.Generate, image fetch or
 	// ContainerStart fails after successful custody preflight.
 	_, release, err := rt.prepareMinIOData(ctx)
 	require.NoError(t, err)

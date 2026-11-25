@@ -19,15 +19,17 @@ tiers exist, and only the tier you actually ran is evidence:
 ## Integration
 
 ```bash
-docker run -d --name minio -p 9000:9000 \
+docker run -d --name minio -p 127.0.0.1::9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
   ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
 docker run -d --name fake-gcs -p 4443:4443 \
   fsouza/fake-gcs-server@sha256:d47b4cf8b87006cab8fbbecfa5f06a2a3c5722e464abddc0d107729663d40ec4 \
   -scheme http -public-host localhost:4443
-for i in $(seq 1 30); do curl -sf http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+# Docker picked MinIO's host port; ask it which.
+MINIO_ENDPOINT=$(docker port minio 9000/tcp)
+for i in $(seq 1 30); do curl -sf "http://$MINIO_ENDPOINT/minio/health/live" && break; sleep 1; done
 
-MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
+MINIO_ENDPOINT=$MINIO_ENDPOINT MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
 STORAGE_EMULATOR_HOST=localhost:4443 GCS_BUCKET=sos-test \
   go test -tags integration -count=1 -v ./internal/integration/...
@@ -49,6 +51,12 @@ Eight tests run:
 - Against fake-gcs-server: `TestGCSFullStack`, `TestGCSPrefixConfinesKeys`,
   `TestGCSProbe` and `TestGCSBoundAccessToken` (bound List/Stat/Get/GetMany
   with an access-token credential).
+
+`libs/go` has its own MinIO tests behind the same tag and the same
+environment, run with `go test -tags integration -count=1 -v ./libs/go/...`:
+seven `TestMinIO*` tests (the confinement proof, the defects it must catch,
+case, presigned URLs, what is unconfined without the Store, the session policy
+against a raw client, and the listing MinIO hides). They skip the same way.
 
 The emulator accepts any caller, so the GCS tests prove the keyless client
 path, the prefix and that a bearer-token binding reaches the store. They never

@@ -116,6 +116,15 @@ const (
 	ReasonBodySizeMismatch    = "BODY_SIZE_MISMATCH"
 	ReasonWatchConsumerBehind = "WATCH_CONSUMER_BEHIND"
 	ReasonInternal            = "INTERNAL"
+
+	// The refusals of a call that names a Scope, or should have.
+	ReasonScopeInvalid           = "SCOPE_INVALID"
+	ReasonScopeNotGranted        = "SCOPE_NOT_GRANTED"
+	ReasonScopeRequired          = "SCOPE_REQUIRED"
+	ReasonScopedUnavailable      = "SCOPED_SESSIONS_UNAVAILABLE"
+	ReasonScopePolicyTooLarge    = "SCOPE_POLICY_TOO_LARGE"
+	ReasonScopeIssuerUnavailable = "SCOPE_ISSUER_UNAVAILABLE"
+	ReasonPresignRefused         = "PRESIGN_REFUSED"
 )
 
 // WithReason sets the reason a refusal names, and its metadata, on e.

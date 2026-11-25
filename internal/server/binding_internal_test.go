@@ -27,12 +27,14 @@ import (
 // recorder is a transport that answers 404 to everything and records the hosts
 // it was asked for, so a test can see which requests a backend sent through it.
 type recorder struct {
-	mu    sync.Mutex
-	hosts []string
+	mu            sync.Mutex
+	hosts         []string
+	sessionTokens []string
 }
 
 func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.mu.Lock()
+	r.sessionTokens = append(r.sessionTokens, req.Header.Get("X-Amz-Security-Token"))
 	r.hosts = append(r.hosts, req.URL.Host)
 	r.mu.Unlock()
 	return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
@@ -60,8 +62,8 @@ func serviceAccountKey(t *testing.T, tokenURI string) []byte {
 // nothing here and fail this test.
 func TestEveryBindableBackendSendsThroughTheBoundClient(t *testing.T) {
 	cases := []backend.Config{
-		{Kind: "s3", Endpoint: "https://s3.tenant.example", AccessKey: "id", SecretKey: "secret"},
-		{Kind: "minio", Endpoint: "https://minio.tenant.example", AccessKey: "id", SecretKey: "secret"},
+		{Kind: "s3", Endpoint: "https://s3.tenant.example", AccessKey: "id", SecretKey: "secret", SessionToken: "temporary-session"},
+		{Kind: "minio", Endpoint: "https://minio.tenant.example", AccessKey: "id", SecretKey: "secret", SessionToken: "temporary-session"},
 		{Kind: "azure", Endpoint: "https://azure.tenant.example/", AzureAccount: "acct", AzureKey: "c2VjcmV0"},
 		{Kind: "gcs", Endpoint: "https://gcs.tenant.example", GCSCredentialsJSON: serviceAccountKey(t, "https://token.tenant.example/token")},
 	}
@@ -78,6 +80,11 @@ func TestEveryBindableBackendSendsThroughTheBoundClient(t *testing.T) {
 			rec.mu.Lock()
 			defer rec.mu.Unlock()
 			require.NotEmpty(t, rec.hosts, "%s sent nothing through the bound client", cfg.Kind)
+			if cfg.SessionToken != "" {
+				for _, token := range rec.sessionTokens {
+					require.Equal(t, cfg.SessionToken, token)
+				}
+			}
 			for _, host := range rec.hosts {
 				require.True(t, strings.HasSuffix(host, ".tenant.example"), "%s sent a request to %q", cfg.Kind, host)
 			}
@@ -94,9 +101,10 @@ func TestBindingRequiresItsOwnCredential(t *testing.T) {
 	}
 	cfg, _, err := boundConfig(context.Background(), &storagev0.Binding{
 		Kind: "s3", Bucket: "data",
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{Id: "id", Secret: "secret"}}},
+		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{Id: "id", Secret: "secret", SessionToken: "temporary-session"}}},
 	}, nil)
 	require.NoError(t, err)
+	require.Equal(t, "temporary-session", cfg.SessionToken)
 	require.NotNil(t, cfg.HTTPClient, "a bound config must carry the guarded client")
 }
 

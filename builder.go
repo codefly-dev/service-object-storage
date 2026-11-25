@@ -220,6 +220,16 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			"SOS_GCS_CREDENTIALS_FILE onto the container there "+
 			"(see README \"Running as a codefly service\")", s.conf.gcsCredentialsFile))
 	}
+	// Scoped sessions cannot be honored by this deployment: the manifest
+	// renders none of their settings, and the stores a deployment names (S3,
+	// GCS, Azure) have no qualified session issuer, so a gateway told to run
+	// them refuses to start. Reject the spec rather than render a gateway
+	// that silently serves every call with its bucket-wide credential.
+	if s.Settings != nil && s.ScopedSessions != "" && s.ScopedSessions != "off" {
+		return s.Builder.DeployError(fmt.Errorf("scoped-sessions: %s cannot be delivered by this deployment: "+
+			"only the local MinIO has a qualified session issuer; set scoped-sessions off for a deployed environment "+
+			"(see README \"Scoped sessions\")", s.ScopedSessions))
+	}
 	// A configured gateway token cannot be honored by this deployment: the
 	// manifest carries no secret values (DeployKustomize is not wired for
 	// configuration inputs here, the same gap SOS_SECRET_KEY / SOS_AZURE_KEY sit

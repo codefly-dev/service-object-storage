@@ -24,6 +24,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/events"
 	"github.com/codefly-dev/service-object-storage/internal/health"
 	"github.com/codefly-dev/service-object-storage/internal/server"
+	"github.com/codefly-dev/service-object-storage/internal/sessions"
 
 	// Backends register themselves via init(); importing them compiles each into
 	// the single binary and makes its kind selectable by config.
@@ -86,7 +87,15 @@ func run() error {
 	// both read its verdict, so it must exist before the storage service that
 	// answers from it.
 	monitor := serveHealth(monitorCtx, grpcServer, store, cfg.Health)
-	storagev0.RegisterObjectStorageServer(grpcServer, server.New(store, hub, monitor).AdmitComposed(cfg.Composed))
+	gateway := server.New(store, hub, monitor).AdmitComposed(cfg.Composed)
+	if cfg.Scoped.Mode != "" && cfg.Scoped.Mode != string(server.ScopedOff) {
+		scoped, err := scopedSessions(cfg)
+		if err != nil {
+			return err
+		}
+		gateway.WithScoped(scoped)
+	}
+	storagev0.RegisterObjectStorageServer(grpcServer, gateway)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -96,9 +105,38 @@ func run() error {
 		gracefulStop(grpcServer, shutdownGrace)
 	}()
 
-	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s prefix=%q auth=%s)",
-		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, cfg.Backend.Prefix, authMode)
+	log.Printf("object-storage gateway listening on %s (backend=%s bucket=%s prefix=%q auth=%s scoped=%s)",
+		cfg.ListenAddr, cfg.Backend.Kind, cfg.Backend.Bucket, cfg.Backend.Prefix, authMode, scopedMode(cfg))
 	return grpcServer.Serve(lis)
+}
+
+func scopedMode(cfg config.Config) string {
+	if cfg.Scoped.Mode == "" {
+		return string(server.ScopedOff)
+	}
+	return cfg.Scoped.Mode
+}
+
+// scopedSessions builds what runs a scoped call: the store's issuer, the
+// caller's grants and the session cache. An issuer that is not qualified is
+// refused here as it was at configuration: the gateway does not start
+// offering scoped calls it would have to serve with its own credential.
+func scopedSessions(cfg config.Config) (server.Scoped, error) {
+	issuer, err := sessions.IssuerFor(cfg.Backend)
+	if err != nil {
+		return server.Scoped{}, err
+	}
+	manager, err := sessions.NewManager(sessions.Options{
+		Backend: cfg.Backend, Issuer: issuer, Authorizer: cfg.Scoped.Grants,
+		TTL: cfg.Scoped.TTL, CacheSize: cfg.Scoped.CacheSize,
+	})
+	if err != nil {
+		return server.Scoped{}, err
+	}
+	return server.Scoped{
+		Mode: server.ScopedMode(cfg.Scoped.Mode), Manager: manager,
+		Presign: cfg.Scoped.Presign, PresignMax: cfg.Scoped.PresignMax,
+	}, nil
 }
 
 // serveHealth registers the gRPC health service, starts the backend-access

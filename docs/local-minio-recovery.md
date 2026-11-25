@@ -23,7 +23,9 @@ whole custody directory in backups. MinIO runs as a container user whose files
 the host sees as the agent process's own user, so they remain manageable by that
 user. The Runtime does not recursively chown existing data or broaden its
 permissions. Stop, Destroy,
-failed startup and normal configuration replacement never delete this directory. Keep the same
+failed startup and normal configuration replacement never delete this directory. Stop — all a run
+that ends in order sends — stops the gateway and MinIO containers and keeps them, with their
+network; Destroy removes the containers and the network. Keep the same
 `CODEFLY_HOME` and naming scope across runs. A changed scope is a different store.
 The Docker daemon must share the agent's host filesystem (local Docker, Docker
 Desktop, or another local engine). How a container user maps to a host user

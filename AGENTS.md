@@ -8,6 +8,17 @@ never link a cloud SDK.
 `README.md` is the reference for the API, Watch, readiness, authentication
 and the local/deployed profiles. This file is how to work in the repo.
 
+## How you build here
+
+1. What a person exercises is a composed service started by `codefly run
+   service`, never a hand-written server or a launcher.
+2. Code generated from a contract comes from `codefly generate`.
+3. Never hardcode an address, port, DSN, credential or host name; the SDK and
+   the CLI resolve each one.
+4. Local first, from the lowest level, and no pull request until the change is
+   validated on an environment.
+5. No test starts a Kubernetes cluster.
+
 ## What this repo owns
 
 - The contract and its stubs: `proto/codefly/storage/v0`, `gen/`.
@@ -17,6 +28,14 @@ and the local/deployed profiles. This file is how to work in the repo.
 - The codefly agent that runs the gateway as a first-class service: the repo
   root (`main.go`, `runtime.go`, `builder.go`, `agent.codefly.yaml`) and
   `templates/`, the Kubernetes manifests the Builder renders.
+- The client library for confined stores: `libs/go` — the key convention
+  (`objectkey`), the `Store` and `Maintenance` built on a gateway client, and
+  the proof and layout gate a consumer runs in its own suite
+  (`objectscopetest`). It is part of the root module. Its words are partition,
+  scope, principal, mode and access; it never learns what a consumer means by
+  them. `libs/go/README.md` is its reference. The key encoding is a
+  persistent contract: the golden vectors in `objectkey` are not updated, a
+  different convention is a different base.
 - The evidence command and image declaration: `cmd/image-sbom` and
   `internal/imageevidence`. Core owns subject derivation, scanning and indexing.
 
@@ -51,12 +70,13 @@ go test -race ./...    # its own CI job: events hub, Watch and readiness monitor
 Integration against a real MinIO, behind the `integration` build tag:
 
 ```bash
-docker run -d --name minio -p 9000:9000 \
+# Docker picks the host port; the suite is told which one it was.
+docker run -d --name minio -p 127.0.0.1::9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
   ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
-MINIO_ENDPOINT=127.0.0.1:9000 MINIO_ACCESS_KEY=minioadmin \
+MINIO_ENDPOINT=$(docker port minio 9000/tcp) MINIO_ACCESS_KEY=minioadmin \
 MINIO_SECRET_KEY=minioadmin MINIO_BUCKET=sos-test \
-  go test -tags integration -count=1 ./internal/integration/...
+  go test -tags integration -count=1 ./internal/integration/... ./libs/go/...
 ```
 
 The gcs backend's integration tests in the same package run against
@@ -199,14 +219,11 @@ and reports `no workspace found` at this repository root.
    convenient loop was already there rather than that the responsibility
    belongs to it.
 
-8. **Build the simplest thing that works; size is the signal.** A coding task's
-   budget is about **500 hand-written lines** — generated output does not
-   count, tests count apart — and past **2,000** the change has become a second
-   system, so **stop and ask the user** instead of finishing it. Two tells,
-   checkable before the code exists: you cannot name the one responsibility the
-   change adds, and it is growing to make the end goal pass rather than to put
-   a behaviour where it belongs. Wanting it to work licenses no means to get
-   there.
+8. **Build the simplest thing that works.** Two tells that a change is not
+   it, checkable before the code exists: you cannot name the one
+   responsibility the change adds, and it is growing to make the end goal pass
+   rather than to put a behaviour where it belongs. Wanting it to work
+   licenses no means to get there.
 
 ## Where the depth is
 

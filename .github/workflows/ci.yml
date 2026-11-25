@@ -42,14 +42,18 @@ jobs:
       # runs, so this job and the e2e job exercise one MinIO version.
       - name: start minio
         run: |
-          docker run -d --name minio -p 9000:9000 \
+          docker run -d --name minio -p 127.0.0.1::9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
             ghcr.io/codefly-dev/minio@sha256:6db9ae5fd307001ad5bb1899a8a4b8f69aebe982f95b7085416953b5f4cc22a5 server /data
+          # Docker picks the host port; the test step is told which one it was.
+          endpoint=$(docker port minio 9000/tcp)
+          test -n "$endpoint"
+          echo "MINIO_ENDPOINT=$endpoint" >> "$GITHUB_ENV"
           for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:9000/minio/health/live && break
+            curl -sf "http://$endpoint/minio/health/live" && break
             sleep 1
           done
-          curl -sf http://127.0.0.1:9000/minio/health/live
+          curl -sf "http://$endpoint/minio/health/live"
       # The gcs backend's integration tests run against fake-gcs-server, which the
       # Go storage SDK reaches natively through STORAGE_EMULATOR_HOST. Without it
       # those tests skip and the job still passes, so it is started here.
@@ -65,13 +69,12 @@ jobs:
           curl -sf http://127.0.0.1:4443/storage/v1/b
       - name: integration test
         env:
-          MINIO_ENDPOINT: 127.0.0.1:9000
           MINIO_ACCESS_KEY: minioadmin
           MINIO_SECRET_KEY: minioadmin
           MINIO_BUCKET: sos-test
           STORAGE_EMULATOR_HOST: localhost:4443
           GCS_BUCKET: sos-test
-        run: go test -tags integration ./internal/integration/...
+        run: go test -tags integration ./internal/integration/... ./libs/go/...
 
   agent-runtime-e2e:
     runs-on: ubuntu-latest
