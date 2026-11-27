@@ -8,10 +8,7 @@
 //
 //	SOS_GATEWAY_IMAGE=<locally-built gateway image> go test -tags e2e .
 //
-// The gateway image is a prerequisite because the release pipeline that
-// publishes ghcr.io/codefly-dev/service-object-storage is a separate workstream;
-// the test points the Runtime at a locally-built image through the same
-// SOS_GATEWAY_IMAGE override the Runtime already honors.
+// The Put/Get test uses the agent's locked gateway when the override is unset.
 package main
 
 import (
@@ -55,9 +52,6 @@ import (
 // Runtime lifecycle against the real containers, and round-trips bytes through
 // the started gateway — the honest end-to-end path a consumer takes.
 func TestRuntimeEndToEndPutGet(t *testing.T) {
-	if os.Getenv("SOS_GATEWAY_IMAGE") == "" {
-		t.Skip("SOS_GATEWAY_IMAGE not set; skipping agent-runtime end-to-end test")
-	}
 	ctx := context.Background()
 
 	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)

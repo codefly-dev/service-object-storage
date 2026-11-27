@@ -897,7 +897,13 @@ lock as the artifact `gateway-image.json-<version>`. Adopt that artifact as
 `gateway-image.json` in a reviewed PR before the coordinator runs
 `codefly publish`; never hand-tag. `release.yml` creates the `:<version>` and
 `:latest` image tags from that digest and refuses one that was not built for the
-version being released.
+version being released. Before publishing those tags, the release workflow runs
+a Put/Get round trip against the locked image using the agent's client. To run
+the same check on the lock update before release:
+
+```sh
+env -u SOS_GATEWAY_IMAGE go test -tags e2e -run '^TestRuntimeEndToEndPutGet$' -count=1 -timeout 5m .
+```
 
 Core's `resources.ParseImageLock` reads the gateway lock. It requires exactly
 `ghcr.io/codefly-dev/service-object-storage` and `sha256:` followed by 64
