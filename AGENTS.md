@@ -1,6 +1,6 @@
 # service-object-storage
 
-A gRPC gateway serving a uniform object-storage API (`codefly/storage/v0`) over
+A gRPC gateway serving a uniform object-storage API (`codefly/storage/v1`) over
 S3 / GCS / Azure Blob / MinIO, plus the codefly service agent
 (`codefly.dev/object-storage`) that runs it. Clients speak the gRPC contract and
 never link a cloud SDK.
@@ -21,7 +21,7 @@ and the local/deployed profiles. This file is how to work in the repo.
 
 ## What this repo owns
 
-- The contract and its stubs: `proto/codefly/storage/v0`, `gen/`.
+- The contract and its stubs: `proto/codefly/storage/v1`, `gen/`.
 - The gateway server: `cmd/service-object-storage` and `internal/**` — the
   backends, the per-replica Watch event hub, auth configuration, the readiness probe,
   and the normalization of backend errors to gRPC codes.
@@ -118,7 +118,7 @@ SOS_GATEWAY_IMAGE=service-object-storage:e2e \
 `ok`, and `go test` exits **0**. Read `-v` output for `--- PASS`, never `ok`
 alone. Forgetting the tag is the honest failure instead: `matched no packages`,
 exit 1. The `e2e` tag is mixed — without `SOS_GATEWAY_IMAGE` the custody tests
-fail loudly while the Runtime and SBOM tests skip.
+fail loudly, the Put/Get test runs the locked gateway, and the SBOM test skips.
 
 `.github/workflows/agent-ci.yml`, the full agent conformance gate, runs only on
 `workflow_dispatch`. The upstream fix it waited on has landed and it passes, but

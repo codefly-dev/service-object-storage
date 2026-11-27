@@ -1,4 +1,4 @@
-# The object-storage gateway image. A client speaks only the codefly/storage/v0
+# The object-storage gateway image. A client speaks only the codefly/storage/v1
 # gRPC contract; every cloud backend (S3/GCS/Azure/MinIO) is compiled in and
 # selected at runtime by SOS_BACKEND. The image ships no cloud credentials —
 # those arrive as environment at deploy time.

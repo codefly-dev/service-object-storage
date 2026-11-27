@@ -25,7 +25,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/azure"
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/gcs"
@@ -39,7 +39,7 @@ import (
 
 // composedStore serves handler on loopback and returns the store's endpoint by
 // its composed name and a client of a server that admits it.
-func composedStore(t *testing.T, handler http.HandlerFunc) (string, storagev0.ObjectStorageClient) {
+func composedStore(t *testing.T, handler http.HandlerFunc) (string, storagev1.ObjectStorageClient) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -60,7 +60,7 @@ func TestReviewBearerReturnedInStatus(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": 401, "message": "invalid credential: " + r.Header.Get("Authorization")}})
 	})
-	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(endpoint, token)})
+	_, err := c.List(context.Background(), &storagev1.ListRequest{Binding: gcsTokenBinding(endpoint, token)})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 	require.NotContains(t, status.Convert(err).Message(), token)
 	require.Contains(t, status.Convert(err).Message(), "invalid credential: [redacted]", "the store's own words are kept")
@@ -78,7 +78,7 @@ func TestReviewBearerReturnedInStatus(t *testing.T) {
 	})
 	b := s3Binding(endpoint)
 	b.Credential.GetAccessKey().Secret = secret
-	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: b})
+	_, err = c.List(context.Background(), &storagev1.ListRequest{Binding: b})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 	require.NotContains(t, status.Convert(err).Message(), secret)
 }
@@ -97,7 +97,7 @@ func TestReviewSDKDebugLoggingReflectsCredential(t *testing.T) {
 	require.NoError(t, err)
 	old := os.Stderr
 	os.Stderr = f
-	_, callErr := c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(endpoint, token)})
+	_, callErr := c.List(context.Background(), &storagev1.ListRequest{Binding: gcsTokenBinding(endpoint, token)})
 	os.Stderr = old
 	require.NoError(t, f.Close())
 	require.NoError(t, callErr)
@@ -120,9 +120,9 @@ func TestReviewDebugRedaction(t *testing.T) {
 		msg  protoreflect.MessageDescriptor
 		name protoreflect.Name
 	}{
-		{(&storagev0.AccessKey{}).ProtoReflect().Descriptor(), "secret"},
-		{(&storagev0.Credential{}).ProtoReflect().Descriptor(), "service_account_key"},
-		{(&storagev0.Credential{}).ProtoReflect().Descriptor(), "access_token"},
+		{(&storagev1.AccessKey{}).ProtoReflect().Descriptor(), "secret"},
+		{(&storagev1.Credential{}).ProtoReflect().Descriptor(), "service_account_key"},
+		{(&storagev1.Credential{}).ProtoReflect().Descriptor(), "access_token"},
 	} {
 		options := field.msg.Fields().ByName(field.name).Options().(*descriptorpb.FieldOptions)
 		require.True(t, options.GetDebugRedact(), "%s.%s is not marked debug_redact", field.msg.Name(), field.name)
@@ -157,8 +157,8 @@ func TestReviewGCSMetadataBodyRace(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, `{"bucket":"tenant","name":"a","etag":"old-etag","size":"3","generation":"1","metageneration":"1","updated":"2026-01-01T00:00:00Z"}`)
 			})
-			items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: gcsTokenBinding(endpoint, "synthetic-review-token"),
-				Items: []*storagev0.GetManyItem{{Key: "a", IfMatch: "old-etag"}, {Key: "b"}}})
+			items, err := getMany(t, c, &storagev1.GetManyRequest{Binding: gcsTokenBinding(endpoint, "synthetic-review-token"),
+				Items: []*storagev1.GetManyItem{{Key: "a", IfMatch: "old-etag"}, {Key: "b"}}})
 			require.NotZero(t, pinned.Load(), "the media read carried no generation pin")
 			for _, item := range items {
 				require.NotContains(t, string(item.body), "NEWER", "the replacement's bytes were delivered under the old ETag")
@@ -166,7 +166,7 @@ func TestReviewGCSMetadataBodyRace(t *testing.T) {
 			if honours {
 				require.NoError(t, err)
 				require.Len(t, items, 2)
-				require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_CHANGED, items[0].header.GetOutcome())
+				require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_CHANGED, items[0].header.GetOutcome())
 				require.Empty(t, items[0].body)
 				return
 			}
@@ -185,11 +185,11 @@ func TestReviewUnknownSizeBatch(t *testing.T) {
 		w.(http.Flusher).Flush()
 		_, _ = fmt.Fprint(w, "alpha")
 	})
-	items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
+	items, err := getMany(t, c, &storagev1.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev1.GetManyItem{{Key: "a"}, {Key: "b"}}})
 	require.NoError(t, err)
 	require.Len(t, items, 2)
 	for _, item := range items {
-		require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK, item.header.GetOutcome())
+		require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK, item.header.GetOutcome())
 		require.EqualValues(t, 5, item.header.GetInfo().GetSize())
 		require.Equal(t, "alpha", string(item.body))
 	}
@@ -211,8 +211,8 @@ func TestReviewUnknownSizeBatch(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"bucket":"tenant","name":"a","etag":"e1","size":"10","generation":"1","metageneration":"1","updated":"2026-01-01T00:00:00Z"}`)
 	})
-	items, err = getMany(t, c, &storagev0.GetManyRequest{Binding: gcsTokenBinding(endpoint, "synthetic-token"),
-		Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
+	items, err = getMany(t, c, &storagev1.GetManyRequest{Binding: gcsTokenBinding(endpoint, "synthetic-token"),
+		Items: []*storagev1.GetManyItem{{Key: "a"}, {Key: "b"}}})
 	require.Equal(t, codes.Aborted, status.Code(err), "a body shorter than its declared size completed: %v", err)
 	require.Contains(t, status.Convert(err).Message(), "ended at 5 of its declared 10 bytes")
 	info, _ := requireReason(t, err, codes.Aborted, "BODY_SIZE_MISMATCH")
@@ -228,7 +228,7 @@ func TestReviewMissingBucketContinuesBatch(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>`)
 	})
-	items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
+	items, err := getMany(t, c, &storagev1.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev1.GetManyItem{{Key: "a"}, {Key: "b"}}})
 	require.Equal(t, codes.NotFound, status.Code(err), "got %v", err)
 	require.Contains(t, status.Convert(err).Message(), "bucket or container does not exist")
 	requireReason(t, err, codes.NotFound, "BUCKET_NOT_FOUND")
@@ -239,11 +239,11 @@ func TestReviewMissingBucketContinuesBatch(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`)
 	})
-	items, err = getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a"}, {Key: "b"}}})
+	items, err = getMany(t, c, &storagev1.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev1.GetManyItem{{Key: "a"}, {Key: "b"}}})
 	require.NoError(t, err)
 	require.Len(t, items, 2)
 	for _, item := range items {
-		require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND, item.header.GetOutcome())
+		require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_NOT_FOUND, item.header.GetOutcome())
 	}
 }
 
@@ -259,10 +259,10 @@ func TestBoundListOfAMissingBucketFailsOnEveryKind(t *testing.T) {
 	}
 	cases := map[string]struct {
 		handler http.HandlerFunc
-		binding func(endpoint string) *storagev0.Binding
+		binding func(endpoint string) *storagev1.Binding
 	}{
 		"s3": {s3Missing, s3Binding},
-		"minio": {s3Missing, func(endpoint string) *storagev0.Binding {
+		"minio": {s3Missing, func(endpoint string) *storagev1.Binding {
 			b := s3Binding(endpoint)
 			b.Kind = "minio"
 			return b
@@ -271,21 +271,21 @@ func TestBoundListOfAMissingBucketFailsOnEveryKind(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"error":{"code":404,"message":"The specified bucket does not exist.","errors":[{"reason":"notFound"}]}}`)
-		}, func(endpoint string) *storagev0.Binding { return gcsTokenBinding(endpoint, "synthetic-token") }},
+		}, func(endpoint string) *storagev1.Binding { return gcsTokenBinding(endpoint, "synthetic-token") }},
 		"azure": {func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/xml")
 			w.Header().Set("x-ms-error-code", "ContainerNotFound")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `<Error><Code>ContainerNotFound</Code><Message>The specified container does not exist.</Message></Error>`)
-		}, func(endpoint string) *storagev0.Binding {
-			return &storagev0.Binding{Kind: "azure", Endpoint: endpoint, Bucket: "tenant", Credential: &storagev0.Credential{
-				Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{Id: "tenant", Secret: "c2VjcmV0"}}}}
+		}, func(endpoint string) *storagev1.Binding {
+			return &storagev1.Binding{Kind: "azure", Endpoint: endpoint, Bucket: "tenant", Credential: &storagev1.Credential{
+				Kind: &storagev1.Credential_AccessKey{AccessKey: &storagev1.AccessKey{Id: "tenant", Secret: "c2VjcmV0"}}}}
 		}},
 	}
 	for kind, tc := range cases {
 		t.Run(kind, func(t *testing.T) {
 			endpoint, c := composedStore(t, tc.handler)
-			res, err := c.List(context.Background(), &storagev0.ListRequest{Binding: tc.binding(endpoint)})
+			res, err := c.List(context.Background(), &storagev1.ListRequest{Binding: tc.binding(endpoint)})
 			require.Equal(t, codes.NotFound, status.Code(err), "%s listed a missing bucket as %v, err %v", kind, res, err)
 		})
 	}
@@ -331,11 +331,11 @@ func TestReviewBoundGCSReadsAmbientCredentials(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	key := &storagev0.Binding{Kind: "gcs", Endpoint: endpoint, Bucket: "tenant",
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessToken{AccessToken: "synthetic-caller-token"}}}
-	_, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{Binding: gcsTokenBinding("", "synthetic-caller-token")})
+	key := &storagev1.Binding{Kind: "gcs", Endpoint: endpoint, Bucket: "tenant",
+		Credential: &storagev1.Credential{Kind: &storagev1.Credential_AccessToken{AccessToken: "synthetic-caller-token"}}}
+	_, err := c.Capabilities(ctx, &storagev1.CapabilitiesRequest{Binding: gcsTokenBinding("", "synthetic-caller-token")})
 	require.NoError(t, err)
-	_, err = c.List(ctx, &storagev0.ListRequest{Binding: key})
+	_, err = c.List(ctx, &storagev1.ListRequest{Binding: key})
 	require.NoError(t, err)
 
 	select {
@@ -368,14 +368,14 @@ func TestReviewAzureListedETagRoundTrip(t *testing.T) {
 		w.WriteHeader(http.StatusPreconditionFailed)
 		_, _ = fmt.Fprint(w, `<Error><Code>ConditionNotMet</Code><Message>invalid entity tag</Message></Error>`)
 	})
-	b := &storagev0.Binding{Kind: "azure", Endpoint: endpoint, Bucket: "tenant", Credential: &storagev0.Credential{
-		Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{Id: "tenant", Secret: "c2VjcmV0"}}}}
-	listed, err := c.List(context.Background(), &storagev0.ListRequest{Binding: b})
+	b := &storagev1.Binding{Kind: "azure", Endpoint: endpoint, Bucket: "tenant", Credential: &storagev1.Credential{
+		Kind: &storagev1.Credential_AccessKey{AccessKey: &storagev1.AccessKey{Id: "tenant", Secret: "c2VjcmV0"}}}}
+	listed, err := c.List(context.Background(), &storagev1.ListRequest{Binding: b})
 	require.NoError(t, err)
 	require.Len(t, listed.GetObjects(), 1)
-	items, err := getMany(t, c, &storagev0.GetManyRequest{Binding: b, Items: []*storagev0.GetManyItem{{Key: "a", IfMatch: listed.GetObjects()[0].GetEtag()}}})
+	items, err := getMany(t, c, &storagev1.GetManyRequest{Binding: b, Items: []*storagev1.GetManyItem{{Key: "a", IfMatch: listed.GetObjects()[0].GetEtag()}}})
 	require.NoError(t, err)
 	require.Equal(t, `"0x8DFA"`, gotIfMatch)
-	require.Equal(t, storagev0.GetManyOutcome_GET_MANY_OUTCOME_OK, items[0].header.GetOutcome())
+	require.Equal(t, storagev1.GetManyOutcome_GET_MANY_OUTCOME_OK, items[0].header.GetOutcome())
 	require.Equal(t, "alpha", string(items[0].body))
 }

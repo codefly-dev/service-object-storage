@@ -10,7 +10,7 @@ import (
 	"context"
 
 	"github.com/codefly-dev/core/agents/services/sbom"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 )
 
 // Platforms are the platforms the release pipeline publishes the gateway image
@@ -24,7 +24,7 @@ const Role = "runtime"
 
 // Subjects supplies this service's image declaration to core's shared evidence
 // path. A local image omits Platforms: core reads its platform from the daemon.
-func Subjects(ctx context.Context, service, reference string, local bool) ([]*builderv0.ImageSubject, error) {
+func Subjects(ctx context.Context, service, reference string, local bool) ([]*builderv1.ImageSubject, error) {
 	image := sbom.PublishedImage{Reference: reference, Service: service, Role: Role}
 	if !local {
 		image.Platforms = Platforms

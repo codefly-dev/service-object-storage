@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/serr"
 	"github.com/codefly-dev/service-object-storage/internal/sessions"
@@ -55,27 +55,27 @@ func scopeInvalid(msg string) *serr.Error {
 	return serr.New(serr.InvalidArgument, "scope", msg).WithReason(serr.ReasonScopeInvalid, nil)
 }
 
-func scopeModeFromProto(mode storagev0.ScopeMode) sessions.Mode {
+func scopeModeFromProto(mode storagev1.ScopeMode) sessions.Mode {
 	switch mode {
-	case storagev0.ScopeMode_SCOPE_MODE_READ:
+	case storagev1.ScopeMode_SCOPE_MODE_READ:
 		return sessions.Read
-	case storagev0.ScopeMode_SCOPE_MODE_INGEST:
+	case storagev1.ScopeMode_SCOPE_MODE_INGEST:
 		return sessions.Ingest
-	case storagev0.ScopeMode_SCOPE_MODE_MAINTENANCE:
+	case storagev1.ScopeMode_SCOPE_MODE_MAINTENANCE:
 		return sessions.Maintenance
 	default:
 		return 0
 	}
 }
 
-func scopeFromProto(scope *storagev0.Scope) sessions.Scope {
+func scopeFromProto(scope *storagev1.Scope) sessions.Scope {
 	return sessions.Scope{Base: scope.GetBase(), Partition: scope.GetPartition(), Scope: scope.GetScope(), Mode: scopeModeFromProto(scope.GetMode())}
 }
 
 // scopedCall is the call an RPC that names a Scope runs against: a store
 // client holding the scope's session, and only that. Every way of not having
 // one is a refusal; nothing here returns the gateway's own backend.
-func (s *Server) scopedCall(ctx context.Context, requested *storagev0.Scope) (*call, error) {
+func (s *Server) scopedCall(ctx context.Context, requested *storagev1.Scope) (*call, error) {
 	if err := s.scopedAvailable(); err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func presignRefused(msg string) error {
 // checkScopedPresign is everything that bounds a URL signed by a scope's
 // session. Signing calls no store, so unlike every other scoped call nothing
 // downstream would refuse these: they are refused here, and never clamped.
-func (s *Server) checkScopedPresign(req *storagev0.PresignRequest) error {
+func (s *Server) checkScopedPresign(req *storagev1.PresignRequest) error {
 	if err := s.scopedAvailable(); err != nil {
 		return err
 	}
@@ -157,11 +157,11 @@ func (s *Server) checkScopedPresign(req *storagev0.PresignRequest) error {
 	}
 	scope := scopeFromProto(req.GetScope())
 	want := sessions.Read
-	if req.GetMethod() == storagev0.PresignMethod_PRESIGN_METHOD_PUT || req.GetMethod() == storagev0.PresignMethod_PRESIGN_METHOD_POST {
+	if req.GetMethod() == storagev1.PresignMethod_PRESIGN_METHOD_PUT || req.GetMethod() == storagev1.PresignMethod_PRESIGN_METHOD_POST {
 		want = sessions.Ingest
 	}
 	switch {
-	case req.GetMethod() == storagev0.PresignMethod_PRESIGN_METHOD_UNSPECIFIED:
+	case req.GetMethod() == storagev1.PresignMethod_PRESIGN_METHOD_UNSPECIFIED:
 		return presignRefused("a scoped URL names its method")
 	case scope.Mode != want:
 		return presignRefused(fmt.Sprintf("a %s URL is signed by the scope's %s session, not its %s session", req.GetMethod(), want, scope.Mode))
@@ -177,7 +177,7 @@ func (s *Server) checkScopedPresign(req *storagev0.PresignRequest) error {
 
 // presign signs with whichever backend the call resolved to, binding the
 // upload's type and size when the request states them.
-func presign(ctx context.Context, c *call, req *storagev0.PresignRequest) (*backend.PresignResult, error) {
+func presign(ctx context.Context, c *call, req *storagev1.PresignRequest) (*backend.PresignResult, error) {
 	method := presignMethodFromProto(req.GetMethod())
 	expiry := time.Duration(req.GetExpirySeconds()) * time.Second
 	bounded := req.GetContentType() != "" || req.GetContentLengthMax() != 0 || req.GetContentLengthMin() != 0 || method == backend.PresignPost

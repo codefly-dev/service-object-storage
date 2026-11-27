@@ -1,6 +1,6 @@
 package objectstorage
 
-import storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+import storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 
 // Layout is the key convention a Store is built on, exported to the tests so
 // they can break it.
@@ -21,4 +21,4 @@ func (s *Store) WithBinder(binder Binder) *Store {
 }
 
 // Client is the gateway client the Store never hands out.
-func (s *Store) Client() storagev0.ObjectStorageClient { return s.client }
+func (s *Store) Client() storagev1.ObjectStorageClient { return s.client }

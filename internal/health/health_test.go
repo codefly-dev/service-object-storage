@@ -18,7 +18,7 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/health"
 )
 
-const serviceName = "codefly.storage.v0.ObjectStorage"
+const serviceName = "codefly.storage.v1.ObjectStorage"
 
 const emptyListing = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>probe</Name><KeyCount>0</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,9 +56,9 @@ func TestStopStopsTheContainersAndKeepsThem(t *testing.T) {
 	rt, fake, calls := newStoppableRuntime(t)
 	network := rt.minioNetwork
 
-	resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	resp, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StopStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StopStatus_SUCCESS, resp.GetStatus().GetState(), resp.GetStatus().GetMessage())
 	require.Equal(t, []string{"stop gateway", "stop minio"}, *calls)
 
 	require.NotNil(t, rt.gatewayEnv, "Destroy still has to remove the gateway")
@@ -73,9 +73,9 @@ func TestStopReportsAContainerItCouldNotStop(t *testing.T) {
 	rt, _, calls := newStoppableRuntime(t)
 	rt.gatewayEnv.(*recordingEnvironment).stopErr = errors.New("daemon unreachable")
 
-	resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	resp, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	require.NoError(t, err, "Stop reports failure in its response, not as a transport error")
-	require.Equal(t, runtimev0.StopStatus_ERROR, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StopStatus_ERROR, resp.GetStatus().GetState())
 	require.Contains(t, resp.GetStatus().GetMessage(), "daemon unreachable")
 	require.Equal(t, []string{"stop gateway", "stop minio"}, *calls)
 }
@@ -90,7 +90,7 @@ func TestStartAfterStopStartsTheSameContainersAgain(t *testing.T) {
 	require.NoError(t, rt.resume(ctx))
 	require.Empty(t, *calls, "containers Init just started are not started again")
 
-	_, err := rt.Stop(ctx, &runtimev0.StopRequest{})
+	_, err := rt.Stop(ctx, &runtimev1.StopRequest{})
 	require.NoError(t, err)
 	*calls = nil
 	require.NoError(t, rt.resume(ctx))
@@ -105,7 +105,7 @@ func TestStartAfterStopStartsTheSameContainersAgain(t *testing.T) {
 // backend that runs no MinIO, has nothing or only the gateway to stop.
 func TestStopWithNothingStartedSucceeds(t *testing.T) {
 	rt := newNetworkRuntime(t, newFakeNetworks())
-	resp, err := rt.Stop(context.Background(), &runtimev0.StopRequest{})
+	resp, err := rt.Stop(context.Background(), &runtimev1.StopRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StopStatus_SUCCESS, resp.GetStatus().GetState())
+	require.Equal(t, runtimev1.StopStatus_SUCCESS, resp.GetStatus().GetState())
 }

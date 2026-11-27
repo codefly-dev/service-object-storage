@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -24,26 +24,26 @@ import (
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
-func newTestClient(t *testing.T) storagev0.ObjectStorageClient {
+func newTestClient(t *testing.T) storagev1.ObjectStorageClient {
 	t.Helper()
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
 	return newTestClientFor(t, be)
 }
 
-func newTestClientFor(t *testing.T, be backend.Backend) storagev0.ObjectStorageClient {
+func newTestClientFor(t *testing.T, be backend.Backend) storagev1.ObjectStorageClient {
 	t.Helper()
 	hub := events.NewHub()
 	t.Cleanup(hub.Close)
 	return newTestClientForServer(t, server.New(be, hub, probetest.Monitor(t, be)))
 }
 
-func newTestClientForServer(t *testing.T, srv *server.Server) storagev0.ObjectStorageClient {
+func newTestClientForServer(t *testing.T, srv *server.Server) storagev1.ObjectStorageClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 
 	s := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(s, srv)
+	storagev1.RegisterObjectStorageServer(s, srv)
 	go func() { _ = s.Serve(lis) }()
 
 	conn, err := grpc.NewClient(
@@ -53,28 +53,28 @@ func newTestClientForServer(t *testing.T, srv *server.Server) storagev0.ObjectSt
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close(); s.Stop() })
-	return storagev0.NewObjectStorageClient(conn)
+	return storagev1.NewObjectStorageClient(conn)
 }
 
-func putObject(t *testing.T, c storagev0.ObjectStorageClient, key string, data []byte, header *storagev0.PutHeader) (*storagev0.PutResult, error) {
+func putObject(t *testing.T, c storagev1.ObjectStorageClient, key string, data []byte, header *storagev1.PutHeader) (*storagev1.PutResult, error) {
 	t.Helper()
 	if header == nil {
-		header = &storagev0.PutHeader{}
+		header = &storagev1.PutHeader{}
 	}
 	header.Key = key
 	header.TotalSize = int64(len(data))
 	st, err := c.Put(context.Background())
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: header}}))
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: data}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: header}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: data}}))
 	return st.CloseAndRecv()
 }
 
-func getObject(t *testing.T, c storagev0.ObjectStorageClient, req *storagev0.GetRequest) (*storagev0.GetHeader, []byte, error) {
+func getObject(t *testing.T, c storagev1.ObjectStorageClient, req *storagev1.GetRequest) (*storagev1.GetHeader, []byte, error) {
 	t.Helper()
 	st, err := c.Get(context.Background(), req)
 	require.NoError(t, err)
-	var hdr *storagev0.GetHeader
+	var hdr *storagev1.GetHeader
 	var body []byte
 	for {
 		msg, rerr := st.Recv()
@@ -96,11 +96,11 @@ func TestPutGetRoundTrip(t *testing.T) {
 	c := newTestClient(t)
 	payload := []byte("hello generic storage")
 
-	pr, err := putObject(t, c, "docs/a.txt", payload, &storagev0.PutHeader{ContentType: "text/plain"})
+	pr, err := putObject(t, c, "docs/a.txt", payload, &storagev1.PutHeader{ContentType: "text/plain"})
 	require.NoError(t, err)
 	require.NotEmpty(t, pr.GetEtag())
 
-	hdr, body, err := getObject(t, c, &storagev0.GetRequest{Key: "docs/a.txt"})
+	hdr, body, err := getObject(t, c, &storagev1.GetRequest{Key: "docs/a.txt"})
 	require.NoError(t, err)
 	require.False(t, hdr.GetNotModified())
 	require.Equal(t, pr.GetEtag(), hdr.GetInfo().GetEtag())
@@ -113,11 +113,11 @@ func TestStatConditionalNotModified(t *testing.T) {
 	pr, err := putObject(t, c, "k", []byte("v"), nil)
 	require.NoError(t, err)
 
-	hdr, err := c.Stat(context.Background(), &storagev0.StatRequest{Key: "k", IfNoneMatch: pr.GetEtag()})
+	hdr, err := c.Stat(context.Background(), &storagev1.StatRequest{Key: "k", IfNoneMatch: pr.GetEtag()})
 	require.NoError(t, err)
 	require.True(t, hdr.GetNotModified())
 
-	_, err = c.Stat(context.Background(), &storagev0.StatRequest{Key: "k", IfMatch: "\"other\""})
+	_, err = c.Stat(context.Background(), &storagev1.StatRequest{Key: "k", IfMatch: "\"other\""})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
@@ -126,23 +126,23 @@ func TestGetRange(t *testing.T) {
 	_, err := putObject(t, c, "r", []byte("0123456789"), nil)
 	require.NoError(t, err)
 
-	_, body, err := getObject(t, c, &storagev0.GetRequest{Key: "r", Range: &storagev0.ByteRange{Offset: 2, Length: 4}})
+	_, body, err := getObject(t, c, &storagev1.GetRequest{Key: "r", Range: &storagev1.ByteRange{Offset: 2, Length: 4}})
 	require.NoError(t, err)
 	require.Equal(t, []byte("2345"), body)
 }
 
 func TestConditionalCreateIfAbsent(t *testing.T) {
 	c := newTestClient(t)
-	_, err := putObject(t, c, "once", []byte("a"), &storagev0.PutHeader{IfNoneMatch: "*"})
+	_, err := putObject(t, c, "once", []byte("a"), &storagev1.PutHeader{IfNoneMatch: "*"})
 	require.NoError(t, err)
 
-	_, err = putObject(t, c, "once", []byte("b"), &storagev0.PutHeader{IfNoneMatch: "*"})
+	_, err = putObject(t, c, "once", []byte("b"), &storagev1.PutHeader{IfNoneMatch: "*"})
 	require.Equal(t, codes.AlreadyExists, status.Code(err))
 }
 
 func TestNotFound(t *testing.T) {
 	c := newTestClient(t)
-	_, err := c.Stat(context.Background(), &storagev0.StatRequest{Key: "missing"})
+	_, err := c.Stat(context.Background(), &storagev1.StatRequest{Key: "missing"})
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
@@ -152,7 +152,7 @@ func TestListWithDelimiter(t *testing.T) {
 		_, err := putObject(t, c, k, []byte("x"), nil)
 		require.NoError(t, err)
 	}
-	res, err := c.List(context.Background(), &storagev0.ListRequest{Delimiter: "/"})
+	res, err := c.List(context.Background(), &storagev1.ListRequest{Delimiter: "/"})
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"a/", "b/"}, res.GetCommonPrefixes())
 	require.Len(t, res.GetObjects(), 1)
@@ -164,16 +164,16 @@ func TestCopyAndDelete(t *testing.T) {
 	_, err := putObject(t, c, "src", []byte("data"), nil)
 	require.NoError(t, err)
 
-	_, err = c.Copy(context.Background(), &storagev0.CopyRequest{SourceKey: "src", DestKey: "dst"})
+	_, err = c.Copy(context.Background(), &storagev1.CopyRequest{SourceKey: "src", DestKey: "dst"})
 	require.NoError(t, err)
 
-	_, body, err := getObject(t, c, &storagev0.GetRequest{Key: "dst"})
+	_, body, err := getObject(t, c, &storagev1.GetRequest{Key: "dst"})
 	require.NoError(t, err)
 	require.Equal(t, []byte("data"), body)
 
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "dst"})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: "dst"})
 	require.NoError(t, err)
-	_, err = c.Stat(context.Background(), &storagev0.StatRequest{Key: "dst"})
+	_, err = c.Stat(context.Background(), &storagev1.StatRequest{Key: "dst"})
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
@@ -184,35 +184,35 @@ func TestConditionalDelete(t *testing.T) {
 	etag := pr.GetEtag()
 
 	// Compare-and-delete against a missing object cannot match its precondition.
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "ghost", IfMatch: etag})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: "ghost", IfMatch: etag})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 
 	// A stale ETag refuses and preserves the object.
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "cad", IfMatch: `"stale"`})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: "cad", IfMatch: `"stale"`})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
-	_, err = c.Stat(context.Background(), &storagev0.StatRequest{Key: "cad"})
+	_, err = c.Stat(context.Background(), &storagev1.StatRequest{Key: "cad"})
 	require.NoError(t, err)
 
 	// An unconditional delete of a missing object stays idempotent.
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "ghost"})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: "ghost"})
 	require.NoError(t, err)
 
 	// The matching ETag deletes.
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "cad", IfMatch: etag})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: "cad", IfMatch: etag})
 	require.NoError(t, err)
-	_, err = c.Stat(context.Background(), &storagev0.StatRequest{Key: "cad"})
+	_, err = c.Stat(context.Background(), &storagev1.StatRequest{Key: "cad"})
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
 func TestPresignAndCapabilities(t *testing.T) {
 	c := newTestClient(t)
-	caps, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{})
+	caps, err := c.Capabilities(context.Background(), &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "mem", caps.GetBackend())
 	require.True(t, caps.GetPresign())
 
-	pr, err := c.Presign(context.Background(), &storagev0.PresignRequest{
-		Key: "k", Method: storagev0.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 3600,
+	pr, err := c.Presign(context.Background(), &storagev1.PresignRequest{
+		Key: "k", Method: storagev1.PresignMethod_PRESIGN_METHOD_GET, ExpirySeconds: 3600,
 	})
 	require.NoError(t, err)
 	require.Contains(t, pr.GetUrl(), "mem://local/k")
@@ -220,17 +220,17 @@ func TestPresignAndCapabilities(t *testing.T) {
 
 func TestNativeUnsupported(t *testing.T) {
 	c := newTestClient(t)
-	_, err := c.Native(context.Background(), &storagev0.NativeRequest{Verb: "set-acl"})
+	_, err := c.Native(context.Background(), &storagev1.NativeRequest{Verb: "set-acl"})
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 }
 
 // startWatch opens a Watch stream and blocks until the subscription is live (the
 // server sends its header after subscribing), so writes issued afterward are
 // guaranteed to be observed.
-func startWatch(t *testing.T, c storagev0.ObjectStorageClient, prefix string) (storagev0.ObjectStorage_WatchClient, context.CancelFunc) {
+func startWatch(t *testing.T, c storagev1.ObjectStorageClient, prefix string) (storagev1.ObjectStorage_WatchClient, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := c.Watch(ctx, &storagev0.WatchRequest{Prefix: prefix})
+	stream, err := c.Watch(ctx, &storagev1.WatchRequest{Prefix: prefix})
 	require.NoError(t, err)
 	_, err = stream.Header()
 	require.NoError(t, err)
@@ -248,23 +248,23 @@ func TestWatchPutDeleteCopy(t *testing.T) {
 	ev, err := stream.Recv()
 	require.NoError(t, err)
 	require.Equal(t, "docs/a.txt", ev.GetKey())
-	require.Equal(t, storagev0.WriteOp_WRITE_OP_PUT, ev.GetOp())
+	require.Equal(t, storagev1.WriteOp_WRITE_OP_PUT, ev.GetOp())
 	require.Equal(t, pr.GetEtag(), ev.GetEtag())
 	require.NotZero(t, ev.GetTimeUnixMs())
 
-	_, err = c.Copy(context.Background(), &storagev0.CopyRequest{SourceKey: "docs/a.txt", DestKey: "docs/b.txt"})
+	_, err = c.Copy(context.Background(), &storagev1.CopyRequest{SourceKey: "docs/a.txt", DestKey: "docs/b.txt"})
 	require.NoError(t, err)
 	ev, err = stream.Recv()
 	require.NoError(t, err)
 	require.Equal(t, "docs/b.txt", ev.GetKey())
-	require.Equal(t, storagev0.WriteOp_WRITE_OP_PUT, ev.GetOp())
+	require.Equal(t, storagev1.WriteOp_WRITE_OP_PUT, ev.GetOp())
 
-	_, err = c.Delete(context.Background(), &storagev0.DeleteRequest{Key: "docs/a.txt"})
+	_, err = c.Delete(context.Background(), &storagev1.DeleteRequest{Key: "docs/a.txt"})
 	require.NoError(t, err)
 	ev, err = stream.Recv()
 	require.NoError(t, err)
 	require.Equal(t, "docs/a.txt", ev.GetKey())
-	require.Equal(t, storagev0.WriteOp_WRITE_OP_DELETE, ev.GetOp())
+	require.Equal(t, storagev1.WriteOp_WRITE_OP_DELETE, ev.GetOp())
 }
 
 func TestWatchPrefixScoped(t *testing.T) {
@@ -291,24 +291,24 @@ func TestWatchDeleteMany(t *testing.T) {
 	}
 	stream, _ := startWatch(t, c, "m/")
 
-	_, err := c.DeleteMany(context.Background(), &storagev0.DeleteManyRequest{Keys: []string{"m/1", "m/2"}})
+	_, err := c.DeleteMany(context.Background(), &storagev1.DeleteManyRequest{Keys: []string{"m/1", "m/2"}})
 	require.NoError(t, err)
 
-	got := map[string]storagev0.WriteOp{}
+	got := map[string]storagev1.WriteOp{}
 	for range 2 {
 		ev, err := stream.Recv()
 		require.NoError(t, err)
 		got[ev.GetKey()] = ev.GetOp()
 	}
-	require.Equal(t, map[string]storagev0.WriteOp{
-		"m/1": storagev0.WriteOp_WRITE_OP_DELETE,
-		"m/2": storagev0.WriteOp_WRITE_OP_DELETE,
+	require.Equal(t, map[string]storagev1.WriteOp{
+		"m/1": storagev1.WriteOp_WRITE_OP_DELETE,
+		"m/2": storagev1.WriteOp_WRITE_OP_DELETE,
 	}, got)
 }
 
 func TestReadyOnReachableBackend(t *testing.T) {
 	c := newTestClient(t)
-	res, err := c.Ready(context.Background(), &storagev0.ReadyRequest{})
+	res, err := c.Ready(context.Background(), &storagev1.ReadyRequest{})
 	require.NoError(t, err)
 	require.True(t, res.GetReady())
 	require.Equal(t, "mem", res.GetBackend())
@@ -322,12 +322,12 @@ func TestReadyOnReachableBackend(t *testing.T) {
 func TestReadySeparatesCapabilitiesFromAccess(t *testing.T) {
 	c := newTestClientFor(t, probetest.UnreachableMinIO(t, "ready"))
 
-	caps, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{})
+	caps, err := c.Capabilities(context.Background(), &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "minio", caps.GetBackend())
 
 	start := time.Now()
-	res, err := c.Ready(context.Background(), &storagev0.ReadyRequest{})
+	res, err := c.Ready(context.Background(), &storagev1.ReadyRequest{})
 	require.NoError(t, err)
 	require.False(t, res.GetReady())
 	require.Equal(t, "Unavailable", res.GetCode())
@@ -365,7 +365,7 @@ func TestReadyDoesNotProbePerCall(t *testing.T) {
 	srv := server.New(counting, hub, fixedReadiness{health.Verdict{Ready: true, CheckedAt: time.Now()}})
 
 	for i := 0; i < 50; i++ {
-		res, err := srv.Ready(context.Background(), &storagev0.ReadyRequest{})
+		res, err := srv.Ready(context.Background(), &storagev1.ReadyRequest{})
 		require.NoError(t, err)
 		require.True(t, res.GetReady())
 	}
@@ -380,7 +380,7 @@ func TestReadyBeforeFirstProbe(t *testing.T) {
 	t.Cleanup(hub.Close)
 	srv := server.New(be, hub, fixedReadiness{})
 
-	res, err := srv.Ready(context.Background(), &storagev0.ReadyRequest{})
+	res, err := srv.Ready(context.Background(), &storagev1.ReadyRequest{})
 	require.NoError(t, err)
 	require.False(t, res.GetReady())
 	require.Equal(t, "Unavailable", res.GetCode())

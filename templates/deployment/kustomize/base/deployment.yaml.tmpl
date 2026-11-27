@@ -119,7 +119,7 @@ rendering it as YAML would ship GCS prose into every s3/azure manifest. */}}
           startupProbe:
             grpc:
               port: 9464
-              service: codefly.storage.v0.ObjectStorage
+              service: codefly.storage.v1.ObjectStorage
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:

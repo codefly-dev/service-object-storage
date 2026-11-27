@@ -17,7 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/server"
 )
 
@@ -34,7 +34,7 @@ func TestReview1235LeadingSlashChangesListedPrefix(t *testing.T) {
 			})
 			b := s3Binding(endpoint)
 			b.Prefix = prefix
-			_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: b})
+			_, err := c.List(context.Background(), &storagev1.ListRequest{Binding: b})
 			require.NoError(t, err)
 			require.Equal(t, prefix, <-sent, "the binding's prefix was rewritten before it reached the store")
 		})
@@ -52,7 +52,7 @@ func TestReview1235TruncatedWithoutTokenAcceptedComplete(t *testing.T) {
 			})
 			b := s3Binding(endpoint)
 			b.Kind = kind
-			res, err := c.List(context.Background(), &storagev0.ListRequest{Binding: b})
+			res, err := c.List(context.Background(), &storagev1.ListRequest{Binding: b})
 			require.Error(t, err, "an incomplete listing was answered as %v", res)
 			require.NotEqual(t, codes.OK, status.Code(err))
 			require.Contains(t, strings.ToLower(status.Convert(err).Message()), "truncated")
@@ -68,7 +68,7 @@ func TestReview1235ListBodyExceedsOldFiveMiBLimit(t *testing.T) {
 	endpoint, c := composedStore(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, "<ListBucketResult>"+strings.Repeat(" ", 6<<20)+"<IsTruncated>false</IsTruncated></ListBucketResult>")
 	})
-	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	_, err := c.List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	require.Equal(t, codes.ResourceExhausted, status.Code(err), "got %v", err)
 	require.Contains(t, status.Convert(err).Message(), "exceeded")
 	requireReason(t, err, codes.ResourceExhausted, "RESPONSE_TOO_LARGE")
@@ -82,7 +82,7 @@ func TestReview1235ListDoesNotEnforceReturnedObjectLimit(t *testing.T) {
 		}
 		_, _ = fmt.Fprint(w, "<IsTruncated>false</IsTruncated></ListBucketResult>")
 	})
-	res, err := c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	res, err := c.List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	require.Equal(t, codes.ResourceExhausted, status.Code(err), "got %d objects, %v", len(res.GetObjects()), err)
 	require.Contains(t, status.Convert(err).Message(), "1001 entries for a page of at most 1000")
 	info, _ := requireReason(t, err, codes.ResourceExhausted, "LISTING_TOO_LONG")
@@ -112,14 +112,14 @@ func TestReview1235SlowBodyOutlivesOldTimeout(t *testing.T) {
 		stall(w, r, "alpha")
 	})
 	start := time.Now()
-	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	_, err := c.List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	require.Error(t, err)
 	require.Less(t, time.Since(start), 3*time.Second, "a stalled listing body held the call")
 	require.Contains(t, status.Convert(err).Message(), "did not complete the operation within")
 	requireReason(t, err, codes.Unavailable, "OPERATION_DEADLINE")
 
 	start = time.Now()
-	_, err = getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev0.GetManyItem{{Key: "a"}}})
+	_, err = getMany(t, c, &storagev1.GetManyRequest{Binding: s3Binding(endpoint), Items: []*storagev1.GetManyItem{{Key: "a"}}})
 	require.Error(t, err)
 	require.Less(t, time.Since(start), 3*time.Second, "a stalled object body held the batch")
 }
@@ -135,12 +135,12 @@ func TestBoundGetManyHasAWholeCallDeadline(t *testing.T) {
 		w.Header().Set("Content-Length", "5")
 		_, _ = fmt.Fprint(w, "alpha")
 	})
-	items := make([]*storagev0.GetManyItem, 6)
+	items := make([]*storagev1.GetManyItem, 6)
 	for i := range items {
-		items[i] = &storagev0.GetManyItem{Key: fmt.Sprintf("k%d", i)}
+		items[i] = &storagev1.GetManyItem{Key: fmt.Sprintf("k%d", i)}
 	}
 	start := time.Now()
-	got, err := getMany(t, c, &storagev0.GetManyRequest{Binding: s3Binding(endpoint), Items: items})
+	got, err := getMany(t, c, &storagev1.GetManyRequest{Binding: s3Binding(endpoint), Items: items})
 	require.Equal(t, codes.Unavailable, status.Code(err), "got %d items, %v", len(got), err)
 	require.Contains(t, status.Convert(err).Message(), "deadline")
 	require.Less(t, len(got), len(items))
@@ -153,7 +153,7 @@ func TestBoundGetManyHasAWholeCallDeadline(t *testing.T) {
 func TestBoundQualificationRunsUnderTheCallDeadline(t *testing.T) {
 	defer server.SetBoundOperationTimeout(time.Nanosecond)()
 	endpoint, c := composedStore(t, func(http.ResponseWriter, *http.Request) {})
-	_, err := c.Capabilities(context.Background(), &storagev0.CapabilitiesRequest{Binding: s3Binding(endpoint)})
+	_, err := c.Capabilities(context.Background(), &storagev1.CapabilitiesRequest{Binding: s3Binding(endpoint)})
 	require.Equal(t, codes.Unavailable, status.Code(err), "qualification ran outside the call deadline: %v", err)
 	require.Contains(t, status.Convert(err).Message(), "does not resolve")
 }

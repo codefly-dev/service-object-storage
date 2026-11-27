@@ -21,15 +21,15 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/codefly-dev/core/callertoken"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/resources"
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/codefly-dev/core/wool"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 )
 
 // gatewayContainerPort is the port the gateway listens on inside its container
@@ -138,12 +138,12 @@ func NewRuntime() *Runtime {
 	}
 }
 
-func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
+func (s *Runtime) Load(ctx context.Context, req *runtimev1.LoadRequest) (*runtimev1.LoadResponse, error) {
 	defer s.Wool.Catch()
 	return s.Runtime.LoadService(ctx, req, services.RuntimeLoad{
 		Settings:     s.Settings,
 		Requirements: requirements,
-		ResolveEndpoints: func(ctx context.Context, endpoints []*basev0.Endpoint) error {
+		ResolveEndpoints: func(ctx context.Context, endpoints []*basev1.Endpoint) error {
 			endpoint, err := resolveServingGRPCEndpoint(ctx, endpoints)
 			if err != nil {
 				return s.Wool.Wrapf(err, "cannot find grpc endpoint")
@@ -162,7 +162,7 @@ func (s *Runtime) runsLocalMinIO() bool {
 	return s.conf.backend == "" || s.conf.backend == "minio"
 }
 
-func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
+func (s *Runtime) Init(ctx context.Context, req *runtimev1.InitRequest) (*runtimev1.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -649,7 +649,7 @@ func (s *Runtime) startGateway(ctx context.Context, hostPort uint16) error {
 // service, as a container reaches it — the gateway runs in one. These are the
 // endpoints a binding may name although they are not public; nothing else is
 // added, so a service with no dependency admits none.
-func composedEndpoints(ctx context.Context, mappings []*basev0.NetworkMapping) []string {
+func composedEndpoints(ctx context.Context, mappings []*basev1.NetworkMapping) []string {
 	var out []string
 	for _, mapping := range mappings {
 		instance := resources.FilterNetworkInstance(ctx, mapping.GetInstances(), resources.NewContainerNetworkAccess())
@@ -661,7 +661,7 @@ func composedEndpoints(ctx context.Context, mappings []*basev0.NetworkMapping) [
 	return out
 }
 
-func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
+func (s *Runtime) Start(ctx context.Context, req *runtimev1.StartRequest) (*runtimev1.StartResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	if err := s.resume(ctx); err != nil {
@@ -696,7 +696,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 		return s.Wool.Wrapf(err, "cannot create gateway client for %s", address)
 	}
 	defer func() { _ = conn.Close() }()
-	client := storagev0.NewObjectStorageClient(conn)
+	client := storagev1.NewObjectStorageClient(conn)
 
 	start := time.Now()
 	budget, cancel := context.WithTimeout(ctx, readinessBudget)
@@ -715,7 +715,7 @@ poll:
 		}
 
 		attempt, attemptCancel := context.WithTimeout(budget, readinessProbeTimeout)
-		res, callErr := client.Ready(attempt, &storagev0.ReadyRequest{})
+		res, callErr := client.Ready(attempt, &storagev1.ReadyRequest{})
 		attemptCancel()
 
 		switch {
@@ -758,7 +758,7 @@ poll:
 // touch at all; removing the containers and the network is Destroy's (and, for
 // a run nobody runs again, the caller's). Every step runs even when an earlier
 // one fails, as in teardown.
-func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
+func (s *Runtime) Stop(ctx context.Context, req *runtimev1.StopRequest) (*runtimev1.StopResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	var errs []error
@@ -801,7 +801,7 @@ func (s *Runtime) resume(ctx context.Context) error {
 	return nil
 }
 
-func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
+func (s *Runtime) Destroy(ctx context.Context, req *runtimev1.DestroyRequest) (*runtimev1.DestroyResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 	if err := s.teardown(ctx); err != nil {
@@ -810,7 +810,7 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 	return s.Runtime.DestroyResponse()
 }
 
-func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
+func (s *Runtime) Test(ctx context.Context, req *runtimev1.TestRequest) (*runtimev1.TestResponse, error) {
 	// A RUN-LEVEL verdict, stated. This agent ships no tests of its own -- it
 	// runs a datastore -- so the honest run is zero tests and zero failures,
 	// which is what the status-only answer always meant. It has to be said:
@@ -821,8 +821,8 @@ func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtim
 	if err != nil {
 		return nil, err
 	}
-	response.Result = &runtimev0.TestRunResult{
-		State:   runtimev0.TestRunResult_PASSED,
+	response.Result = &runtimev1.TestRunResult{
+		State:   runtimev1.TestRunResult_PASSED,
 		Message: "this agent ships no tests of its own: zero run, zero failed",
 	}
 	return response, nil

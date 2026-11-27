@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codefly-dev/core/runners/dockerrun"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
@@ -140,8 +141,13 @@ const minioProbeTimeout = 60 * time.Second
 func (p dockerProbeRunner) run(ctx context.Context, user, dir string) (result minioProbeRun, err error) {
 	ctx, cancel := context.WithTimeout(ctx, minioProbeTimeout)
 	defer cancel()
+	labels, err := dockerrun.EphemeralContainerLabels("minio-custody-probe")
+	if err != nil {
+		return result, err
+	}
 	created, err := p.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Config: &container.Config{
 		Image:      p.image,
+		Labels:     labels,
 		User:       user,
 		Entrypoint: []string{"/bin/sh", "-c", minioProbeScript},
 		Cmd:        []string{},

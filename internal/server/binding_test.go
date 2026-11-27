@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/s3"
@@ -28,11 +28,11 @@ func named(srv *httptest.Server) string {
 	return "http://localhost:" + srv.URL[strings.LastIndex(srv.URL, ":")+1:]
 }
 
-func s3Binding(endpoint string) *storagev0.Binding {
-	return &storagev0.Binding{
+func s3Binding(endpoint string) *storagev1.Binding {
+	return &storagev1.Binding{
 		Kind: "s3", Endpoint: endpoint, Bucket: "tenant", Prefix: "docs/",
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{
-			AccessKey: &storagev0.AccessKey{Id: "id", Secret: "secret"},
+		Credential: &storagev1.Credential{Kind: &storagev1.Credential_AccessKey{
+			AccessKey: &storagev1.AccessKey{Id: "id", Secret: "secret"},
 		}},
 	}
 }
@@ -44,13 +44,13 @@ func TestBoundCallRefusesALoopbackEndpointByName(t *testing.T) {
 	ctx := context.Background()
 	b := s3Binding("http://localhost:9000")
 
-	_, err := c.Stat(ctx, &storagev0.StatRequest{Key: "a", Binding: b})
+	_, err := c.Stat(ctx, &storagev1.StatRequest{Key: "a", Binding: b})
 	requireRefused(t, err)
-	_, err = c.List(ctx, &storagev0.ListRequest{Binding: b})
+	_, err = c.List(ctx, &storagev1.ListRequest{Binding: b})
 	requireRefused(t, err)
-	_, err = c.Capabilities(ctx, &storagev0.CapabilitiesRequest{Binding: b})
+	_, err = c.Capabilities(ctx, &storagev1.CapabilitiesRequest{Binding: b})
 	requireRefused(t, err)
-	_, _, err = getObject(t, c, &storagev0.GetRequest{Key: "a", Binding: b})
+	_, _, err = getObject(t, c, &storagev1.GetRequest{Key: "a", Binding: b})
 	requireRefused(t, err)
 }
 
@@ -90,7 +90,7 @@ func TestCapabilitiesReportsTheBoundKindAndCaps(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()
 
-	bound, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{Binding: s3Binding("")})
+	bound, err := c.Capabilities(ctx, &storagev1.CapabilitiesRequest{Binding: s3Binding("")})
 	require.NoError(t, err)
 	require.Equal(t, "s3", bound.GetBackend())
 	require.True(t, bound.GetVersions())
@@ -100,7 +100,7 @@ func TestCapabilitiesReportsTheBoundKindAndCaps(t *testing.T) {
 	require.EqualValues(t, 1000, bound.GetMaxListLimit())
 	require.EqualValues(t, 1000, bound.GetMaxGetManyItems())
 
-	own, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	own, err := c.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err)
 	require.Equal(t, "mem", own.GetBackend())
 	require.Zero(t, own.GetMaxObjectBytes())
@@ -111,7 +111,7 @@ func TestBindingRefusesAKindWithNoRemoteStore(t *testing.T) {
 	c := newTestClient(t)
 	b := s3Binding("")
 	b.Kind = "mem"
-	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: b})
+	_, err := c.List(context.Background(), &storagev1.ListRequest{Binding: b})
 	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
 	requireReason(t, err, codes.InvalidArgument, "BINDING_INVALID")
 }
@@ -131,17 +131,17 @@ func TestBoundCallReachesOnlyAComposedNonPublicEndpoint(t *testing.T) {
 	be, err := mem.New(context.Background(), backend.Config{})
 	require.NoError(t, err)
 	admitting := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
-	_, err = admitting.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	_, err = admitting.List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	require.NoError(t, err)
 
-	_, err = newTestClient(t).List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	_, err = newTestClient(t).List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 }
 
-func gcsTokenBinding(endpoint, token string) *storagev0.Binding {
-	return &storagev0.Binding{
+func gcsTokenBinding(endpoint, token string) *storagev1.Binding {
+	return &storagev1.Binding{
 		Kind: "gcs", Endpoint: endpoint, Bucket: "tenant",
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessToken{AccessToken: token}},
+		Credential: &storagev1.Credential{Kind: &storagev1.Credential_AccessToken{AccessToken: token}},
 	}
 }
 
@@ -165,7 +165,7 @@ func TestBoundGCSAccessTokenIsTheBearerAndTheStoreJudgesIt(t *testing.T) {
 	require.NoError(t, err)
 	c := newTestClientForServer(t, server.New(be, events.NewHub(), probetest.Monitor(t, be)).AdmitComposed(composed))
 
-	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(endpoint, "ya29.expired")})
+	_, err = c.List(context.Background(), &storagev1.ListRequest{Binding: gcsTokenBinding(endpoint, "ya29.expired")})
 	require.Equal(t, codes.PermissionDenied, status.Code(err), "got %v", err)
 	require.Contains(t, status.Convert(err).Message(), "Invalid Credentials")
 	require.NotEmpty(t, bearers)
@@ -174,7 +174,7 @@ func TestBoundGCSAccessTokenIsTheBearerAndTheStoreJudgesIt(t *testing.T) {
 	}
 
 	seen := len(bearers)
-	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: gcsTokenBinding(endpoint, "")})
+	_, err = c.List(context.Background(), &storagev1.ListRequest{Binding: gcsTokenBinding(endpoint, "")})
 	require.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
 	require.Len(t, bearers, seen, "a missing token must not reach the store")
 }

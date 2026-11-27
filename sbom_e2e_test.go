@@ -23,7 +23,7 @@ import (
 	"testing"
 
 	"github.com/codefly-dev/core/agents/services/sbom"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
 )
 
 func TestImageSBOMInventoriesTheGatewayImage(t *testing.T) {
@@ -61,11 +61,11 @@ func TestImageSBOMInventoriesTheGatewayImage(t *testing.T) {
 		t.Errorf("override subject is not pinned: %v", err)
 	}
 
-	resp, err := builder.SBOM(context.Background(), &builderv0.SBOMRequest{Scope: builderv0.SBOMScope_SBOM_SCOPE_IMAGE})
+	resp, err := builder.SBOM(context.Background(), &builderv1.SBOMRequest{Scope: builderv1.SBOMScope_SBOM_SCOPE_IMAGE})
 	if err != nil {
 		t.Fatalf("SBOM: %v", err)
 	}
-	if state := resp.GetState().GetState(); state != builderv0.SBOMStatus_COMPLETE {
+	if state := resp.GetState().GetState(); state != builderv1.SBOMStatus_COMPLETE {
 		t.Fatalf("state = %v: %s", state, resp.GetState().GetMessage())
 	}
 	if err := sbom.ValidateCoverage(testService, subjects, resp); err != nil {

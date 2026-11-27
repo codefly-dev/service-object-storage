@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"slices"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -23,7 +23,7 @@ type Issuer struct {
 
 // Issue returns a read credential for one scope of the admitted caller.
 // Even callers admitted for writes receive a SELECT-equivalent session here.
-func (issuer Issuer) Issue(ctx context.Context, base string, binding objectstorage.Binding, scope string) (*storagev0.Binding, error) {
+func (issuer Issuer) Issue(ctx context.Context, base string, binding objectstorage.Binding, scope string) (*storagev1.Binding, error) {
 	if issuer.Endpoint == "" || issuer.AccessKey == "" || issuer.SecretKey == "" {
 		return nil, errors.New("a MinIO reader issuer requires an endpoint and credentials")
 	}
@@ -54,6 +54,6 @@ func (issuer Issuer) Issue(ctx context.Context, base string, binding objectstora
 	if issued.SessionToken == "" || issued.AccessKeyID == "" || issued.SecretAccessKey == "" || issued.AccessKeyID == issuer.AccessKey {
 		return nil, errors.New("MinIO did not issue temporary session credentials")
 	}
-	return &storagev0.Binding{Kind: "minio", Endpoint: issuer.Endpoint, Region: issuer.Region, Bucket: issuer.Bucket, Prefix: issuer.Prefix,
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{Id: issued.AccessKeyID, Secret: issued.SecretAccessKey, SessionToken: issued.SessionToken}}}}, nil
+	return &storagev1.Binding{Kind: "minio", Endpoint: issuer.Endpoint, Region: issuer.Region, Bucket: issuer.Bucket, Prefix: issuer.Prefix,
+		Credential: &storagev1.Credential{Kind: &storagev1.Credential_AccessKey{AccessKey: &storagev1.AccessKey{Id: issued.AccessKeyID, Secret: issued.SecretAccessKey, SessionToken: issued.SessionToken}}}}, nil
 }

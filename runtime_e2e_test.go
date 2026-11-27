@@ -8,10 +8,7 @@
 //
 //	SOS_GATEWAY_IMAGE=<locally-built gateway image> go test -tags e2e .
 //
-// The gateway image is a prerequisite because the release pipeline that
-// publishes ghcr.io/codefly-dev/service-object-storage is a separate workstream;
-// the test points the Runtime at a locally-built image through the same
-// SOS_GATEWAY_IMAGE override the Runtime already honors.
+// The Put/Get test uses the agent's locked gateway when the override is unset.
 package main
 
 import (
@@ -35,9 +32,9 @@ import (
 	"time"
 
 	"github.com/codefly-dev/core/callertoken"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
-	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
+	builderv1 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v1"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/network"
 	"github.com/codefly-dev/core/resources"
 	dockerrun "github.com/codefly-dev/core/runners/dockerrun"
@@ -48,16 +45,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 )
 
 // TestRuntimeEndToEndPutGet scaffolds a service through the Builder, drives the
 // Runtime lifecycle against the real containers, and round-trips bytes through
 // the started gateway — the honest end-to-end path a consumer takes.
 func TestRuntimeEndToEndPutGet(t *testing.T) {
-	if os.Getenv("SOS_GATEWAY_IMAGE") == "" {
-		t.Skip("SOS_GATEWAY_IMAGE not set; skipping agent-runtime end-to-end test")
-	}
 	ctx := context.Background()
 
 	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
@@ -71,11 +65,11 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	destroyed := false
 	defer func() {
 		if !destroyed {
-			_, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+			_, _ = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 		}
 	}()
 
-	init, err := rt.Init(ctx, &runtimev0.InitRequest{
+	init, err := rt.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
 	})
@@ -86,11 +80,11 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 	// fault. Asserting only NoError walks on with a nil gatewayEnv and dies in a
 	// nil dereference below that says nothing about the actual cause (an image
 	// that cannot be pulled, say); this surfaces the message instead.
-	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 
-	start, err := rt.Start(ctx, &runtimev0.StartRequest{})
+	start, err := rt.Start(ctx, &runtimev1.StartRequest{})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.StartStatus_STARTED, start.GetStatus().GetState(), start.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.StartStatus_STARTED, start.GetStatus().GetState(), start.GetStatus().GetMessage())
 
 	// A consumer running in its own container reaches the gateway through
 	// host.docker.internal, which resolves to the bridge gateway on Linux — a
@@ -134,27 +128,27 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 		callertoken.DialOption(token))
 	require.NoError(t, err)
 	defer conn.Close()
-	client := storagev0.NewObjectStorageClient(conn)
+	client := storagev1.NewObjectStorageClient(conn)
 
 	key := "e2e/hello.txt"
 	payload := []byte("real bytes through the agent runtime")
 
 	st, err := client.Put(ctx)
 	require.NoError(t, err)
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: &storagev0.PutHeader{
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: &storagev1.PutHeader{
 		Key:         key,
 		TotalSize:   int64(len(payload)),
 		ContentType: "text/plain",
 	}}}))
-	require.NoError(t, st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: payload}}))
+	require.NoError(t, st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: payload}}))
 	pr, err := st.CloseAndRecv()
 	require.NoError(t, err)
 	require.NotEmpty(t, pr.GetEtag())
 
-	gs, err := client.Get(ctx, &storagev0.GetRequest{Key: key})
+	gs, err := client.Get(ctx, &storagev1.GetRequest{Key: key})
 	require.NoError(t, err)
 	var body []byte
-	var hdr *storagev0.GetHeader
+	var hdr *storagev1.GetHeader
 	for {
 		msg, rerr := gs.Recv()
 		if rerr == io.EOF {
@@ -180,7 +174,7 @@ func TestRuntimeEndToEndPutGet(t *testing.T) {
 
 	// Teardown owns exactly what it started: both containers — including the
 	// only place the session token lives — and the network they shared.
-	_, err = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+	_, err = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
 	destroyed = true
 	requireContainerRemoved(t, gatewayID)
@@ -212,7 +206,7 @@ func requireContainerRemoved(t *testing.T, containerID string) {
 
 // requireTokenIsSecret asserts the gateway credential is carried as a
 // secret-marked configuration value, so nothing downstream logs or renders it.
-func requireTokenIsSecret(t *testing.T, conf *basev0.Configuration, token string) {
+func requireTokenIsSecret(t *testing.T, conf *basev1.Configuration, token string) {
 	t.Helper()
 	for _, info := range conf.GetInfos() {
 		for _, value := range info.GetConfigurationValues() {
@@ -241,48 +235,48 @@ func requireUnauthenticatedPeerIsRefused(t *testing.T, endpoint string) {
 		conn, err := grpc.NewClient(endpoint,
 			append(extra, grpc.WithTransportCredentials(insecure.NewCredentials()))...)
 		require.NoError(t, err)
-		client := storagev0.NewObjectStorageClient(conn)
+		client := storagev1.NewObjectStorageClient(conn)
 
-		for rpcName, call := range map[string]func(context.Context, storagev0.ObjectStorageClient) error{
-			"Capabilities": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+		for rpcName, call := range map[string]func(context.Context, storagev1.ObjectStorageClient) error{
+			"Capabilities": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 				return err
 			},
-			"Stat": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Stat(ctx, &storagev0.StatRequest{Key: "e2e/hello.txt"})
+			"Stat": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Stat(ctx, &storagev1.StatRequest{Key: "e2e/hello.txt"})
 				return err
 			},
-			"Delete": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Delete(ctx, &storagev0.DeleteRequest{Key: "e2e/hello.txt"})
+			"Delete": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Delete(ctx, &storagev1.DeleteRequest{Key: "e2e/hello.txt"})
 				return err
 			},
-			"Presign": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				_, err := c.Presign(ctx, &storagev0.PresignRequest{Key: "e2e/hello.txt", ExpirySeconds: 60})
+			"Presign": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				_, err := c.Presign(ctx, &storagev1.PresignRequest{Key: "e2e/hello.txt", ExpirySeconds: 60})
 				return err
 			},
-			"Put": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
+			"Put": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
 				st, sErr := c.Put(ctx)
 				if sErr != nil {
 					return sErr
 				}
-				if sErr = st.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{
-					Header: &storagev0.PutHeader{Key: "e2e/intruder.txt", TotalSize: 4},
+				if sErr = st.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{
+					Header: &storagev1.PutHeader{Key: "e2e/intruder.txt", TotalSize: 4},
 				}}); sErr != nil && sErr != io.EOF {
 					return sErr
 				}
 				_, sErr = st.CloseAndRecv()
 				return sErr
 			},
-			"Get": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				st, sErr := c.Get(ctx, &storagev0.GetRequest{Key: "e2e/hello.txt"})
+			"Get": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				st, sErr := c.Get(ctx, &storagev1.GetRequest{Key: "e2e/hello.txt"})
 				if sErr != nil {
 					return sErr
 				}
 				_, sErr = st.Recv()
 				return sErr
 			},
-			"Watch": func(ctx context.Context, c storagev0.ObjectStorageClient) error {
-				st, sErr := c.Watch(ctx, &storagev0.WatchRequest{})
+			"Watch": func(ctx context.Context, c storagev1.ObjectStorageClient) error {
+				st, sErr := c.Watch(ctx, &storagev1.WatchRequest{})
 				if sErr != nil {
 					return sErr
 				}
@@ -309,7 +303,7 @@ func requireUnauthenticatedPeerIsRefused(t *testing.T, endpoint string) {
 // Runtime's readiness probe and the test reach the gateway at localhost:<hostPort>;
 // the gateway container still resolves MinIO through the host.docker.internal
 // bridge address dockerrun injects.
-func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.NetworkMapping, *basev0.RuntimeContext) {
+func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev1.NetworkMapping, *basev1.RuntimeContext) {
 	t.Helper()
 
 	// Keep all persistent test data outside the developer's real Codefly home.
@@ -322,7 +316,7 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 	service := resources.Service{Name: serviceName, Version: "test-me"}
 	require.NoError(t, service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name)))
 
-	identity := &basev0.ServiceIdentity{
+	identity := &basev1.ServiceIdentity{
 		Name:                service.Name,
 		Version:             service.Version,
 		Module:              "mod",
@@ -332,13 +326,13 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 	}
 
 	builder := NewBuilder()
-	_, err = builder.Load(ctx, &builderv0.LoadRequest{
+	_, err = builder.Load(ctx, &builderv1.LoadRequest{
 		DisableCatch: true,
 		Identity:     identity,
-		CreationMode: &builderv0.CreationMode{Communicate: false},
+		CreationMode: &builderv1.CreationMode{Communicate: false},
 	})
 	require.NoError(t, err)
-	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
+	_, err = builder.Create(ctx, &builderv1.CreateRequest{})
 	require.NoError(t, err)
 
 	rt := NewRuntime()
@@ -349,7 +343,7 @@ func loadedRuntime(t *testing.T, ctx context.Context) (*Runtime, []*basev0.Netwo
 
 	env := resources.LocalEnvironment()
 
-	_, err = rt.Load(ctx, &runtimev0.LoadRequest{
+	_, err = rt.Load(ctx, &runtimev1.LoadRequest{
 		Identity:     identity,
 		Environment:  shared.Must(env.Proto()),
 		DisableCatch: true,
@@ -422,21 +416,21 @@ func TestGCSCredentialProjection(t *testing.T) {
 	digest := fmt.Sprintf("%x", sha256.Sum256(key))
 
 	rt, networkMappings, runtimeContext := loadedRuntime(t, ctx)
-	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
+	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{}) }()
 
-	init, err := rt.Init(ctx, &runtimev0.InitRequest{
+	init, err := rt.Init(ctx, &runtimev1.InitRequest{
 		RuntimeContext:          runtimeContext,
 		ProposedNetworkMappings: networkMappings,
-		Configuration: &basev0.Configuration{Infos: []*basev0.ConfigurationInformation{{
+		Configuration: &basev1.Configuration{Infos: []*basev1.ConfigurationInformation{{
 			Name: "object-storage",
-			ConfigurationValues: []*basev0.ConfigurationValue{
+			ConfigurationValues: []*basev1.ConfigurationValue{
 				{Key: "SOS_BACKEND", Value: "gcs"},
 				{Key: "SOS_GCS_CREDENTIALS_FILE", Value: keyFile},
 			},
 		}}},
 	})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 	require.Nil(t, rt.minioEnv, "a gcs run must not stand up the local MinIO fixture")
 
 	projected := rt.gcsCredentialsHostFile
@@ -479,7 +473,7 @@ func TestGCSCredentialProjection(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, key, onHost, "the operator's key must be untouched")
 
-	_, err = rt.Destroy(ctx, &runtimev0.DestroyRequest{})
+	_, err = rt.Destroy(ctx, &runtimev1.DestroyRequest{})
 	require.NoError(t, err)
 	_, err = os.Stat(projected)
 	require.True(t, os.IsNotExist(err), "Destroy must remove the projected key from the host")

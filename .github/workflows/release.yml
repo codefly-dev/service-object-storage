@@ -35,6 +35,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go test ./...
+      - name: Round-trip an object through the locked gateway
+        run: env -u SOS_GATEWAY_IMAGE go test -tags e2e -run '^TestRuntimeEndToEndPutGet$' -count=1 -timeout 5m .
 
   gateway-image:
     needs: test

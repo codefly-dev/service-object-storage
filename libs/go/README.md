@@ -11,7 +11,7 @@ github.com/codefly-dev/service-object-storage/libs/go/objectkey         the key 
 github.com/codefly-dev/service-object-storage/libs/go/objectscopetest   Prove and RequireLayout, for a module's own suite
 ```
 
-It speaks to the gateway over `codefly/storage/v0`, like every other client.
+It speaks to the gateway over `codefly/storage/v1`, like every other client.
 The Store links no cloud SDK. To issue scoped MinIO read sessions, pass
 `WithReaderSessions(miniosession.Issuer{...})` at the composition root. The
 issuer uses the MinIO SDK and the Store passes the resulting credential to
@@ -95,7 +95,7 @@ the gateway is called, so a refusal says nothing about what exists.
 ```go
 // Composition root. The client is dialed once and given to the Store; no
 // handler ever sees it.
-store, err := objectstorage.NewStore(storagev0.NewObjectStorageClient(conn), "files", binder)
+store, err := objectstorage.NewStore(storagev1.NewObjectStorageClient(conn), "files", binder)
 
 // A handler. The Binding was derived from the verified caller by the binder;
 // the handler names no mode.
@@ -231,7 +231,7 @@ grace alone.
 ```go
 // Composition root of the job that owns departures. Not a Store, not built
 // from a Binding, and no Store method returns one.
-maintain, err := objectstorage.NewMaintenance(storagev0.NewObjectStorageClient(conn), "files")
+maintain, err := objectstorage.NewMaintenance(storagev1.NewObjectStorageClient(conn), "files")
 
 // Hand over what they had, then remove it: every scope of the partition.
 err = maintain.ExportPrincipal(ctx, partition, "human:01HZX3", func(info objectstorage.Info, open func(context.Context) (io.ReadCloser, error)) error {

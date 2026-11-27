@@ -18,7 +18,7 @@ import (
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/codefly-dev/core/callertoken"
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/config"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -95,7 +95,7 @@ func run() error {
 		}
 		gateway.WithScoped(scoped)
 	}
-	storagev0.RegisterObjectStorageServer(grpcServer, gateway)
+	storagev1.RegisterObjectStorageServer(grpcServer, gateway)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -154,7 +154,7 @@ func serveHealth(ctx context.Context, srv *grpc.Server, store backend.Backend, c
 	healthv1.RegisterHealthServer(srv, hs)
 	hs.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
 
-	monitor := health.New(store, hs, storagev0.ObjectStorage_ServiceDesc.ServiceName,
+	monitor := health.New(store, hs, storagev1.ObjectStorage_ServiceDesc.ServiceName,
 		cfg.Interval, cfg.Timeout)
 	go monitor.Run(ctx)
 	return monitor

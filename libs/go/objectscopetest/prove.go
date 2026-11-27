@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	objectstorage "github.com/codefly-dev/service-object-storage/libs/go"
 	"github.com/codefly-dev/service-object-storage/libs/go/objectkey"
 )
@@ -48,7 +48,7 @@ type Confined interface {
 type Proof struct {
 	// Client is the gateway client. The proof seeds and inspects with it,
 	// outside any binding; it never asserts confinement through it.
-	Client storagev0.ObjectStorageClient
+	Client storagev1.ObjectStorageClient
 	// Base is the store's base. The proof writes only under partitions it
 	// names itself, and erases them when it ends.
 	Base string
@@ -241,10 +241,10 @@ func (p *prover) raw(key objectkey.Key, body string) {
 	}
 	stream, err := p.proof.Client.Put(p.ctx)
 	if err == nil {
-		err = stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Header{Header: &storagev0.PutHeader{Key: physical, TotalSize: int64(len(body))}}})
+		err = stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Header{Header: &storagev1.PutHeader{Key: physical, TotalSize: int64(len(body))}}})
 	}
 	if err == nil {
-		err = stream.Send(&storagev0.PutRequest{Kind: &storagev0.PutRequest_Data{Data: []byte(body)}})
+		err = stream.Send(&storagev1.PutRequest{Kind: &storagev1.PutRequest_Data{Data: []byte(body)}})
 	}
 	if err == nil {
 		_, err = stream.CloseAndRecv()
@@ -641,7 +641,7 @@ func (p *prover) compare(after string) {
 		}
 		token := ""
 		for {
-			listed, err := p.proof.Client.List(p.ctx, &storagev0.ListRequest{Prefix: prefix, PageToken: token})
+			listed, err := p.proof.Client.List(p.ctx, &storagev1.ListRequest{Prefix: prefix, PageToken: token})
 			if err != nil {
 				p.t.Fatalf("objectscopetest: inspect the store: %v", err)
 			}
@@ -681,7 +681,7 @@ func (p *prover) compare(after string) {
 
 func (p *prover) fetch(physical string) string {
 	p.t.Helper()
-	stream, err := p.proof.Client.Get(p.ctx, &storagev0.GetRequest{Key: physical})
+	stream, err := p.proof.Client.Get(p.ctx, &storagev1.GetRequest{Key: physical})
 	if err != nil {
 		p.t.Fatalf("objectscopetest: inspect %s: %v", physical, err)
 	}
@@ -709,7 +709,7 @@ type LayoutReporter interface {
 // under a partition, a scope and a principal the module knows, and unless the
 // gateway holds nothing outside the declared bases. Pass every base the
 // module uses on this gateway.
-func RequireLayout(t LayoutReporter, ctx context.Context, client storagev0.ObjectStorageClient, known objectstorage.Known, bases ...string) {
+func RequireLayout(t LayoutReporter, ctx context.Context, client storagev1.ObjectStorageClient, known objectstorage.Known, bases ...string) {
 	t.Helper()
 	if len(bases) == 0 {
 		t.Fatalf("objectscopetest: at least one base is required")

@@ -16,7 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/azure"
 	_ "github.com/codefly-dev/service-object-storage/internal/backend/gcs"
@@ -96,12 +96,12 @@ func TestEveryBindableBackendSendsThroughTheBoundClient(t *testing.T) {
 // absent one is refused rather than replaced by the gateway's own identity.
 func TestBindingRequiresItsOwnCredential(t *testing.T) {
 	for kind := range bindableKinds {
-		_, _, err := boundConfig(context.Background(), &storagev0.Binding{Kind: kind, Bucket: "data", Endpoint: "https://8.8.8.8"}, nil)
+		_, _, err := boundConfig(context.Background(), &storagev1.Binding{Kind: kind, Bucket: "data", Endpoint: "https://8.8.8.8"}, nil)
 		require.ErrorContains(t, err, "requires", kind)
 	}
-	cfg, _, err := boundConfig(context.Background(), &storagev0.Binding{
+	cfg, _, err := boundConfig(context.Background(), &storagev1.Binding{
 		Kind: "s3", Bucket: "data",
-		Credential: &storagev0.Credential{Kind: &storagev0.Credential_AccessKey{AccessKey: &storagev0.AccessKey{Id: "id", Secret: "secret", SessionToken: "temporary-session"}}},
+		Credential: &storagev1.Credential{Kind: &storagev1.Credential_AccessKey{AccessKey: &storagev1.AccessKey{Id: "id", Secret: "secret", SessionToken: "temporary-session"}}},
 	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, "temporary-session", cfg.SessionToken)

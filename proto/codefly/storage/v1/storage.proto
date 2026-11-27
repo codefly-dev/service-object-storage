@@ -1,14 +1,14 @@
 syntax = "proto3";
 
-// Package codefly.storage.v0 is the generic object-storage data plane: one
+// Package codefly.storage.v1 is the generic object-storage data plane: one
 // uniform API a client speaks, that a single server translates to S3, GCS,
 // Azure Blob, or MinIO behind it. No provider is ever named in this API — the
 // client never links a cloud SDK. The surface is the honest intersection the
 // industry converged on (OpenDAL / gocloud.dev/blob / object_store); anything
 // backend-specific lives behind Native().
-package codefly.storage.v0;
+package codefly.storage.v1;
 
-option go_package = "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0;storagev0";
+option go_package = "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1;storagev1";
 
 // ObjectInfo is the object's metadata, including the validators a consumer
 // needs for conditional reads. ETag is an OPAQUE strong validator, never a

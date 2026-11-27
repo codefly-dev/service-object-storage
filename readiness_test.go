@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 	"github.com/codefly-dev/service-object-storage/internal/backend"
 	"github.com/codefly-dev/service-object-storage/internal/backend/mem"
 	"github.com/codefly-dev/service-object-storage/internal/events"
@@ -31,7 +31,7 @@ func serveGateway(t *testing.T, be backend.Backend) string {
 	require.NoError(t, err)
 
 	srv := grpc.NewServer()
-	storagev0.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
+	storagev1.RegisterObjectStorageServer(srv, server.New(be, hub, probetest.Monitor(t, be)))
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
 
@@ -40,27 +40,27 @@ func serveGateway(t *testing.T, be backend.Backend) string {
 
 // runtimeAt returns a loaded Runtime whose gRPC endpoint maps to address over
 // the given access kinds.
-func runtimeAt(t *testing.T, address string, access ...*basev0.NetworkAccess) *Runtime {
+func runtimeAt(t *testing.T, address string, access ...*basev1.NetworkAccess) *Runtime {
 	t.Helper()
 	rt := NewRuntime()
-	require.NoError(t, rt.HeadlessLoad(context.Background(), &basev0.ServiceIdentity{
+	require.NoError(t, rt.HeadlessLoad(context.Background(), &basev1.ServiceIdentity{
 		Workspace: "readiness", Module: "module", Name: "storage", Version: "0.0.0",
 	}))
 	rt.Runtime.WithContext(resources.NewRuntimeContextNative())
-	rt.GrpcEndpoint = &basev0.Endpoint{Name: "grpc", Module: "module", Service: "storage", Api: "grpc"}
+	rt.GrpcEndpoint = &basev1.Endpoint{Name: "grpc", Module: "module", Service: "storage", Api: "grpc"}
 
 	host, port, err := net.SplitHostPort(address)
 	require.NoError(t, err)
 	p, err := net.LookupPort("tcp", port)
 	require.NoError(t, err)
 
-	instances := make([]*basev0.NetworkInstance, 0, len(access))
+	instances := make([]*basev1.NetworkInstance, 0, len(access))
 	for _, a := range access {
 		inst := resources.NewNetworkInstance(host, uint16(p))
 		inst.Access = a
 		instances = append(instances, inst)
 	}
-	rt.NetworkMappings = []*basev0.NetworkMapping{{Endpoint: rt.GrpcEndpoint, Instances: instances}}
+	rt.NetworkMappings = []*basev1.NetworkMapping{{Endpoint: rt.GrpcEndpoint, Instances: instances}}
 	return rt
 }
 
@@ -75,13 +75,13 @@ func TestWaitForReadyRejectsUnreachableBackend(t *testing.T) {
 	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
-	client := storagev0.NewObjectStorageClient(conn)
+	client := storagev1.NewObjectStorageClient(conn)
 
-	caps, err := client.Capabilities(ctx, &storagev0.CapabilitiesRequest{})
+	caps, err := client.Capabilities(ctx, &storagev1.CapabilitiesRequest{})
 	require.NoError(t, err, "Capabilities is static introspection and still answers")
 	require.Equal(t, "minio", caps.GetBackend())
 
-	ready, err := client.Ready(ctx, &storagev0.ReadyRequest{})
+	ready, err := client.Ready(ctx, &storagev1.ReadyRequest{})
 	require.NoError(t, err)
 	require.False(t, ready.GetReady())
 	require.Equal(t, "Unavailable", ready.GetCode())
@@ -124,7 +124,7 @@ func TestWaitForReadyUsesNativeNetworkView(t *testing.T) {
 	// A container instance the agent cannot resolve, alongside the native one.
 	container := resources.NewNetworkInstance("host.docker.internal", 1)
 	container.Access = resources.NewContainerNetworkAccess()
-	rt.NetworkMappings[0].Instances = append([]*basev0.NetworkInstance{container}, rt.NetworkMappings[0].Instances...)
+	rt.NetworkMappings[0].Instances = append([]*basev1.NetworkInstance{container}, rt.NetworkMappings[0].Instances...)
 	rt.Runtime.WithContext(resources.NewRuntimeContextContainer())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

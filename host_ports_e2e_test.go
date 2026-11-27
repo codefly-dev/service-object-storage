@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	runtimev1 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/stretchr/testify/require"
 )
@@ -25,7 +25,7 @@ func TestInitHoldsTheGatewayPortUntilTheGatewayStarts(t *testing.T) {
 	}
 	ctx := context.Background()
 	rt, mappings, runtimeContext := loadedRuntime(t, ctx)
-	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev0.DestroyRequest{}) }()
+	defer func() { _, _ = rt.Destroy(context.Background(), &runtimev1.DestroyRequest{}) }()
 
 	assigned, err := resources.FindNetworkInstanceInNetworkMappings(ctx, mappings, rt.GrpcEndpoint, resources.NewNativeNetworkAccess())
 	require.NoError(t, err)
@@ -45,9 +45,9 @@ func TestInitHoldsTheGatewayPortUntilTheGatewayStarts(t *testing.T) {
 		}
 	}
 
-	init, err := rt.Init(ctx, &runtimev0.InitRequest{RuntimeContext: runtimeContext, ProposedNetworkMappings: mappings})
+	init, err := rt.Init(ctx, &runtimev1.InitRequest{RuntimeContext: runtimeContext, ProposedNetworkMappings: mappings})
 	require.NoError(t, err)
-	require.Equal(t, runtimev0.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
+	require.Equal(t, runtimev1.InitStatus_READY, init.GetStatus().GetState(), init.GetStatus().GetMessage())
 	require.Equal(t, []string{"minio", "gateway"}, started)
 	require.False(t, rt.ports.holds(gateway))
 	require.False(t, rt.ports.holds(rt.minioHostPort))

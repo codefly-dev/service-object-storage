@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	storagev0 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v0"
+	storagev1 "github.com/codefly-dev/service-object-storage/gen/codefly/storage/v1"
 )
 
 // slowDown answers every request the way S3 throttles, with Retry-After when
@@ -33,14 +33,14 @@ func slowDown(retryAfter string) http.HandlerFunc {
 // the store's own Retry-After when it sent one, a marked default otherwise.
 func TestThrottleNamesItsReasonAndRetryDelay(t *testing.T) {
 	endpoint, c := composedStore(t, slowDown("7"))
-	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	_, err := c.List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	info, retry := requireReason(t, err, codes.ResourceExhausted, "STORE_THROTTLED")
 	require.NotNil(t, retry, "a throttle carries no retry information")
 	require.Equal(t, 7*time.Second, retry.GetRetryDelay().AsDuration())
 	require.Equal(t, "store", info.GetMetadata()["retry_delay_source"])
 
 	endpoint, c = composedStore(t, slowDown(""))
-	_, err = c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	_, err = c.List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	info, retry = requireReason(t, err, codes.ResourceExhausted, "STORE_THROTTLED")
 	require.NotNil(t, retry)
 	require.Equal(t, time.Second, retry.GetRetryDelay().AsDuration())
@@ -53,14 +53,14 @@ func TestThrottleNamesItsReasonAndRetryDelay(t *testing.T) {
 // them. The message is unchanged by the reason beside it.
 func TestTheSameCodeNamesDifferentReasons(t *testing.T) {
 	endpoint, throttled := composedStore(t, slowDown("2"))
-	_, throttle := throttled.Stat(context.Background(), &storagev0.StatRequest{Key: "a", Binding: s3Binding(endpoint)})
+	_, throttle := throttled.Stat(context.Background(), &storagev1.StatRequest{Key: "a", Binding: s3Binding(endpoint)})
 
 	endpoint, c := composedStore(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("ETag", `"etag"`)
 		w.Header().Set("Content-Length", fmt.Sprint(6<<20))
 		_, _ = io.WriteString(w, strings.Repeat("x", 6<<20))
 	})
-	_, _, capped := getObject(t, c, &storagev0.GetRequest{Key: "big.bin", Binding: s3Binding(endpoint)})
+	_, _, capped := getObject(t, c, &storagev1.GetRequest{Key: "big.bin", Binding: s3Binding(endpoint)})
 
 	require.Equal(t, status.Code(throttle), status.Code(capped), "both are RESOURCE_EXHAUSTED")
 	_, retry := requireReason(t, throttle, codes.ResourceExhausted, "STORE_THROTTLED")
@@ -80,10 +80,10 @@ func TestStoreRejectedCredentialNamesItsReason(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `<Error><Code>InvalidAccessKeyId</Code><Message>The access key you provided does not exist.</Message></Error>`)
 	})
-	_, err := c.List(context.Background(), &storagev0.ListRequest{Binding: s3Binding(endpoint)})
+	_, err := c.List(context.Background(), &storagev1.ListRequest{Binding: s3Binding(endpoint)})
 	requireReason(t, err, codes.PermissionDenied, "CREDENTIAL_REJECTED")
 
-	_, err = newTestClient(t).List(context.Background(), &storagev0.ListRequest{Binding: s3Binding("http://localhost:9000")})
+	_, err = newTestClient(t).List(context.Background(), &storagev1.ListRequest{Binding: s3Binding("http://localhost:9000")})
 	requireReason(t, err, codes.PermissionDenied, "DESTINATION_REFUSED")
 }
 
@@ -91,12 +91,12 @@ func TestStoreRejectedCredentialNamesItsReason(t *testing.T) {
 func TestUnboundRefusalsNameTheirReasons(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()
-	_, err := c.Stat(ctx, &storagev0.StatRequest{Key: "missing"})
+	_, err := c.Stat(ctx, &storagev1.StatRequest{Key: "missing"})
 	requireReason(t, err, codes.NotFound, "OBJECT_NOT_FOUND")
 
 	_, err = putObject(t, c, "a", []byte("alpha"), nil)
 	require.NoError(t, err)
-	_, err = c.Stat(ctx, &storagev0.StatRequest{Key: "a", IfMatch: "stale"})
+	_, err = c.Stat(ctx, &storagev1.StatRequest{Key: "a", IfMatch: "stale"})
 	requireReason(t, err, codes.FailedPrecondition, "PRECONDITION_FAILED")
 	require.Equal(t, "if-match: etag mismatch", status.Convert(err).Message())
 }
@@ -110,7 +110,7 @@ func TestWatchDropNamesItsReason(t *testing.T) {
 	for i := range keys {
 		keys[i] = fmt.Sprintf("k%d", i)
 	}
-	_, err := c.DeleteMany(context.Background(), &storagev0.DeleteManyRequest{Keys: keys})
+	_, err := c.DeleteMany(context.Background(), &storagev1.DeleteManyRequest{Keys: keys})
 	require.NoError(t, err)
 	for {
 		if _, err = stream.Recv(); err != nil {
