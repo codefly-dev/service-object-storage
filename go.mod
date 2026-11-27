@@ -13,7 +13,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.28
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.116.0
 	github.com/aws/smithy-go v1.28.10
-	github.com/codefly-dev/core v0.19.38-0.20261126202006-b858e99a7bad
+	github.com/codefly-dev/core v0.19.38-0.20261127003102-b91ad64a9de8
 	github.com/containerd/errdefs v1.0.0
 	github.com/gofrs/flock v0.13.2
 	github.com/minio/minio-go/v7 v7.4.1

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,9 +19,11 @@ import (
 	basev1 "github.com/codefly-dev/core/generated/go/codefly/base/v1"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/runners/dockerrun"
+	"github.com/codefly-dev/core/runners/recoveryscope"
 	"github.com/gofrs/flock"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/require"
 )
 
@@ -392,4 +395,33 @@ func TestMinIORejectsUserMappingBeforeCustodyMutation(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(home, "object-storage"))
 	require.NoError(t, err)
 	require.Empty(t, entries, "rejected mapping must not create even a custody lock")
+}
+
+func TestMinIOUserProbeDeclaresRecoveryAtCreation(t *testing.T) {
+	t.Setenv(recoveryscope.EnvironmentVariable, "")
+	scope, err := dockerrun.NewContainerRecoveryScope(t.TempDir(), t.TempDir(), "probe-test")
+	require.NoError(t, err)
+	require.NoError(t, dockerrun.SetContainerRecoveryScope(scope))
+	var config container.Config
+	create := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/containers/create") {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+			t.Error(err)
+		}
+		http.Error(w, "end of create inspection", http.StatusBadRequest)
+	}))
+	defer create.Close()
+	cli, err := client.New(client.WithHost("tcp://"+create.Listener.Addr().String()), client.WithAPIVersion("1.48"))
+	require.NoError(t, err)
+	defer cli.Close()
+	_, err = (dockerProbeRunner{cli: cli, image: "minio"}).run(t.Context(), "0:0", t.TempDir())
+	require.Error(t, err)
+	require.Equal(t, "minio", config.Image)
+	require.Equal(t, "true", config.Labels[dockerrun.LabelCodeflyEphemeral])
+	require.Equal(t, strconv.Itoa(os.Getpid()), config.Labels[dockerrun.LabelCodeflySession])
+	require.NotEmpty(t, config.Labels[dockerrun.LabelCodeflyRecoveryScope])
+	require.NotEmpty(t, config.Labels[dockerrun.LabelCodeflyRecoveryNamespace])
 }
